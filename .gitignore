@@ -1,0 +1,64 @@
+# ─── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+
+# ─── Virtual environments ─────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+.env/
+
+# ─── Environment variables / secrets ─────────────────────────────────────────
+.env
+.env.*
+*.env
+!.env.example
+
+# ─── Secrets ──────────────────────────────────────────────────────────────────
+data/.secret_key
+
+# ─── Database ─────────────────────────────────────────────────────────────────
+data/mw.db
+data/mw.db-journal
+data/mw.db-shm
+data/mw.db-wal
+*.db
+*.sqlite
+*.sqlite3
+
+# ─── Uploads (user-generated content, not source) ────────────────────────────
+data/uploads/
+
+# ─── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ─── macOS ────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# ─── Editor ───────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ─── Testing / coverage ───────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ─── Miscellaneous ─────────────────────────────────────────────────────────────
+DEPLOYMENT.md
