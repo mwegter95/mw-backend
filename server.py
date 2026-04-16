@@ -143,8 +143,14 @@ def init_db():
 
 # ─── Auth helpers ─────────────────────────────────────────────────────────────
 
-def make_token(user_id):
-    payload = {"sub": user_id, "exp": datetime.datetime.utcnow() + ACCESS_TTL}
+def make_token(user_id, user=None):
+    payload = {
+        "sub": user_id,
+        "exp": datetime.datetime.utcnow() + ACCESS_TTL,
+    }
+    if user:
+        payload["email"]        = user["email"]
+        payload["display_name"] = user["display_name"]
     return jwt.encode(payload, SECRET_KEY, algorithm="HS256")
 
 def _resolve_principal():
@@ -216,7 +222,7 @@ def auth_register():
     user = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
     # Migrate any existing device data into this new account
     _claim_device(db, str(user["id"]), d.get("device_token"))
-    return jsonify({"token": make_token(user["id"]), "user": _user_dict(user)}), 201
+    return jsonify({"token": make_token(user["id"], user=user), "user": _user_dict(user)}), 201
 
 
 @app.post("/auth/login")
@@ -231,7 +237,7 @@ def auth_login():
     if not user or not bcrypt.checkpw(pw.encode(), user["password_hash"].encode()):
         return jsonify({"error": "Invalid email or password"}), 401
     _claim_device(db, str(user["id"]), d.get("device_token"))
-    return jsonify({"token": make_token(user["id"]), "user": _user_dict(user)})
+    return jsonify({"token": make_token(user["id"], user=user), "user": _user_dict(user)})
 
 
 @app.get("/auth/me")
@@ -355,7 +361,7 @@ def auth_reset_password():
     db.execute("UPDATE password_reset_tokens SET used=1 WHERE token=?", (token,))
     db.commit()
     user = db.execute("SELECT * FROM users WHERE id=?", (row["user_id"],)).fetchone()
-    return jsonify({"token": make_token(user["id"]), "user": _user_dict(user)})
+    return jsonify({"token": make_token(user["id"], user=user), "user": _user_dict(user)})
 
 # ─── Gallery: full state ──────────────────────────────────────────────────────
 
