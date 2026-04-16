@@ -15,6 +15,8 @@ import sqlite3
 import secrets
 import datetime
 import mimetypes
+import subprocess
+import tempfile
 from pathlib import Path
 from functools import wraps
 
@@ -37,13 +39,16 @@ PORT       = int(os.environ.get("PORT", 5050))
 ACCESS_TTL = datetime.timedelta(days=7)
 
 # Allowed frontend origins (add Netlify URL once deployed)
-_CORS_ORIGINS = [o for o in [
+_CORS_ORIGINS = list({o for o in [
     "http://localhost:5173",
     "http://localhost:4173",
     "http://localhost:3000",
+    "https://mwegter95.github.io",
+    "https://michaelwegter.com",
+    "https://www.michaelwegter.com",
     os.environ.get("FRONTEND_URL", ""),
     os.environ.get("PORTFOLIO_URL", ""),
-] if o]
+] if o})
 
 # ─── Secret key ───────────────────────────────────────────────────────────────
 
@@ -423,6 +428,29 @@ def gallery_put_library_image(lib_id):
     path = UPLOADS_DIR / "library" / f"{lib_id}.{ext}"
     path.write_bytes(buf)
     return jsonify({"url": f"/uploads/library/{lib_id}.{ext}"})
+
+# ─── HEIC → JPEG conversion ──────────────────────────────────────────────────
+
+@app.post("/api/heic-to-jpeg")
+def heic_to_jpeg():
+    """Accepts a HEIC file upload (multipart field 'file') and returns JPEG bytes."""
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "No file provided"}), 400
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "input.heic")
+        dst = os.path.join(tmp, "output.jpg")
+        f.save(src)
+        result = subprocess.run(
+            ["sips", "-s", "format", "jpeg", src, "--out", dst],
+            capture_output=True, timeout=30
+        )
+        if result.returncode != 0 or not os.path.exists(dst):
+            return jsonify({"error": "HEIC conversion failed"}), 500
+        with open(dst, "rb") as fh:
+            jpeg_bytes = fh.read()
+    from flask import Response
+    return Response(jpeg_bytes, mimetype="image/jpeg")
 
 # ─── Static uploads ───────────────────────────────────────────────────────────
 
