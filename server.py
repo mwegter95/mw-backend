@@ -433,24 +433,30 @@ def gallery_put_library_image(lib_id):
 
 @app.post("/api/heic-to-jpeg")
 def heic_to_jpeg():
-    """Accepts a HEIC file upload (multipart field 'file') and returns JPEG bytes."""
-    f = request.files.get("file")
-    if not f:
-        return jsonify({"error": "No file provided"}), 400
-    with tempfile.TemporaryDirectory() as tmp:
-        src = os.path.join(tmp, "input.heic")
-        dst = os.path.join(tmp, "output.jpg")
-        f.save(src)
-        result = subprocess.run(
-            ["sips", "-s", "format", "jpeg", src, "--out", dst],
-            capture_output=True, timeout=30
-        )
-        if result.returncode != 0 or not os.path.exists(dst):
-            return jsonify({"error": "HEIC conversion failed"}), 500
-        with open(dst, "rb") as fh:
-            jpeg_bytes = fh.read()
+    """Accepts a HEIC file — either multipart/form-data field 'file' or raw octet-stream body."""
+    import io
+    from pillow_heif import register_heif_opener
+    from PIL import Image
     from flask import Response
-    return Response(jpeg_bytes, mimetype="image/jpeg")
+
+    # Support both multipart upload and raw binary body
+    f = request.files.get("file")
+    if f:
+        data = f.read()
+    elif request.data:
+        data = request.data
+    else:
+        return jsonify({"error": "No file provided"}), 400
+
+    try:
+        register_heif_opener()
+        img = Image.open(io.BytesIO(data))
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=90)
+        buf.seek(0)
+    except Exception as e:
+        return jsonify({"error": f"HEIC conversion failed: {e}"}), 500
+    return Response(buf.read(), mimetype="image/jpeg")
 
 # ─── Static uploads ───────────────────────────────────────────────────────────
 

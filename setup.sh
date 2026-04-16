@@ -12,24 +12,38 @@ echo "║   mw-backend  ·  First-time Setup   ║"
 echo "╚══════════════════════════════════════╝"
 echo ""
 
-# 1. Python check
-if ! command -v python3 &>/dev/null; then
+# 1. Python check — try python3, python, then py (Windows launcher)
+#    Use -c to verify the command actually runs (avoids Windows Store stubs)
+if command -v python3 &>/dev/null && python3 -c "import sys" 2>/dev/null; then
+  PYTHON=python3
+elif command -v python &>/dev/null && python -c "import sys" 2>/dev/null; then
+  PYTHON=python
+elif command -v py &>/dev/null && py -c "import sys" 2>/dev/null; then
+  PYTHON=py
+else
   echo "✗ Python 3 not found. Install from https://python.org"
   exit 1
 fi
-echo "✓ Python $(python3 --version)"
+echo "✓ Python $($PYTHON --version)"
 
 # 2. Virtual environment
 if [ ! -d "venv" ]; then
   echo "→ Creating virtual environment..."
-  python3 -m venv venv
+  $PYTHON -m venv venv
 fi
 echo "✓ Virtual environment ready"
 
+# Resolve venv bin path (bin on Unix/macOS, Scripts on Windows)
+if [ -d "venv/Scripts" ]; then
+  VENV_BIN=venv/Scripts
+else
+  VENV_BIN=venv/bin
+fi
+
 # 3. Install dependencies
 echo "→ Installing dependencies..."
-./venv/bin/pip install --quiet --upgrade pip
-./venv/bin/pip install --quiet -r requirements.txt
+./$VENV_BIN/pip install --quiet --upgrade pip
+./$VENV_BIN/pip install --quiet -r requirements.txt
 echo "✓ Dependencies installed"
 
 # 4. .env file
@@ -66,6 +80,9 @@ else
   echo ""
   if [[ "$OSTYPE" == "darwin"* ]]; then
     echo "   brew install cloudflare/cloudflare/cloudflared"
+  elif [[ "$OSTYPE" == "msys"* || "$OSTYPE" == "cygwin"* || "$OS" == "Windows_NT" ]]; then
+    echo "   # Windows — run in PowerShell:"
+    echo "   Invoke-WebRequest -Uri 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe' -OutFile \"\$env:LOCALAPPDATA\\Microsoft\\WindowsApps\\cloudflared.exe\""
   else
     echo "   curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared"
     echo "   chmod +x /usr/local/bin/cloudflared"

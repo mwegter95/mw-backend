@@ -13,10 +13,17 @@ cd "$(dirname "$0")"
 
 PORT=${PORT:-5050}
 
+# Resolve venv bin path (bin on Unix/macOS, Scripts on Windows)
+if [ -d "venv/Scripts" ]; then
+  VENV_BIN=venv/Scripts
+else
+  VENV_BIN=venv/bin
+fi
+
 # Start the Flask server in background
 echo ""
 echo "→ Starting mw-backend on port $PORT..."
-./venv/bin/python server.py &
+./$VENV_BIN/python server.py &
 SERVER_PID=$!
 echo "  PID: $SERVER_PID"
 
