@@ -17,6 +17,7 @@ import datetime
 import mimetypes
 import subprocess
 import tempfile
+import urllib.request as _urllib_req
 from pathlib import Path
 from functools import wraps
 
@@ -34,9 +35,12 @@ UPLOADS_DIR  = DATA_DIR / "uploads"
 for d in [DATA_DIR, UPLOADS_DIR / "walls", UPLOADS_DIR / "pieces", UPLOADS_DIR / "library"]:
     d.mkdir(parents=True, exist_ok=True)
 
-DB_PATH    = DATA_DIR / "mw.db"
-PORT       = int(os.environ.get("PORT", 5050))
-ACCESS_TTL = datetime.timedelta(days=7)
+DB_PATH           = DATA_DIR / "mw.db"
+PORT              = int(os.environ.get("PORT", 5050))
+ACCESS_TTL        = datetime.timedelta(hours=24)
+RESET_TOKEN_TTL_H = int(os.environ.get("RESET_TOKEN_TTL_HOURS", 1))
+GAS_WEBHOOK_URL   = os.environ.get("GAS_WEBHOOK_URL", "")  # Google Apps Script email sender
+FRONTEND_BASE     = os.environ.get("FRONTEND_URL", "https://mwegter95.github.io")
 
 # Allowed frontend origins (add Netlify URL once deployed)
 _CORS_ORIGINS = list({o for o in [
@@ -96,6 +100,14 @@ CREATE TABLE IF NOT EXISTS gallery_layouts (
     pieces      TEXT NOT NULL,   -- JSON array
     updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (wall_id, owner_type, owner_id, name)
+);
+
+-- Password reset tokens
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    token       TEXT PRIMARY KEY,
+    user_id     INTEGER NOT NULL,
+    expires_at  DATETIME NOT NULL,
+    used        INTEGER DEFAULT 0
 );
 
 -- Gallery piece library
@@ -252,6 +264,98 @@ def _claim_device(db, user_id, device_token):
 
 def _user_dict(u):
     return {"id": u["id"], "email": u["email"], "display_name": u["display_name"]}
+
+
+def _send_reset_email(to_email, reset_url):
+    """POSTs to the Google Apps Script webhook to send the reset email."""
+    if not GAS_WEBHOOK_URL:
+        print(f"[forgot-password] GAS_WEBHOOK_URL not set. Reset URL: {reset_url}")
+        return
+    plain = (
+        f"You requested a password reset for your Gallery Wall Planner account.\n\n"
+        f"Click the link below to reset your password (valid for {RESET_TOKEN_TTL_H} hour(s)):\n\n"
+        f"{reset_url}\n\n"
+        f"If you did not request this, you can ignore this email."
+    )
+    html = f"""
+<div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:24px;color:#222">
+  <h2 style="margin-top:0">Reset your password</h2>
+  <p>You requested a password reset for your <strong>Gallery Wall Planner</strong> account.</p>
+  <p>This link expires in {RESET_TOKEN_TTL_H} hour(s).</p>
+  <p style="margin:28px 0">
+    <a href="{reset_url}"
+       style="background:#6c8ebf;color:#fff;padding:12px 24px;border-radius:6px;
+              text-decoration:none;font-weight:600;display:inline-block">
+      Reset Password
+    </a>
+  </p>
+  <p style="font-size:12px;color:#666">
+    Or paste this link into your browser:<br>
+    <a href="{reset_url}" style="color:#6c8ebf">{reset_url}</a>
+  </p>
+  <hr style="border:none;border-top:1px solid #eee;margin:24px 0">
+  <p style="font-size:11px;color:#999">If you did not request this, you can safely ignore this email.</p>
+</div>
+"""
+    payload = json.dumps({"to": to_email, "subject": "Reset your Gallery Wall password", "body": plain, "htmlBody": html}).encode()
+    req = _urllib_req.Request(GAS_WEBHOOK_URL, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        _urllib_req.urlopen(req, timeout=10)
+    except Exception as e:
+        print(f"[forgot-password] Email send failed: {e}")
+
+
+@app.post("/auth/forgot-password")
+def auth_forgot_password():
+    d     = request.get_json(silent=True) or {}
+    email = (d.get("email") or "").strip().lower()
+    if not email:
+        return jsonify({"error": "email required"}), 400
+    db   = get_db()
+    user = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+    # Always return 200 to prevent email enumeration
+    if not user:
+        return jsonify({"ok": True})
+    # Invalidate old tokens for this user
+    db.execute("UPDATE password_reset_tokens SET used=1 WHERE user_id=? AND used=0", (user["id"],))
+    token      = secrets.token_urlsafe(32)
+    expires_at = (datetime.datetime.utcnow() + datetime.timedelta(hours=RESET_TOKEN_TTL_H)).isoformat()
+    db.execute("INSERT INTO password_reset_tokens (token, user_id, expires_at) VALUES (?,?,?)",
+               (token, user["id"], expires_at))
+    db.commit()
+    reset_url = f"{FRONTEND_BASE}?reset_token={token}"
+    _send_reset_email(email, reset_url)
+    return jsonify({"ok": True})
+
+
+@app.post("/auth/reset-password")
+def auth_reset_password():
+    d        = request.get_json(silent=True) or {}
+    token    = (d.get("token") or "").strip()
+    password = d.get("password") or ""
+    if not token or not password:
+        return jsonify({"error": "token and password required"}), 400
+    if len(password) < 8:
+        return jsonify({"error": "Password must be at least 8 characters"}), 400
+    db  = get_db()
+    row = db.execute(
+        "SELECT * FROM password_reset_tokens WHERE token=? AND used=0", (token,)
+    ).fetchone()
+    if not row:
+        return jsonify({"error": "Invalid or expired reset link"}), 400
+    # Check expiry
+    expires = datetime.datetime.fromisoformat(row["expires_at"])
+    if datetime.datetime.utcnow() > expires:
+        db.execute("UPDATE password_reset_tokens SET used=1 WHERE token=?", (token,))
+        db.commit()
+        return jsonify({"error": "Reset link has expired. Please request a new one."}), 400
+    # Update password
+    new_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    db.execute("UPDATE users SET password_hash=? WHERE id=?", (new_hash, row["user_id"]))
+    db.execute("UPDATE password_reset_tokens SET used=1 WHERE token=?", (token,))
+    db.commit()
+    user = db.execute("SELECT * FROM users WHERE id=?", (row["user_id"],)).fetchone()
+    return jsonify({"token": make_token(user["id"]), "user": _user_dict(user)})
 
 # ─── Gallery: full state ──────────────────────────────────────────────────────
 
