@@ -30,11 +30,8 @@ echo "  PID: $SERVER_PID"
 # Optional Cloudflare Tunnel
 if [ "$1" = "--tunnel" ]; then
   echo ""
-  echo "→ Starting Cloudflare Tunnel..."
-  # If you've set up a named tunnel (recommended), use:
-  #   cloudflared tunnel run mw-backend
-  # Otherwise a quick temporary tunnel (URL changes on restart):
-  cloudflared tunnel --url http://localhost:$PORT &
+  echo "→ Starting Cloudflare Tunnel (named: mw-backend → api.michaelwegter.com)..."
+  cloudflared tunnel run mw-backend &
   TUNNEL_PID=$!
   echo "  Tunnel PID: $TUNNEL_PID"
 fi
