@@ -17,6 +17,7 @@ import datetime
 import mimetypes
 import subprocess
 import tempfile
+import traceback
 import urllib.request as _urllib_req
 from pathlib import Path
 from functools import wraps
@@ -70,6 +71,17 @@ SECRET_KEY = _get_secret()
 
 app = Flask(__name__)
 CORS(app, origins=_CORS_ORIGINS, supports_credentials=True)
+
+from werkzeug.exceptions import HTTPException
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    """Return JSON instead of HTML for unhandled non-HTTP exceptions."""
+    if isinstance(e, HTTPException):
+        return e  # let Flask handle normal HTTP errors normally
+    tb = traceback.format_exc()
+    print(f"[unhandled exception]\n{tb}", flush=True)
+    return jsonify({"error": "Internal server error", "detail": str(e)}), 500
 
 # ─── Database ─────────────────────────────────────────────────────────────────
 
@@ -232,12 +244,17 @@ def auth_login():
     pw    = d.get("password") or ""
     if not email or not pw:
         return jsonify({"error": "email and password required"}), 400
-    db   = get_db()
-    user = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
-    if not user or not bcrypt.checkpw(pw.encode(), user["password_hash"].encode()):
-        return jsonify({"error": "Invalid email or password"}), 401
-    _claim_device(db, str(user["id"]), d.get("device_token"))
-    return jsonify({"token": make_token(user["id"], user=user), "user": _user_dict(user)})
+    try:
+        db   = get_db()
+        user = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+        if not user or not bcrypt.checkpw(pw.encode(), user["password_hash"].encode()):
+            return jsonify({"error": "Invalid email or password"}), 401
+        _claim_device(db, str(user["id"]), d.get("device_token"))
+        return jsonify({"token": make_token(user["id"], user=user), "user": _user_dict(user)})
+    except Exception:
+        tb = traceback.format_exc()
+        print(f"[auth/login ERROR]\n{tb}", flush=True)
+        return jsonify({"error": "Login failed due to a server error. Please try again."}), 500
 
 
 @app.get("/auth/me")
@@ -403,7 +420,8 @@ def gallery_put_wall(wall_id):
     now = datetime.datetime.utcnow().isoformat()
     db.execute(
         "INSERT INTO gallery_walls (id, owner_type, owner_id, data, updated_at) VALUES (?,?,?,?,?) "
-        "ON CONFLICT(id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at",
+        "ON CONFLICT(id) DO UPDATE SET owner_type=excluded.owner_type, owner_id=excluded.owner_id, "
+        "data=excluded.data, updated_at=excluded.updated_at",
         (wall_id, g.owner_type, g.owner_id, json.dumps(request.get_json()), now)
     )
     db.commit()
