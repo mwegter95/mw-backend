@@ -10,7 +10,9 @@ Run:
 """
 
 import os
+import sys
 import json
+import logging
 import sqlite3
 import secrets
 import datetime
@@ -67,7 +69,22 @@ def _get_secret():
 
 SECRET_KEY = _get_secret()
 
-# ─── Flask app ────────────────────────────────────────────────────────────────
+# ─── Logging ──────────────────────────────────────────────────────────────────
+# Force stdout to be unbuffered so print() shows up immediately in the terminal.
+sys.stdout.reconfigure(line_buffering=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    stream=sys.stdout,
+)
+log = logging.getLogger("mw-backend")
+
+# Make Werkzeug (Flask dev server) request logs visible too
+logging.getLogger("werkzeug").setLevel(logging.INFO)
+logging.getLogger("werkzeug").handlers = []   # remove default stderr handler
+logging.getLogger("werkzeug").addHandler(logging.StreamHandler(sys.stdout))
 
 app = Flask(__name__)
 CORS(app, origins=_CORS_ORIGINS, supports_credentials=True)
@@ -80,7 +97,7 @@ def handle_exception(e):
     if isinstance(e, HTTPException):
         return e  # let Flask handle normal HTTP errors normally
     tb = traceback.format_exc()
-    print(f"[unhandled exception]\n{tb}", flush=True)
+    log.error("[unhandled exception] %s\n%s", str(e), tb)
     return jsonify({"error": "Internal server error", "detail": str(e)}), 500
 
 # ─── Database ─────────────────────────────────────────────────────────────────
@@ -248,12 +265,14 @@ def auth_login():
         db   = get_db()
         user = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
         if not user or not bcrypt.checkpw(pw.encode(), user["password_hash"].encode()):
+            log.warning("[auth/login] failed for email=%s", email)
             return jsonify({"error": "Invalid email or password"}), 401
+        log.info("[auth/login] success for email=%s user_id=%s", email, user["id"])
         _claim_device(db, str(user["id"]), d.get("device_token"))
         return jsonify({"token": make_token(user["id"], user=user), "user": _user_dict(user)})
     except Exception:
         tb = traceback.format_exc()
-        print(f"[auth/login ERROR]\n{tb}", flush=True)
+        log.error("[auth/login ERROR] email=%s\n%s", email, tb)
         return jsonify({"error": "Login failed due to a server error. Please try again."}), 500
 
 
@@ -615,5 +634,5 @@ def _decode_data_url(data_url):
 
 if __name__ == "__main__":
     init_db()
-    print(f"✓ mw-backend running on http://0.0.0.0:{PORT}")
-    app.run(host="0.0.0.0", port=PORT, debug=False)
+    log.info("✓ mw-backend starting on http://0.0.0.0:%s", PORT)
+    app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
