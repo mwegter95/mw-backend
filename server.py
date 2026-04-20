@@ -641,6 +641,13 @@ def admin_import():
     now = datetime.datetime.utcnow().isoformat()
     counts = {"walls": 0, "layouts": 0, "library": 0, "images": 0}
 
+    # Optional: wipe existing user data before import so re-runs are clean
+    if body.get("clear_first"):
+        db.execute("DELETE FROM gallery_walls   WHERE owner_type='user' AND owner_id=?", (user_id,))
+        db.execute("DELETE FROM gallery_layouts WHERE owner_type='user' AND owner_id=?", (user_id,))
+        db.execute("DELETE FROM gallery_library WHERE owner_type='user' AND owner_id=?", (user_id,))
+        db.commit()
+
     # Walls
     for wid, wdata in (body.get("walls") or {}).items():
         db.execute(
