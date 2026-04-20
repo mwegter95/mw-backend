@@ -632,7 +632,7 @@ def admin_import():
     body = request.get_json(silent=True) or {}
     token = body.get("token", "")
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+        payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"], options={"verify_sub": False})
         user_id = str(payload["sub"])
     except Exception as exc:
         log.warning("admin_import auth failed: %s", exc)
