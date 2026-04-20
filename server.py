@@ -24,10 +24,11 @@ import urllib.request as _urllib_req
 from pathlib import Path
 from functools import wraps
 
-from flask import Flask, request, jsonify, g, send_from_directory
+from flask import Flask, request, jsonify, g, send_from_directory, send_file, Response
 from flask_cors import CORS
 import bcrypt
 import jwt
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 # ─── Paths & config ──────────────────────────────────────────────────────────
 
@@ -68,6 +69,37 @@ def _get_secret():
     return key
 
 SECRET_KEY = _get_secret()
+
+# ─── File encryption helpers ──────────────────────────────────────────────────
+
+def _get_file_key():
+    """AES-256-GCM key derived from the server secret. Files on disk are not
+    viewable as images -- only the running server can decrypt them."""
+    import hashlib
+    return hashlib.sha256((SECRET_KEY + ":file-encryption").encode()).digest()
+
+_FILE_KEY = None
+def _file_key():
+    global _FILE_KEY
+    if _FILE_KEY is None:
+        _FILE_KEY = _get_file_key()
+    return _FILE_KEY
+
+def encrypt_bytes(plaintext: bytes) -> bytes:
+    """Returns nonce (12 bytes) || ciphertext+tag."""
+    nonce = os.urandom(12)
+    ct = AESGCM(_file_key()).encrypt(nonce, plaintext, None)
+    return nonce + ct
+
+def decrypt_bytes(blob: bytes) -> bytes:
+    nonce, ct = blob[:12], blob[12:]
+    return AESGCM(_file_key()).decrypt(nonce, ct, None)
+
+def write_encrypted(path: Path, data: bytes):
+    path.write_bytes(encrypt_bytes(data))
+
+def read_encrypted(path: Path) -> bytes:
+    return decrypt_bytes(path.read_bytes())
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 # Force stdout to be unbuffered so print() shows up immediately in the terminal.
@@ -477,7 +509,7 @@ def gallery_wall_image(wall_id):
         if e != ext and old.exists():
             old.unlink()
     path = UPLOADS_DIR / "walls" / f"{wall_id}.{ext}"
-    path.write_bytes(buf)
+    write_encrypted(path, buf)
     return jsonify({"url": f"/uploads/walls/{wall_id}.{ext}"})
 
 # ─── Gallery: layouts ─────────────────────────────────────────────────────────
@@ -522,7 +554,7 @@ def gallery_put_piece_image(piece_id):
         if e != ext and old.exists():
             old.unlink()
     path = UPLOADS_DIR / "pieces" / f"{piece_id}.{ext}"
-    path.write_bytes(buf)
+    write_encrypted(path, buf)
     return jsonify({"url": f"/uploads/pieces/{piece_id}.{ext}"})
 
 
@@ -573,7 +605,7 @@ def gallery_put_library_image(lib_id):
         if e != ext and old.exists():
             old.unlink()
     path = UPLOADS_DIR / "library" / f"{lib_id}.{ext}"
-    path.write_bytes(buf)
+    write_encrypted(path, buf)
     return jsonify({"url": f"/uploads/library/{lib_id}.{ext}"})
 
 # ─── HEIC → JPEG conversion ──────────────────────────────────────────────────
@@ -609,7 +641,16 @@ def heic_to_jpeg():
 
 @app.get("/uploads/<path:filename>")
 def serve_upload(filename):
-    return send_from_directory(str(UPLOADS_DIR), filename)
+    path = UPLOADS_DIR / filename
+    if not path.exists():
+        return jsonify({"error": "Not found"}), 404
+    try:
+        data = read_encrypted(path)
+    except Exception:
+        # Fall back to serving unencrypted (for pre-existing files)
+        return send_from_directory(str(UPLOADS_DIR), filename)
+    mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    return Response(data, mimetype=mime)
 
 # ─── Health ───────────────────────────────────────────────────────────────────
 
@@ -635,4 +676,5 @@ def _decode_data_url(data_url):
 if __name__ == "__main__":
     init_db()
     log.info("✓ mw-backend starting on http://0.0.0.0:%s", PORT)
-    app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
+    from waitress import serve
+    serve(app, host="0.0.0.0", port=PORT)

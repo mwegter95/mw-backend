@@ -3,3 +3,5 @@ flask-cors>=4.0
 bcrypt>=4.1
 PyJWT>=2.8
 pillow-heif>=0.15
+waitress>=3.0
+cryptography>=42.0

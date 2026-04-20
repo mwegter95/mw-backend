@@ -4,6 +4,11 @@
 # Usage:
 #   ./start.sh            — server only (local testing)
 #   ./start.sh --tunnel   — server + Cloudflare Tunnel
+#
+# Windows (production / persistent):
+#   Use run-server.ps1 instead — it runs in a standalone window,
+#   prevents sleep/hibernate, blocks shutdown until stopped,
+#   and auto-restarts crashed processes.
 # ─────────────────────────────────────────────────────────────────
 set -e
 cd "$(dirname "$0")"
