@@ -216,11 +216,11 @@ def make_token(user_id, user=None):
 
 def _resolve_principal():
     """Returns (user_row | None, device_token | None)."""
-    auth = (
-        request.headers.get("Authorization", "")
-        or ("Bearer " + request.headers.get("X-Auth-Token", ""))
-        or ("Bearer " + request.args.get("_tok", ""))
+    _bearer_tok = (
+        request.headers.get("X-Auth-Token", "").strip()
+        or request.args.get("_tok", "").strip()
     )
+    auth = request.headers.get("Authorization", "") or ("Bearer " + _bearer_tok if _bearer_tok else "")
     device = request.headers.get("X-Device-Token", "").strip() or None
     if auth.startswith("Bearer "):
         try:
