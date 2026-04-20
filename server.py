@@ -216,7 +216,7 @@ def make_token(user_id, user=None):
 
 def _resolve_principal():
     """Returns (user_row | None, device_token | None)."""
-    auth = request.headers.get("Authorization", "")
+    auth = request.headers.get("Authorization", "") or ("Bearer " + request.headers.get("X-Auth-Token", ""))
     device = request.headers.get("X-Device-Token", "").strip() or None
     if auth.startswith("Bearer "):
         try:
