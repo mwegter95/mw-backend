@@ -206,7 +206,7 @@ def init_db():
 
 def make_token(user_id, user=None):
     payload = {
-        "sub": user_id,
+        "sub": str(user_id),
         "exp": datetime.datetime.utcnow() + ACCESS_TTL,
     }
     if user:
