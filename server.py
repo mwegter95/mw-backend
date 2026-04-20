@@ -612,6 +612,89 @@ def gallery_put_library_image(lib_id):
     write_encrypted(path, buf)
     return jsonify({"url": f"/uploads/library/{lib_id}.{ext}"})
 
+# ─── Admin: bulk import (migration) ─────────────────────────────────────────
+
+@app.post("/api/admin/import")
+def admin_import():
+    """One-shot bulk import for migration.  Authenticated by the JWT token
+    in the request body — never a header, so Cloudflare cannot strip it.
+
+    Body JSON:
+      {
+        "token": "<JWT>",
+        "user_id": 1,
+        "walls":   { id: {data dict} },
+        "layouts": { wall_id: { name: [pieces] } },
+        "library": { id: {data dict} },
+        "images":  { "walls/id.ext": "<base64>", ... }
+      }
+    """
+    body = request.get_json(silent=True) or {}
+    token = body.get("token", "")
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+        user = get_db().execute("SELECT * FROM users WHERE id=?", (payload["sub"],)).fetchone()
+        if not user:
+            raise ValueError("unknown user")
+    except Exception:
+        return jsonify({"error": "Forbidden"}), 403
+
+    user_id = str(user["id"])
+    db = get_db()
+    now = datetime.datetime.utcnow().isoformat()
+    counts = {"walls": 0, "layouts": 0, "library": 0, "images": 0}
+
+    # Walls
+    for wid, wdata in (body.get("walls") or {}).items():
+        db.execute(
+            "INSERT INTO gallery_walls(id,owner_type,owner_id,data,updated_at) "
+            "VALUES(?,?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET owner_type=excluded.owner_type, "
+            "owner_id=excluded.owner_id, data=excluded.data, updated_at=excluded.updated_at",
+            (wid, "user", user_id, json.dumps(wdata), now)
+        )
+        counts["walls"] += 1
+
+    # Layouts
+    for wall_id, named in (body.get("layouts") or {}).items():
+        for name, pieces in named.items():
+            db.execute(
+                "INSERT INTO gallery_layouts(wall_id,owner_type,owner_id,name,pieces,updated_at) "
+                "VALUES(?,?,?,?,?,?) "
+                "ON CONFLICT(wall_id,owner_type,owner_id,name) DO UPDATE SET "
+                "pieces=excluded.pieces, updated_at=excluded.updated_at",
+                (wall_id, "user", user_id, name, json.dumps(pieces), now)
+            )
+            counts["layouts"] += 1
+
+    # Library
+    for lid, ldata in (body.get("library") or {}).items():
+        db.execute(
+            "INSERT INTO gallery_library(id,owner_type,owner_id,data,updated_at) "
+            "VALUES(?,?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET owner_type=excluded.owner_type, "
+            "owner_id=excluded.owner_id, data=excluded.data, updated_at=excluded.updated_at",
+            (lid, "user", user_id, json.dumps(ldata), now)
+        )
+        counts["library"] += 1
+
+    db.commit()
+
+    # Images — base64 encoded, written encrypted to uploads/
+    import base64
+    for rel_path, b64 in (body.get("images") or {}).items():
+        try:
+            raw = base64.b64decode(b64)
+            dest = UPLOADS_DIR / rel_path
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            write_encrypted(dest, raw)
+            counts["images"] += 1
+        except Exception as e:
+            log.warning("Failed to write image %s: %s", rel_path, e)
+
+    return jsonify({"ok": True, "counts": counts})
+
+
 # ─── HEIC → JPEG conversion ──────────────────────────────────────────────────
 
 @app.post("/api/heic-to-jpeg")
