@@ -633,13 +633,10 @@ def admin_import():
     token = body.get("token", "")
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
-        user = get_db().execute("SELECT * FROM users WHERE id=?", (payload["sub"],)).fetchone()
-        if not user:
-            raise ValueError("unknown user")
-    except Exception:
+        user_id = str(payload["sub"])
+    except Exception as exc:
+        log.warning("admin_import auth failed: %s", exc)
         return jsonify({"error": "Forbidden"}), 403
-
-    user_id = str(user["id"])
     db = get_db()
     now = datetime.datetime.utcnow().isoformat()
     counts = {"walls": 0, "layouts": 0, "library": 0, "images": 0}
