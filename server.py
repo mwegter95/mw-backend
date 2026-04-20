@@ -51,6 +51,7 @@ _CORS_ORIGINS = list({o for o in [
     "http://localhost:5173",
     "http://localhost:4173",
     "http://localhost:3000",
+    "http://localhost:5015",  # SEO Analyzer local dev
     "https://mwegter95.github.io",
     "https://michaelwegter.com",
     "https://www.michaelwegter.com",
@@ -697,6 +698,999 @@ def admin_import():
             log.warning("Failed to write image %s: %s", rel_path, e)
 
     return jsonify({"ok": True, "counts": counts})
+
+
+# ─── SEO Analyzer ─────────────────────────────────────────────────────────────
+# All routes require a logged-in user (require_auth).
+# Reports are stored per-user under data/seo_reports/<user_id>/.
+# Crawl state is tracked per-user in _seo_crawl_states so concurrent users
+# don't interfere with each other.
+
+try:
+    import re as _re
+    import asyncio as _asyncio
+    import queue as _queue
+    import threading as _threading
+    import time as _time
+    import xml.etree.ElementTree as _ET
+    from urllib.parse import urlparse as _urlparse, urljoin as _urljoin
+    from collections import Counter as _Counter
+    from bs4 import BeautifulSoup as _BeautifulSoup, Comment as _Comment
+    import textstat as _textstat
+    _SEO_AVAILABLE = True
+except ImportError as _e:
+    _SEO_AVAILABLE = False
+    log.warning("SEO Analyzer dependencies not installed: %s", _e)
+
+SEO_REPORTS_DIR = DATA_DIR / "seo_reports"
+SEO_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Per-user crawl state: { user_id_str: { "q": Queue, "started": bool } }
+_seo_crawl_states: dict = {}
+
+# Browser-like User-Agent for HTTP fetches
+_SEO_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+           "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+
+_SEO_PARALLEL_TABS = 10
+
+
+def _seo_user_dir(user_id: str) -> "Path":
+    d = SEO_REPORTS_DIR / user_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+# ---- SEO analysis helpers ------------------------------------------------
+
+def _seo_clean_text(soup) -> str:
+    for tag in soup(["script", "style", "noscript", "iframe", "svg"]):
+        tag.decompose()
+    for comment in soup.find_all(string=lambda t: isinstance(t, _Comment)):
+        comment.extract()
+    text = soup.get_text(separator=" ", strip=True)
+    return _re.sub(r"\s+", " ", text).strip()
+
+
+def _seo_word_list(text: str):
+    return _re.findall(r"[a-zA-Z''\-]+", text.lower())
+
+
+def _seo_extract_keywords(words, top_n=20):
+    stop = set(
+        "a an the and or but in on at to for of is it this that was were be "
+        "been being have has had do does did will would shall should may might "
+        "can could i me my we our you your he him his she her they them their "
+        "its not no nor so if then else when where how what which who whom why "
+        "with from by as into through during before after above below between "
+        "out off over under again further once here there all each every both "
+        "few more most other some such only own same than too very just about "
+        "up also back still even new now old well way because thing things "
+        "much get got go going know like make us am are".split()
+    )
+    filtered = [w for w in words if w not in stop and len(w) > 2]
+    return _Counter(filtered).most_common(top_n)
+
+
+def _seo_extract_ngrams(words, n=2, top_k=10):
+    stop = set(
+        "a an the and or but in on at to for of is it this that was were be "
+        "been being have has had do does did will would shall should may might "
+        "can could i me my we our you your he him his she her they them their "
+        "its not no nor so if then else".split()
+    )
+    ngrams = []
+    for i in range(len(words) - n + 1):
+        gram = words[i: i + n]
+        if not any(w in stop for w in gram) and all(len(w) > 2 for w in gram):
+            ngrams.append(" ".join(gram))
+    return _Counter(ngrams).most_common(top_k)
+
+
+def _seo_analyze_html(html: str, url: str, timing: dict) -> dict:
+    """Run all SEO checks on rendered HTML. Return structured report."""
+    soup = _BeautifulSoup(html, "lxml")
+    parsed = _urlparse(url)
+    report: dict = {"url": url, "timing": timing, "scores": {}, "sections": {}}
+
+    # --- Title ---
+    title_tag = soup.find("title")
+    title = title_tag.get_text(strip=True) if title_tag else ""
+    title_issues = []
+    if not title:
+        title_issues.append("Missing title tag.")
+    elif len(title) < 30:
+        title_issues.append(f"Title is short ({len(title)} chars); aim for 50–60.")
+    elif len(title) > 60:
+        title_issues.append(f"Title is long ({len(title)} chars); Google truncates at ~60.")
+    report["sections"]["title"] = {
+        "value": title, "length": len(title),
+        "issues": title_issues, "pass": len(title_issues) == 0
+    }
+
+    # --- Meta description ---
+    meta_tag = soup.find("meta", attrs={"name": _re.compile(r"^description$", _re.I)})
+    meta_desc = meta_tag.get("content", "").strip() if meta_tag else ""
+    meta_issues = []
+    if not meta_desc:
+        meta_issues.append("Missing meta description.")
+    elif len(meta_desc) < 70:
+        meta_issues.append(f"Meta description is short ({len(meta_desc)} chars); aim for 120–160.")
+    elif len(meta_desc) > 160:
+        meta_issues.append(f"Meta description is long ({len(meta_desc)} chars); Google truncates at ~160.")
+    report["sections"]["meta_description"] = {
+        "value": meta_desc, "length": len(meta_desc),
+        "issues": meta_issues, "pass": len(meta_issues) == 0
+    }
+
+    # --- Canonical ---
+    canon_tag = soup.find("link", rel="canonical")
+    canon = canon_tag.get("href", "").strip() if canon_tag else ""
+    canon_issues = [] if canon else ["No canonical tag found."]
+    report["sections"]["canonical"] = {"value": canon, "issues": canon_issues, "pass": len(canon_issues) == 0}
+
+    # --- Robots meta ---
+    robots_tag = soup.find("meta", attrs={"name": _re.compile(r"^robots$", _re.I)})
+    robots_val = robots_tag.get("content", "").strip() if robots_tag else ""
+    robots_issues = []
+    if robots_val and ("noindex" in robots_val.lower() or "nofollow" in robots_val.lower()):
+        robots_issues.append(f"Robots meta restricts indexing: '{robots_val}'")
+    report["sections"]["robots"] = {"value": robots_val, "issues": robots_issues, "pass": len(robots_issues) == 0}
+
+    # --- Viewport ---
+    vp_tag = soup.find("meta", attrs={"name": _re.compile(r"^viewport$", _re.I)})
+    vp_val = vp_tag.get("content", "").strip() if vp_tag else ""
+    vp_issues = [] if vp_val else ["No viewport meta tag — page may not be mobile-friendly."]
+    report["sections"]["viewport"] = {"value": vp_val, "issues": vp_issues, "pass": len(vp_issues) == 0}
+
+    # --- Charset ---
+    charset_tag = soup.find("meta", charset=True) or soup.find("meta", attrs={"http-equiv": _re.compile(r"content-type", _re.I)})
+    charset_val = charset_tag.get("charset", "") if charset_tag else ""
+    charset_issues = [] if charset_val else ["No charset declaration found."]
+    report["sections"]["charset"] = {"value": charset_val, "issues": charset_issues, "pass": len(charset_issues) == 0}
+
+    # --- Language ---
+    html_tag = soup.find("html")
+    lang_val = html_tag.get("lang", "").strip() if html_tag else ""
+    lang_issues = [] if lang_val else ["No lang attribute on <html> tag."]
+    report["sections"]["language"] = {"value": lang_val, "issues": lang_issues, "pass": len(lang_issues) == 0}
+
+    # --- Headings ---
+    heading_counts = {f"h{i}": len(soup.find_all(f"h{i}")) for i in range(1, 7)}
+    h1_texts = [h.get_text(strip=True) for h in soup.find_all("h1")]
+    h2_texts = [h.get_text(strip=True) for h in soup.find_all("h2")][:5]
+    heading_issues = []
+    if heading_counts["h1"] == 0:
+        heading_issues.append("No H1 tag found.")
+    elif heading_counts["h1"] > 1:
+        heading_issues.append(f"Multiple H1 tags ({heading_counts['h1']}) — use only one.")
+    report["sections"]["headings"] = {
+        "counts": heading_counts, "h1": h1_texts, "h2": h2_texts,
+        "issues": heading_issues, "pass": len(heading_issues) == 0
+    }
+
+    # --- Images ---
+    imgs = soup.find_all("img")
+    missing_alt = [str(i) for i in imgs if not i.get("alt") and i.get("alt") is None]
+    empty_alt = [str(i) for i in imgs if i.get("alt") == ""]
+    img_issues = []
+    if missing_alt:
+        img_issues.append(f"{len(missing_alt)} image(s) missing alt attribute.")
+    report["sections"]["images"] = {
+        "total": len(imgs), "missing_alt": missing_alt[:5], "empty_alt": empty_alt[:5],
+        "issues": img_issues, "pass": len(img_issues) == 0
+    }
+
+    # --- Links ---
+    all_links = soup.find_all("a", href=True)
+    internal_links = [a for a in all_links if _urlparse(_urljoin(url, a["href"])).netloc == parsed.netloc or a["href"].startswith("/")]
+    external_links = [a for a in all_links if a not in internal_links]
+    nofollow_links = [a for a in all_links if "nofollow" in a.get("rel", [])]
+    link_issues = []
+    if not internal_links:
+        link_issues.append("No internal links found.")
+    report["sections"]["links"] = {
+        "internal": len(internal_links), "external": len(external_links),
+        "nofollow": len(nofollow_links), "issues": link_issues, "pass": len(link_issues) == 0
+    }
+
+    # --- Open Graph ---
+    og_tags = {t.get("property", "").replace("og:", ""): t.get("content", "")
+               for t in soup.find_all("meta", property=_re.compile(r"^og:", _re.I))}
+    og_issues = []
+    for required in ["title", "description", "image"]:
+        if required not in og_tags:
+            og_issues.append(f"Missing og:{required} tag.")
+    report["sections"]["open_graph"] = {"tags": og_tags, "issues": og_issues, "pass": len(og_issues) == 0}
+
+    # --- Twitter Card ---
+    tc_tags = {t.get("name", "").replace("twitter:", ""): t.get("content", "")
+               for t in soup.find_all("meta", attrs={"name": _re.compile(r"^twitter:", _re.I)})}
+    tc_issues = [] if tc_tags else ["No Twitter Card meta tags found."]
+    report["sections"]["twitter_card"] = {"tags": tc_tags, "issues": tc_issues, "pass": len(tc_issues) == 0}
+
+    # --- Structured data ---
+    json_ld_blocks = soup.find_all("script", type="application/ld+json")
+    sd_types = []
+    for block in json_ld_blocks:
+        try:
+            import json as _json
+            d = _json.loads(block.string or "{}")
+            t = d.get("@type", "")
+            if t:
+                sd_types.append(t if isinstance(t, str) else str(t))
+        except Exception:
+            pass
+    sd_issues = [] if json_ld_blocks else ["No structured data (JSON-LD) found."]
+    report["sections"]["structured_data"] = {
+        "count": len(json_ld_blocks), "types": sd_types,
+        "issues": sd_issues, "pass": len(sd_issues) == 0
+    }
+
+    # --- Content & keywords ---
+    visible_text = _seo_clean_text(soup)
+    words = _seo_word_list(visible_text)
+    word_count = len(words)
+    top_keywords = _seo_extract_keywords(words, top_n=20)
+    bigrams = _seo_extract_ngrams(words, n=2, top_k=10)
+    trigrams = _seo_extract_ngrams(words, n=3, top_k=10)
+    content_issues = []
+    if word_count < 300:
+        content_issues.append(f"Low word count ({word_count} words); aim for 300+.")
+
+    keyword_placement = {}
+    if top_keywords:
+        primary = top_keywords[0][0]
+        keyword_placement["primary_keyword"] = primary
+        keyword_placement["in_title"] = primary in title.lower()
+        keyword_placement["in_meta_desc"] = primary in meta_desc.lower()
+        keyword_placement["in_h1"] = any(primary in h.lower() for h in h1_texts)
+        keyword_placement["in_url"] = primary in url.lower()
+        if not keyword_placement["in_title"]:
+            content_issues.append(f"Primary keyword '{primary}' not in title tag.")
+        if not keyword_placement["in_meta_desc"]:
+            content_issues.append(f"Primary keyword '{primary}' not in meta description.")
+        if not keyword_placement["in_h1"]:
+            content_issues.append(f"Primary keyword '{primary}' not in H1.")
+
+    readability = {}
+    if visible_text and word_count > 50:
+        try:
+            readability["flesch_reading_ease"] = round(_textstat.flesch_reading_ease(visible_text), 1)
+            readability["flesch_kincaid_grade"] = round(_textstat.flesch_kincaid_grade(visible_text), 1)
+            readability["gunning_fog"] = round(_textstat.gunning_fog(visible_text), 1)
+            readability["avg_sentence_length"] = round(_textstat.avg_sentence_length(visible_text), 1)
+        except Exception:
+            pass
+
+    report["sections"]["content"] = {
+        "word_count": word_count,
+        "top_keywords": [{"word": w, "count": c, "density": round(c / word_count * 100, 2) if word_count else 0} for w, c in top_keywords],
+        "bigrams": [{"phrase": p, "count": c} for p, c in bigrams],
+        "trigrams": [{"phrase": p, "count": c} for p, c in trigrams],
+        "keyword_placement": keyword_placement,
+        "readability": readability,
+        "issues": content_issues, "pass": len(content_issues) == 0,
+    }
+
+    # --- URL Structure ---
+    url_issues = []
+    path = parsed.path
+    if len(url) > 75:
+        url_issues.append("URL is quite long (>75 chars).")
+    if _re.search(r"[A-Z]", path):
+        url_issues.append("URL path contains uppercase letters.")
+    if "_" in path:
+        url_issues.append("URL uses underscores; prefer hyphens.")
+    if _re.search(r"[?&]\w+=\w+", url):
+        url_issues.append("URL has query parameters — may cause duplicate content.")
+    report["sections"]["url_structure"] = {"url": url, "path": path, "issues": url_issues, "pass": len(url_issues) == 0}
+
+    # --- HTTPS ---
+    https_ok = parsed.scheme == "https"
+    report["sections"]["https"] = {"secure": https_ok, "issues": [] if https_ok else ["Site not using HTTPS!"], "pass": https_ok}
+
+    # --- Hreflang ---
+    hreflangs = [{"lang": link["hreflang"], "href": link.get("href", "")}
+                 for link in soup.find_all("link", rel="alternate", hreflang=True)]
+    report["sections"]["hreflang"] = {"tags": hreflangs, "issues": [], "pass": True}
+
+    # --- Performance hints ---
+    perf_issues = []
+    inline_styles = soup.find_all("style")
+    if len(inline_styles) > 5:
+        perf_issues.append(f"{len(inline_styles)} inline <style> blocks — consider external CSS.")
+    scripts = soup.find_all("script", src=True)
+    render_blocking = [s for s in scripts if not s.get("async") and not s.get("defer")]
+    if render_blocking:
+        perf_issues.append(f"{len(render_blocking)} render-blocking scripts (no async/defer).")
+    report["sections"]["performance_hints"] = {
+        "inline_styles": len(inline_styles), "total_scripts": len(scripts),
+        "render_blocking_scripts": len(render_blocking),
+        "issues": perf_issues, "pass": len(perf_issues) == 0
+    }
+
+    # --- Overall score ---
+    scored_sections = [
+        "title", "meta_description", "canonical", "robots", "viewport",
+        "headings", "images", "links", "open_graph", "twitter_card",
+        "structured_data", "content", "url_structure", "https", "performance_hints",
+        "charset", "language",
+    ]
+    passed = sum(1 for s in scored_sections if report["sections"].get(s, {}).get("pass", False))
+    total = len(scored_sections)
+    report["scores"]["passed"] = passed
+    report["scores"]["total"] = total
+    report["scores"]["percentage"] = round(passed / total * 100)
+
+    all_issues = []
+    for s in scored_sections:
+        sec = report["sections"].get(s, {})
+        for issue in sec.get("issues", []):
+            all_issues.append({"section": s, "issue": issue})
+    report["all_issues"] = all_issues
+    return report
+
+
+# ---- SEO Playwright helpers -----------------------------------------------
+
+async def _seo_fetch_rendered_html(url: str, page) -> tuple:
+    timing = {}
+    t0 = _time.time()
+    try:
+        response = await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+        timing["status_code"] = response.status if response else None
+        try:
+            await page.wait_for_load_state("networkidle", timeout=8000)
+        except Exception:
+            pass
+    except Exception as exc:
+        timing["status_code"] = None
+        timing["error"] = str(exc)[:200]
+    await page.wait_for_timeout(500)
+    html = await page.content()
+    timing["total_ms"] = round((_time.time() - t0) * 1000)
+    return html, timing
+
+
+def _seo_normalise_url(url: str) -> str:
+    parsed = _urlparse(url)
+    path = parsed.path.rstrip("/") or "/"
+    clean = parsed._replace(fragment="", path=path)
+    return clean.geturl()
+
+
+def _seo_same_site(netloc_a: str, netloc_b: str) -> bool:
+    def strip_www(n):
+        return n.lower().removeprefix("www.")
+    return strip_www(netloc_a) == strip_www(netloc_b)
+
+
+def _seo_discover_internal_links(html: str, base_url: str, root_netloc: str) -> set:
+    soup = _BeautifulSoup(html, "lxml")
+    found: set = set()
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        if href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        full = _urljoin(base_url, href)
+        parsed = _urlparse(full)
+        if not _seo_same_site(parsed.netloc, root_netloc):
+            continue
+        clean = _seo_normalise_url(full)
+        last_segment = parsed.path.split("/")[-1]
+        ext = last_segment.rsplit(".", 1)[-1].lower() if "." in last_segment else ""
+        if ext in ("jpg", "jpeg", "png", "gif", "svg", "webp", "pdf", "zip",
+                   "mp3", "mp4", "wav", "css", "js", "ico", "woff", "woff2", "ttf",
+                   "eot", "xml", "json", "txt", "map"):
+            continue
+        found.add(clean)
+    return found
+
+
+def _seo_parse_sitemap_xml(content: str, root_netloc: str) -> tuple:
+    page_urls = []
+    child_sitemaps = []
+    try:
+        content = _re.sub(r'\s+xmlns(?::\w+)?\s*=\s*"[^"]*"', '', content)
+        content = _re.sub(r'\s+\w+:\w+\s*=\s*"[^"]*"', '', content)
+        root_elem = _ET.fromstring(content)
+        for sm_elem in root_elem.iter("sitemap"):
+            loc = sm_elem.find("loc")
+            if loc is not None and loc.text:
+                child_sitemaps.append(loc.text.strip())
+        for url_elem in root_elem.iter("url"):
+            loc = url_elem.find("loc")
+            if loc is not None and loc.text:
+                page_url = loc.text.strip()
+                p = _urlparse(page_url)
+                if _seo_same_site(p.netloc, root_netloc):
+                    page_urls.append(_seo_normalise_url(page_url))
+    except Exception:
+        pass
+    return page_urls, child_sitemaps
+
+
+def _seo_sitemap_candidates_from_robots(robots_text: str) -> list:
+    candidates = []
+    for line in robots_text.splitlines():
+        m = _re.match(r'^\s*sitemap:\s*(.+)', line, _re.I)
+        if m:
+            sm_url = m.group(1).strip()
+            if sm_url.startswith("http"):
+                candidates.append(sm_url)
+    return candidates
+
+
+def _seo_get_sitemap_candidates(start_url: str) -> tuple:
+    parsed = _urlparse(start_url)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    www_base = (f"{parsed.scheme}://www.{parsed.netloc}"
+                if not parsed.netloc.startswith("www.") else base)
+    fallback = []
+    for b in (base, www_base):
+        fallback.extend([f"{b}/sitemap.xml", f"{b}/sitemap_index.xml", f"{b}/wp-sitemap.xml"])
+    return base, www_base, fallback
+
+
+def _seo_fetch_sitemap_urls(start_url: str, root_netloc: str) -> list:
+    urls = []
+    _base, _www_base, fallback = _seo_get_sitemap_candidates(start_url)
+    sitemap_candidates = []
+    for b in (_base, _www_base):
+        try:
+            req = _urllib_req.Request(f"{b}/robots.txt", headers={"User-Agent": _SEO_UA})
+            with _urllib_req.urlopen(req, timeout=10) as resp:
+                robots_text = resp.read().decode("utf-8", errors="ignore")
+            sitemap_candidates.extend(_seo_sitemap_candidates_from_robots(robots_text))
+        except Exception:
+            pass
+    if not sitemap_candidates:
+        sitemap_candidates = fallback
+    visited_sitemaps: set = set()
+
+    def _parse_sitemap(sm_url: str, depth: int = 0):
+        if depth > 3 or sm_url in visited_sitemaps:
+            return
+        visited_sitemaps.add(sm_url)
+        try:
+            req = _urllib_req.Request(sm_url, headers={"User-Agent": _SEO_UA})
+            with _urllib_req.urlopen(req, timeout=15) as resp:
+                content = resp.read().decode("utf-8", errors="ignore")
+            page_urls, child_sitemaps = _seo_parse_sitemap_xml(content, root_netloc)
+            urls.extend(page_urls)
+            for child in child_sitemaps:
+                _parse_sitemap(child, depth + 1)
+        except Exception:
+            pass
+
+    for sm in sitemap_candidates:
+        _parse_sitemap(sm)
+    return list(set(urls))
+
+
+def _seo_resolve_url(start_url: str) -> tuple:
+    resolved_url = start_url
+    try:
+        req = _urllib_req.Request(start_url, headers={"User-Agent": _SEO_UA}, method="HEAD")
+        with _urllib_req.urlopen(req, timeout=10) as resp:
+            resolved_url = resp.url
+    except Exception:
+        try:
+            req = _urllib_req.Request(start_url, headers={"User-Agent": _SEO_UA})
+            with _urllib_req.urlopen(req, timeout=10) as resp:
+                resolved_url = resp.url
+        except Exception:
+            pass
+    parsed = _urlparse(resolved_url)
+    return _seo_normalise_url(resolved_url), parsed.netloc
+
+
+def _seo_extract_navbar_links(html: str, base_url: str, root_netloc: str) -> list:
+    soup = _BeautifulSoup(html, "lxml")
+    nav_links: set = set()
+    nav_containers = soup.find_all("nav") + soup.find_all("header")
+    for attr in ["class", "id"]:
+        for pattern in ["nav", "menu", "navbar", "main-nav", "primary-nav",
+                        "site-nav", "site-header", "main-menu", "primary-menu"]:
+            nav_containers += soup.find_all(attrs={attr: _re.compile(pattern, _re.I)})
+    for container in nav_containers:
+        for a in container.find_all("a", href=True):
+            href = a["href"].strip()
+            if href.startswith(("#", "mailto:", "tel:", "javascript:")):
+                continue
+            full = _urljoin(base_url, href)
+            parsed = _urlparse(full)
+            if not _seo_same_site(parsed.netloc, root_netloc):
+                continue
+            nav_links.add(_seo_normalise_url(full))
+    return sorted(nav_links)
+
+
+def _seo_group_urls_by_branch(urls: list) -> dict:
+    branches: dict = {}
+    for u in urls:
+        parsed = _urlparse(u)
+        parts = [p for p in parsed.path.strip("/").split("/") if p]
+        branch = "/" + parts[0] + "/" if parts else "/"
+        if branch not in branches:
+            branches[branch] = []
+        branches[branch].append(u)
+    return dict(sorted(branches.items(), key=lambda x: -len(x[1])))
+
+
+def _seo_clean_site_name(url: str) -> str:
+    parsed = _urlparse(url)
+    netloc = parsed.netloc.lower().removeprefix("www.").split(":")[0]
+    return netloc
+
+
+def _seo_save_report_files(url: str, summary: dict, page_reports: list, outputs_dir: "Path"):
+    """Save JSON report to user's seo_reports directory."""
+    from datetime import datetime as _dt
+    site_name = _seo_clean_site_name(url)
+    now = _dt.now()
+    date_str = now.strftime("%Y%m%d")
+    time_str = now.strftime("%H_%M_%S")
+    base_name = f"{site_name}_seo_report_{date_str}_{time_str}"
+    json_path = outputs_dir / f"{base_name}.json"
+    with open(json_path, "w", encoding="utf-8") as f:
+        import json as _json2
+        _json2.dump({"summary": summary, "pages": page_reports}, f, indent=2, ensure_ascii=False)
+    return {"json": str(json_path)}
+
+
+def _seo_build_prescan_result(resolved_url: str, root_netloc: str, all_urls: list, navbar_urls: list) -> dict:
+    branches = _seo_group_urls_by_branch(all_urls)
+    navbar_branches: set = set()
+    for u in navbar_urls:
+        parsed = _urlparse(u)
+        parts = [p for p in parsed.path.strip("/").split("/") if p]
+        branch = "/" + parts[0] + "/" if parts else "/"
+        navbar_branches.add(branch)
+    return {
+        "resolved_url": resolved_url,
+        "root_netloc": root_netloc,
+        "total_urls": len(all_urls),
+        "navbar_urls": navbar_urls,
+        "navbar_branches": sorted(navbar_branches),
+        "branches": {b: {"count": len(urls), "sample_urls": urls[:5]} for b, urls in branches.items()},
+        "all_urls": all_urls,
+    }
+
+
+async def _seo_prescan_async(start_url: str) -> dict:
+    from playwright.async_api import async_playwright
+    resolved_url = start_url
+    root_netloc = _urlparse(start_url).netloc
+    navbar_urls = []
+    homepage_links = []
+    sitemap_urls = []
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        context = await browser.new_context()
+        page = await context.new_page()
+        try:
+            await page.goto(start_url, wait_until="domcontentloaded", timeout=30000)
+            resolved_url = page.url
+            root_netloc = _urlparse(resolved_url).netloc
+        except Exception:
+            pass
+        try:
+            await page.wait_for_timeout(1500)
+            html = await page.content()
+            navbar_urls = _seo_extract_navbar_links(html, resolved_url, root_netloc)
+            soup = _BeautifulSoup(html, "lxml")
+            for a in soup.find_all("a", href=True):
+                href = a["href"].strip()
+                if href.startswith(("#", "mailto:", "tel:", "javascript:")):
+                    continue
+                full = _urljoin(resolved_url, href)
+                p = _urlparse(full)
+                if _seo_same_site(p.netloc, root_netloc):
+                    homepage_links.append(_seo_normalise_url(full))
+
+            # Fetch sitemaps using in-page fetch context
+            _base, _www_base, fallback = _seo_get_sitemap_candidates(resolved_url)
+            async def _fetch_text_in_page(url_to_fetch: str) -> str:
+                try:
+                    return await page.evaluate("""
+                        async (url) => {
+                            try {
+                                const resp = await fetch(url, {credentials: 'include'});
+                                if (!resp.ok) return '';
+                                return await resp.text();
+                            } catch(e) { return ''; }
+                        }
+                    """, url_to_fetch)
+                except Exception:
+                    return ""
+            sitemap_candidates = []
+            for b in (_base, _www_base):
+                robots_text = await _fetch_text_in_page(f"{b}/robots.txt")
+                if robots_text:
+                    sitemap_candidates.extend(_seo_sitemap_candidates_from_robots(robots_text))
+            if not sitemap_candidates:
+                sitemap_candidates = fallback
+            visited_sms: set = set()
+            async def _parse_sm(sm_url: str, depth: int = 0):
+                if depth > 3 or sm_url in visited_sms:
+                    return
+                visited_sms.add(sm_url)
+                content = await _fetch_text_in_page(sm_url)
+                if not content:
+                    return
+                page_urls, child_sms = _seo_parse_sitemap_xml(content, root_netloc)
+                sitemap_urls.extend(page_urls)
+                for child in child_sms:
+                    await _parse_sm(child, depth + 1)
+            for sm in sitemap_candidates:
+                await _parse_sm(sm)
+        except Exception:
+            pass
+        await browser.close()
+
+    all_urls = list(set([_seo_normalise_url(resolved_url)] + sitemap_urls + navbar_urls + homepage_links))
+    return _seo_build_prescan_result(_seo_normalise_url(resolved_url), root_netloc, all_urls, navbar_urls)
+
+
+def _seo_prescan(start_url: str) -> dict:
+    try:
+        return _asyncio.run(_seo_prescan_async(start_url))
+    except Exception:
+        # Fallback to urllib
+        resolved_url, root_netloc = _seo_resolve_url(start_url)
+        sitemap_urls = []
+        try:
+            sitemap_urls = _seo_fetch_sitemap_urls(resolved_url, root_netloc)
+        except Exception:
+            pass
+        navbar_urls = []
+        homepage_links = []
+        try:
+            req = _urllib_req.Request(resolved_url, headers={"User-Agent": _SEO_UA})
+            with _urllib_req.urlopen(req, timeout=15) as resp:
+                html = resp.read().decode("utf-8", errors="ignore")
+            navbar_urls = _seo_extract_navbar_links(html, resolved_url, root_netloc)
+            soup = _BeautifulSoup(html, "lxml")
+            for a in soup.find_all("a", href=True):
+                href = a["href"].strip()
+                if href.startswith(("#", "mailto:", "tel:", "javascript:")):
+                    continue
+                full = _urljoin(resolved_url, href)
+                parsed = _urlparse(full)
+                if _seo_same_site(parsed.netloc, root_netloc):
+                    homepage_links.append(_seo_normalise_url(full))
+        except Exception:
+            pass
+        all_urls = list(set([resolved_url] + sitemap_urls + navbar_urls + homepage_links))
+        return _seo_build_prescan_result(resolved_url, root_netloc, all_urls, navbar_urls)
+
+
+def _seo_build_site_summary(reports: list) -> dict:
+    total_pages = len(reports)
+    if total_pages == 0:
+        return {"total_pages": 0}
+    avg_score = round(sum(r["scores"]["percentage"] for r in reports) / total_pages)
+    all_issues = []
+    section_pass_counts: dict = {}
+    site_keywords: _Counter = _Counter()
+    site_bigrams: _Counter = _Counter()
+    total_words = 0
+    for r in reports:
+        for iss in r.get("all_issues", []):
+            all_issues.append({**iss, "url": r["url"]})
+        for sec_name, sec in r.get("sections", {}).items():
+            if sec_name not in section_pass_counts:
+                section_pass_counts[sec_name] = {"pass": 0, "total": 0}
+            section_pass_counts[sec_name]["total"] += 1
+            if sec.get("pass"):
+                section_pass_counts[sec_name]["pass"] += 1
+        content = r.get("sections", {}).get("content", {})
+        total_words += content.get("word_count", 0)
+        for kw in content.get("top_keywords", []):
+            site_keywords[kw["word"]] += kw["count"]
+        for bg in content.get("bigrams", []):
+            site_bigrams[bg["phrase"]] += bg["count"]
+    sorted_reports = sorted(reports, key=lambda r: r["scores"]["percentage"])
+    worst_pages = [{"url": r["url"], "score": r["scores"]["percentage"],
+                    "issue_count": len(r.get("all_issues", []))} for r in sorted_reports[:5]]
+    return {
+        "total_pages": total_pages, "avg_score": avg_score, "total_words": total_words,
+        "total_issues": len(all_issues), "all_issues": all_issues,
+        "section_pass_rates": section_pass_counts,
+        "site_keywords": [{"word": w, "count": c} for w, c in site_keywords.most_common(30)],
+        "site_bigrams": [{"phrase": p, "count": c} for p, c in site_bigrams.most_common(15)],
+        "worst_pages": worst_pages,
+    }
+
+
+def _seo_run_crawl(start_url: str, max_pages: int, state: dict, outputs_dir: "Path",
+                   seed_urls=None, allowed_branches=None):
+    _asyncio.run(_seo_async_crawl(start_url, max_pages, state, outputs_dir, seed_urls, allowed_branches))
+
+
+async def _seo_async_crawl(start_url: str, max_pages: int, state: dict, outputs_dir: "Path",
+                            seed_urls=None, allowed_branches=None):
+    from playwright.async_api import async_playwright
+
+    if seed_urls is not None:
+        parsed_root = _urlparse(start_url)
+        root_netloc = parsed_root.netloc
+        state["q"].put({"type": "status", "page": 0, "url": start_url,
+                        "queued": len(seed_urls), "total_found": len(seed_urls),
+                        "message": f"Starting crawl of {len(seed_urls)} selected URLs…"})
+    else:
+        resolved_url = start_url
+        try:
+            req = _urllib_req.Request(start_url, headers={"User-Agent": _SEO_UA}, method="HEAD")
+            with _urllib_req.urlopen(req, timeout=10) as resp:
+                resolved_url = resp.url
+        except Exception:
+            try:
+                req = _urllib_req.Request(start_url, headers={"User-Agent": _SEO_UA})
+                with _urllib_req.urlopen(req, timeout=10) as resp:
+                    resolved_url = resp.url
+            except Exception:
+                pass
+        parsed_root = _urlparse(resolved_url)
+        root_netloc = parsed_root.netloc
+        start_url = _seo_normalise_url(resolved_url)
+        state["q"].put({"type": "status", "page": 0, "url": start_url,
+                        "queued": 0, "total_found": 1,
+                        "message": f"Resolved to {root_netloc}, checking sitemap…"})
+        sitemap_urls_found = []
+        try:
+            sitemap_urls_found = _seo_fetch_sitemap_urls(start_url, root_netloc)
+            if sitemap_urls_found:
+                state["q"].put({"type": "status", "page": 0, "url": start_url,
+                                "queued": len(sitemap_urls_found), "total_found": len(sitemap_urls_found),
+                                "message": f"Found {len(sitemap_urls_found)} URLs in sitemap"})
+        except Exception:
+            pass
+        seed_urls = [start_url] + sitemap_urls_found
+
+    def _url_matches_branches(u: str) -> bool:
+        if allowed_branches is None:
+            return True
+        if allowed_branches == []:
+            return False
+        parsed = _urlparse(u)
+        parts = [p for p in parsed.path.strip("/").split("/") if p]
+        branch = "/" + parts[0] + "/" if parts else "/"
+        return branch in allowed_branches
+
+    visited: set = set()
+    to_visit_set: set = set()
+    to_visit: list = []
+
+    def _enqueue(u: str, force: bool = False):
+        norm = _seo_normalise_url(u)
+        if norm not in visited and norm not in to_visit_set and (force or _url_matches_branches(norm)):
+            to_visit_set.add(norm)
+            to_visit.append(norm)
+
+    for su in seed_urls:
+        _enqueue(su, force=True)
+
+    page_reports: list = []
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(
+            user_agent=_SEO_UA, viewport={"width": 1920, "height": 1080},
+        )
+        pages_tabs = [await context.new_page() for _ in range(_SEO_PARALLEL_TABS)]
+
+        async def _process_url(tab, url_to_crawl):
+            try:
+                html, timing = await _seo_fetch_rendered_html(url_to_crawl, tab)
+            except Exception as exc:
+                state["q"].put({"type": "page_error", "url": url_to_crawl, "error": str(exc)[:300]})
+                return
+            try:
+                new_links = _seo_discover_internal_links(html, url_to_crawl, root_netloc)
+                for link in new_links:
+                    _enqueue(link)
+            except Exception:
+                pass
+            try:
+                report = _seo_analyze_html(html, url_to_crawl, timing)
+                page_reports.append(report)
+                state["q"].put({"type": "page_done", "report": report})
+            except Exception as exc:
+                state["q"].put({"type": "page_error", "url": url_to_crawl, "error": str(exc)[:300]})
+
+        while to_visit and len(visited) < max_pages:
+            batch: list = []
+            while to_visit and len(batch) < _SEO_PARALLEL_TABS and (len(visited) + len(batch)) < max_pages:
+                url = to_visit.pop(0)
+                norm = _seo_normalise_url(url)
+                if norm in visited:
+                    continue
+                visited.add(norm)
+                batch.append(norm)
+            if not batch:
+                break
+            page_num = len(visited)
+            state["q"].put({"type": "status", "page": page_num, "url": batch[0],
+                            "queued": len(to_visit), "total_found": len(visited) + len(to_visit)})
+            await _asyncio.gather(*[_process_url(pages_tabs[i % len(pages_tabs)], burl)
+                                    for i, burl in enumerate(batch)])
+
+        await browser.close()
+
+    summary = _seo_build_site_summary(page_reports)
+    try:
+        saved = _seo_save_report_files(start_url, summary, page_reports, outputs_dir)
+        state["q"].put({"type": "status", "page": len(visited), "url": "",
+                        "queued": 0, "total_found": len(visited),
+                        "message": f"Report saved: {Path(saved['json']).name}"})
+    except Exception as e:
+        state["q"].put({"type": "status", "page": len(visited), "url": "",
+                        "queued": 0, "total_found": len(visited),
+                        "message": f"Warning: could not save report: {e}"})
+    state["q"].put({"type": "complete", "summary": summary})
+
+
+# ---- SEO Routes -----------------------------------------------------------
+
+def _seo_check_available():
+    if not _SEO_AVAILABLE:
+        from flask import jsonify as _j
+        return _j({"error": "SEO Analyzer dependencies not installed on this server."}), 503
+    return None
+
+
+@app.post("/seo/analyze")
+@require_auth
+def seo_analyze():
+    err = _seo_check_available()
+    if err:
+        return err
+    data = request.get_json(force=True)
+    url = data.get("url", "").strip()
+    if not url:
+        return jsonify({"error": "No URL provided."}), 400
+    if not url.startswith("http"):
+        url = "https://" + url
+
+    async def _single():
+        from playwright.async_api import async_playwright
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            ctx = await browser.new_context(user_agent=_SEO_UA, viewport={"width": 1920, "height": 1080})
+            page = await ctx.new_page()
+            html, timing = await _seo_fetch_rendered_html(url, page)
+            await browser.close()
+        return html, timing
+
+    try:
+        html, timing = _asyncio.run(_single())
+    except Exception as e:
+        return jsonify({"error": f"Failed to fetch page: {e}"}), 500
+    try:
+        report = _seo_analyze_html(html, url, timing)
+    except Exception as e:
+        return jsonify({"error": f"Analysis failed: {e}"}), 500
+    return jsonify(report)
+
+
+@app.post("/seo/prescan")
+@require_auth
+def seo_prescan():
+    err = _seo_check_available()
+    if err:
+        return err
+    data = request.get_json(force=True)
+    url = data.get("url", "").strip()
+    if not url:
+        return jsonify({"error": "No URL provided."}), 400
+    if not url.startswith("http"):
+        url = "https://" + url
+    try:
+        result = _seo_prescan(url)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": f"Pre-scan failed: {e}"}), 500
+
+
+@app.post("/seo/crawl")
+@require_auth
+def seo_crawl_start():
+    err = _seo_check_available()
+    if err:
+        return err
+    data = request.get_json(force=True)
+    url = data.get("url", "").strip()
+    max_pages = min(int(data.get("max_pages", 100)), 500)
+    if not url:
+        return jsonify({"error": "No URL provided."}), 400
+    if not url.startswith("http"):
+        url = "https://" + url
+
+    user_id = str(g.current_user["id"])
+    outputs_dir = _seo_user_dir(user_id)
+    seed_urls = data.get("seed_urls")
+    allowed_branches = data.get("allowed_branches")
+
+    state: dict = {"q": _queue.Queue(), "started": True}
+    _seo_crawl_states[user_id] = state
+
+    t = _threading.Thread(
+        target=_seo_run_crawl,
+        args=(url, max_pages, state, outputs_dir, seed_urls, allowed_branches),
+        daemon=True,
+    )
+    t.start()
+    return jsonify({"status": "started", "url": url, "max_pages": max_pages})
+
+
+@app.get("/seo/crawl/stream")
+@require_auth
+def seo_crawl_stream():
+    user_id = str(g.current_user["id"])
+
+    def generate():
+        state = _seo_crawl_states.get(user_id)
+        if not state or not state.get("started"):
+            yield f"data: {json.dumps({'type': 'error', 'error': 'No crawl in progress'})}\n\n"
+            return
+        q = state["q"]
+        while True:
+            try:
+                msg = q.get(timeout=120)
+                yield f"data: {json.dumps(msg)}\n\n"
+                if msg.get("type") == "complete":
+                    break
+            except Exception:
+                yield f"data: {json.dumps({'type': 'error', 'error': 'Timeout waiting for crawl data'})}\n\n"
+                break
+
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.get("/seo/reports")
+@require_auth
+def seo_list_reports():
+    user_id = str(g.current_user["id"])
+    outputs_dir = _seo_user_dir(user_id)
+    try:
+        reports = []
+        for f in sorted(outputs_dir.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+            try:
+                stat = f.stat()
+                reports.append({
+                    "filename": f.name,
+                    "size": stat.st_size,
+                    "modified": datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                })
+            except Exception:
+                continue
+        return jsonify({"reports": reports}), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to list reports: {str(e)}"}), 500
+
+
+@app.get("/seo/reports/<filename>")
+@require_auth
+def seo_get_report(filename):
+    import re as _re2
+    if not _re2.match(r'^[\w.\-]+\.json$', filename):
+        return jsonify({"error": "Invalid filename"}), 400
+    user_id = str(g.current_user["id"])
+    outputs_dir = _seo_user_dir(user_id)
+    file_path = outputs_dir / filename
+    if not file_path.exists():
+        return jsonify({"error": "Report not found"}), 404
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": f"Failed to load report: {e}"}), 500
 
 
 # ─── HEIC → JPEG conversion ──────────────────────────────────────────────────

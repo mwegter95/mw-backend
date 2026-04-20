@@ -18,6 +18,9 @@ env/
 .env/
 
 # ─── Environment variables / secrets ─────────────────────────────────────────
+
+# One-shot migration scripts (may contain credentials)
+migrate_*.py
 .env
 .env.*
 *.env

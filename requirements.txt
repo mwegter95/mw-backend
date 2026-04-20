@@ -5,3 +5,8 @@ PyJWT>=2.8
 pillow-heif>=0.15
 waitress>=3.0
 cryptography>=42.0
+# SEO Analyzer
+playwright>=1.49
+beautifulsoup4>=4.12
+lxml>=5.3
+textstat>=0.7

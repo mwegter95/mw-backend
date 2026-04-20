@@ -46,6 +46,13 @@ echo "→ Installing dependencies..."
 ./$VENV_BIN/pip install --quiet -r requirements.txt
 echo "✓ Dependencies installed"
 
+# 3b. Install Playwright browser (needed by SEO Analyzer)
+echo "→ Installing Playwright Chromium browser (for SEO Analyzer)..."
+./$VENV_BIN/playwright install chromium --with-deps 2>/dev/null || \
+  ./$VENV_BIN/python -m playwright install chromium 2>/dev/null || \
+  echo "  ⚠  Playwright install failed — re-run manually: playwright install chromium"
+echo "✓ Playwright ready"
+
 # 4. .env file
 if [ ! -f ".env" ]; then
   echo ""
