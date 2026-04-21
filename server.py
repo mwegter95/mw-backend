@@ -768,7 +768,7 @@ def _seo_extract_keywords(words, top_n=20):
         "up also back still even new now old well way because thing things "
         "much get got go going know like make us am are".split()
     )
-    filtered = [w for w in words if w not in stop and len(w) > 2]
+    filtered = [w for w in words if w not in stop and len(w) >= 2]
     return _Counter(filtered).most_common(top_n)
 
 
@@ -782,7 +782,7 @@ def _seo_extract_ngrams(words, n=2, top_k=10):
     ngrams = []
     for i in range(len(words) - n + 1):
         gram = words[i: i + n]
-        if not any(w in stop for w in gram) and all(len(w) > 2 for w in gram):
+        if not any(w in stop for w in gram) and all(len(w) >= 2 for w in gram):
             ngrams.append(" ".join(gram))
     return _Counter(ngrams).most_common(top_k)
 
@@ -1056,8 +1056,20 @@ async def _seo_fetch_rendered_html(url: str, page) -> tuple:
 def _seo_normalise_url(url: str) -> str:
     parsed = _urlparse(url)
     path = parsed.path.rstrip("/") or "/"
-    clean = parsed._replace(fragment="", path=path)
+    # Preserve SPA hash-routes where the fragment looks like a path (e.g. #/resume).
+    # Strip plain page anchors (#section) since those aren't separate pages.
+    frag = parsed.fragment if parsed.fragment.startswith("/") else ""
+    clean = parsed._replace(fragment=frag, path=path)
     return clean.geturl()
+
+
+def _seo_is_skip_href(href: str) -> bool:
+    """True for page anchors, mailto, tel, javascript — but NOT SPA hash-routes like #/path."""
+    if href.startswith(("mailto:", "tel:", "javascript:")):
+        return True
+    if href.startswith("#") and not href.startswith("#/"):
+        return True
+    return False
 
 
 def _seo_same_site(netloc_a: str, netloc_b: str) -> bool:
@@ -1071,7 +1083,7 @@ def _seo_discover_internal_links(html: str, base_url: str, root_netloc: str) -> 
     found: set = set()
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
-        if href.startswith(("#", "mailto:", "tel:", "javascript:")):
+        if _seo_is_skip_href(href):
             continue
         full = _urljoin(base_url, href)
         parsed = _urlparse(full)
@@ -1197,7 +1209,7 @@ def _seo_extract_navbar_links(html: str, base_url: str, root_netloc: str) -> lis
     for container in nav_containers:
         for a in container.find_all("a", href=True):
             href = a["href"].strip()
-            if href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            if _seo_is_skip_href(href):
                 continue
             full = _urljoin(base_url, href)
             parsed = _urlparse(full)
@@ -1284,7 +1296,7 @@ async def _seo_prescan_async(start_url: str) -> dict:
             soup = _BeautifulSoup(html, "lxml")
             for a in soup.find_all("a", href=True):
                 href = a["href"].strip()
-                if href.startswith(("#", "mailto:", "tel:", "javascript:")):
+                if _seo_is_skip_href(href):
                     continue
                 full = _urljoin(resolved_url, href)
                 p = _urlparse(full)
@@ -1356,7 +1368,7 @@ def _seo_prescan(start_url: str) -> dict:
             soup = _BeautifulSoup(html, "lxml")
             for a in soup.find_all("a", href=True):
                 href = a["href"].strip()
-                if href.startswith(("#", "mailto:", "tel:", "javascript:")):
+                if _seo_is_skip_href(href):
                     continue
                 full = _urljoin(resolved_url, href)
                 parsed = _urlparse(full)
