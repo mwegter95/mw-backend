@@ -34,6 +34,7 @@ data/mw.db
 data/mw.db-journal
 data/mw.db-shm
 data/mw.db-wal
+**/data
 *.db
 *.sqlite
 *.sqlite3
@@ -64,4 +65,4 @@ logs/
 htmlcov/
 
 # ─── Miscellaneous ─────────────────────────────────────────────────────────────
-DEPLOYMENT.md
+
