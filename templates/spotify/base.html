@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{% block title %}Spotify Super User Tools{% endblock %}</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+
+      body {
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+          background: linear-gradient(135deg, #1DB954 0%, #191414 100%);
+          min-height: 100vh;
+      }
+
+      /* ── Navbar ─────────────────────────────────────── */
+      nav {
+          background: #191414;
+          padding: 0 30px;
+          display: flex;
+          align-items: center;
+          height: 60px;
+          box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+          position: sticky;
+          top: 0;
+          z-index: 100;
+      }
+
+      .nav-brand {
+          color: #1DB954;
+          font-weight: 700;
+          font-size: 1.2em;
+          margin-right: 40px;
+          text-decoration: none;
+          white-space: nowrap;
+      }
+
+      .nav-links {
+          display: flex;
+          gap: 5px;
+          flex-wrap: wrap;
+      }
+
+      .nav-links a {
+          color: #b3b3b3;
+          text-decoration: none;
+          padding: 8px 18px;
+          border-radius: 20px;
+          font-weight: 500;
+          font-size: 0.95em;
+          transition: all 0.2s;
+      }
+
+      .nav-links a:hover {
+          color: white;
+          background: rgba(255,255,255,0.1);
+      }
+
+      .nav-links a.active {
+          color: white;
+          background: #1DB954;
+      }
+
+      /* ── Page layout ────────────────────────────────── */
+      .page-wrapper {
+          display: flex;
+          justify-content: center;
+          padding: 40px 20px;
+      }
+
+      .container {
+          background: white;
+          border-radius: 20px;
+          box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+          max-width: 900px;
+          width: 100%;
+          padding: 40px;
+      }
+
+      h1 {
+          color: #191414;
+          font-size: 2.2em;
+          margin-bottom: 8px;
+      }
+
+      .subtitle {
+          color: #666;
+          margin-bottom: 30px;
+          font-size: 1.05em;
+      }
+
+      label {
+          display: block;
+          color: #333;
+          font-weight: 600;
+          margin-bottom: 8px;
+          font-size: 0.95em;
+      }
+
+      input[type="text"], textarea {
+          width: 100%;
+          padding: 14px;
+          border: 2px solid #e0e0e0;
+          border-radius: 10px;
+          font-size: 1em;
+          transition: border-color 0.3s;
+          font-family: inherit;
+      }
+
+      input[type="text"]:focus, textarea:focus {
+          outline: none;
+          border-color: #1DB954;
+      }
+
+      .button-group {
+          display: flex;
+          gap: 10px;
+          margin-top: 15px;
+          flex-wrap: wrap;
+      }
+
+      button, .btn {
+          padding: 14px 28px;
+          font-size: 1em;
+          font-weight: 600;
+          border: none;
+          border-radius: 10px;
+          cursor: pointer;
+          transition: all 0.3s;
+          text-decoration: none;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+      }
+
+      .btn-primary {
+          background: #1DB954;
+          color: white;
+      }
+
+      .btn-primary:hover:not(:disabled) {
+          background: #1ed760;
+          transform: translateY(-1px);
+          box-shadow: 0 5px 15px rgba(29, 185, 84, 0.3);
+      }
+
+      .btn-primary:disabled {
+          background: #ccc;
+          cursor: not-allowed;
+          transform: none;
+      }
+
+      .btn-secondary {
+          background: #fff;
+          color: #1DB954;
+          border: 2px solid #1DB954;
+      }
+
+      .btn-secondary:hover:not(:disabled) {
+          background: #f0fdf4;
+      }
+
+      .btn-secondary:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+      }
+
+      .btn-danger {
+          background: #fff;
+          color: #e74c3c;
+          border: 2px solid #e74c3c;
+      }
+
+      .btn-danger:hover { background: #fdf0f0; }
+
+      .btn-sm {
+          padding: 8px 16px;
+          font-size: 0.85em;
+      }
+
+      .status {
+          padding: 15px;
+          border-radius: 10px;
+          margin-top: 15px;
+          display: none;
+      }
+
+      .status.show { display: block; }
+      .status.success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+      .status.error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+      .status.loading { background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
+
+      .spinner {
+          display: inline-block;
+          width: 16px;
+          height: 16px;
+          border: 3px solid rgba(0,0,0,0.1);
+          border-radius: 50%;
+          border-top-color: #1DB954;
+          animation: spin 0.8s linear infinite;
+          margin-right: 10px;
+          vertical-align: middle;
+      }
+
+      @keyframes spin { to { transform: rotate(360deg); } }
+
+      .input-section { margin-bottom: 20px; }
+      .example { color: #999; font-size: 0.88em; margin-top: 8px; }
+      .example a { color: #1DB954; }
+
+      {% block extra_styles %}{% endblock %}
+    </style>
+  </head>
+  <body>
+    <nav>
+      <a href="/spotify/" class="nav-brand">🎵 SSUT</a>
+      <div class="nav-links">
+        <a href="/spotify/extractor" class="{{ 'active' if active_page == 'extractor' else '' }}">Extractor</a>
+        <a href="/spotify/builder"   class="{{ 'active' if active_page == 'builder'   else '' }}">Builder</a>
+        <a href="/spotify/cleanify"  class="{{ 'active' if active_page == 'cleanify'  else '' }}">Cleanify</a>
+      </div>
+    </nav>
+
+    <div class="page-wrapper">
+      <div class="container">
+        {% block content %}{% endblock %}
+      </div>
+    </div>
+
+    {% block scripts %}{% endblock %}
+  </body>
+</html>

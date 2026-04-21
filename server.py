@@ -120,7 +120,16 @@ logging.getLogger("werkzeug").handlers = []   # remove default stderr handler
 logging.getLogger("werkzeug").addHandler(logging.StreamHandler(sys.stdout))
 
 app = Flask(__name__)
+app.secret_key = SECRET_KEY   # enables Flask sessions (used by Spotify OAuth blueprint)
+# SameSite=None + Secure required so session cookies work when SSUT is embedded
+# in an iframe on michaelwegter.com (cross-site context in modern browsers).
+app.config["SESSION_COOKIE_SAMESITE"] = "None"
+app.config["SESSION_COOKIE_SECURE"]   = True
 CORS(app, origins=_CORS_ORIGINS, supports_credentials=True)
+
+# ─── Spotify Super User Tools blueprint ──────────────────────────────────────
+from spotify_blueprint import spotify_bp
+app.register_blueprint(spotify_bp)
 
 from werkzeug.exceptions import HTTPException
 

@@ -1,0 +1,195 @@
+{% extends "base.html" %}
+{% set active_page = "cleanify" %}
+
+{% block title %}Cleanify — Spotify Super User Tools{% endblock %}
+
+{% block extra_styles %}
+.auth-bar { display:flex; align-items:center; justify-content:space-between;
+  background:#f5f5f5; padding:12px 18px; border-radius:10px; margin-bottom:25px; }
+.auth-bar .auth-status { display:flex; align-items:center; gap:8px; font-size:0.95em; }
+.dot { width:10px; height:10px; border-radius:50%; display:inline-block; }
+.dot.green { background:#1DB954; }
+.dot.gray  { background:#ccc; }
+.results-box { background:#f5f5f5; padding:20px; border-radius:10px; margin-top:20px; }
+.swap-list, .not-found-list { max-height:300px; overflow-y:auto; background:white;
+  padding:15px; border-radius:8px; margin-top:10px; }
+.swap-item { padding:8px 0; border-bottom:1px solid #e0e0e0; font-size:0.9em; }
+.swap-item:last-child { border-bottom:none; }
+.swap-item .arrow { color:#1DB954; margin:0 8px; font-weight:bold; }
+.not-found-item { padding:6px 0; color:#666; font-size:0.9em; }
+.playlist-link { display:inline-block; background:#1DB954; color:white;
+  padding:12px 24px; border-radius:8px; text-decoration:none; font-weight:600;
+  margin-top:15px; transition:all 0.3s; }
+.playlist-link:hover { background:#1ed760; transform:translateY(-1px); }
+.output-mode { background:#f0f0f0; padding:15px; border-radius:8px; margin:15px 0; }
+.output-mode label { font-weight:600; margin-bottom:10px; display:block; color:#191414; }
+.radio-group { display:flex; flex-direction:column; gap:10px; }
+.radio-option { display:flex; align-items:flex-start; cursor:pointer; }
+.radio-option input[type="radio"] { margin-right:10px; margin-top:2px; accent-color:#1DB954; cursor:pointer; }
+.radio-option label { cursor:pointer; margin:0; font-weight:400; }
+.radio-option .label-text { font-weight:500; color:#191414; }
+.radio-option .label-desc { font-size:0.85em; color:#666; margin-top:2px; }
+{% endblock %}
+
+{% block content %}
+<h1>🧼 Cleanify</h1>
+<p class="subtitle">Create a clean (non-explicit) version of any Spotify playlist</p>
+
+<div class="auth-bar">
+  <div class="auth-status">
+    <span class="dot {{ 'green' if authenticated else 'gray' }}"></span>
+    {% if authenticated %}
+      <span>Connected to Spotify</span>
+    {% else %}
+      <span>Not connected — required to create playlists</span>
+    {% endif %}
+  </div>
+  {% if authenticated %}
+    <a href="/spotify/logout" class="btn btn-danger btn-sm">Disconnect</a>
+  {% else %}
+    <a href="#" class="btn btn-primary btn-sm" onclick="loginWithSpotify(); return false;">
+      Connect to Spotify
+    </a>
+  {% endif %}
+</div>
+
+<div class="input-section">
+  <label for="playlistUrl">Playlist URL or ID</label>
+  <input type="text" id="playlistUrl"
+    placeholder="https://open.spotify.com/playlist/…"
+    autocomplete="off" />
+  <p class="example">
+    Paste a Spotify playlist link or just the playlist ID.
+    The app will find clean versions where possible.
+  </p>
+
+  <div class="output-mode">
+    <label>Output Mode:</label>
+    <div class="radio-group">
+      <div class="radio-option">
+        <input type="radio" id="modeAll" name="outputMode" value="all" checked />
+        <label for="modeAll">
+          <div class="label-text">📋 Whole playlist with cleaned tracks</div>
+          <div class="label-desc">Includes all tracks: already clean + swapped to clean + explicit (when clean version not found)</div>
+        </label>
+      </div>
+      <div class="radio-option">
+        <input type="radio" id="modeCleaned" name="outputMode" value="cleaned_only" />
+        <label for="modeCleaned">
+          <div class="label-text">✨ Only cleaned tracks</div>
+          <div class="label-desc">Includes ONLY tracks that were swapped from explicit to clean</div>
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <div class="button-group">
+    <button class="btn-primary" id="cleanifyBtn" onclick="cleanifyPlaylist()"
+      {{ 'disabled title="Connect to Spotify first"' if not authenticated else '' }}>
+      🧼 Cleanify!
+    </button>
+  </div>
+</div>
+
+<div id="status" class="status"></div>
+
+<div id="resultsSection" style="display:none">
+  <div class="results-box">
+    <h2>🎉 Clean Playlist Created!</h2>
+    <p id="playlistInfo" style="color:#666;margin-bottom:10px"></p>
+    <a id="playlistLink" href="#" target="_blank" rel="noopener" class="playlist-link">
+      Open Playlist on Spotify
+    </a>
+
+    <div id="swappedSection" style="display:none;margin-top:25px">
+      <h3>✅ Swapped to Clean Versions (<span id="swappedCount">0</span>)</h3>
+      <div id="swappedList" class="swap-list"></div>
+    </div>
+
+    <div id="notFoundSection" style="display:none;margin-top:25px">
+      <h3>⚠️ No Clean Version Found (<span id="notFoundCount">0</span>)</h3>
+      <p style="color:#666;font-size:0.9em;margin-top:5px">These tracks were kept as-is</p>
+      <div id="notFoundList" class="not-found-list"></div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function loginWithSpotify() {
+    const popup = window.open('/spotify/login', 'spotify_auth',
+      'width=600,height=700,scrollbars=yes,resizable=yes');
+    if (!popup) {
+      window.location.href = '/spotify/login';
+      return;
+    }
+    const pollTimer = setInterval(function () {
+      if (popup.closed) {
+        clearInterval(pollTimer);
+        window.location.reload();
+      }
+    }, 500);
+  }
+
+  function showStatus(msg, type) {
+    const el = document.getElementById('status');
+    el.className = `status show ${type}`;
+    el.innerHTML = type === 'loading' ? `<span class="spinner"></span>${msg}` : msg;
+  }
+
+  async function cleanifyPlaylist() {
+    const url = document.getElementById('playlistUrl').value.trim();
+    if (!url) { showStatus('Please enter a playlist URL or ID', 'error'); return; }
+
+    const outputMode = document.querySelector('input[name="outputMode"]:checked').value;
+    document.getElementById('cleanifyBtn').disabled = true;
+    showStatus('Processing playlist and searching for clean versions…', 'loading');
+    document.getElementById('resultsSection').style.display = 'none';
+    document.getElementById('swappedSection').style.display = 'none';
+    document.getElementById('notFoundSection').style.display = 'none';
+
+    try {
+      const res = await fetch('/spotify/cleanify-playlist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ playlist_url: url, output_mode: outputMode }),
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        const modeText = data.output_mode === 'cleaned_only'
+          ? ` (${data.total_in_new_playlist} cleaned tracks)`
+          : ` (${data.total_in_new_playlist} total tracks)`;
+        document.getElementById('playlistInfo').textContent =
+          `New playlist: ${data.playlist_name}${modeText}`;
+        document.getElementById('playlistLink').href = data.playlist_url;
+
+        if (data.swapped && data.swapped.length > 0) {
+          document.getElementById('swappedSection').style.display = 'block';
+          document.getElementById('swappedCount').textContent = data.swapped.length;
+          document.getElementById('swappedList').innerHTML =
+            data.swapped.map(s =>
+              `<div class="swap-item">${s.original}<span class="arrow">→</span>${s.replacement}</div>`
+            ).join('');
+        }
+        if (data.not_found && data.not_found.length > 0) {
+          document.getElementById('notFoundSection').style.display = 'block';
+          document.getElementById('notFoundCount').textContent = data.not_found.length;
+          document.getElementById('notFoundList').innerHTML =
+            data.not_found.map(t => `<div class="not-found-item">⚠️ ${t}</div>`).join('');
+        }
+
+        document.getElementById('resultsSection').style.display = 'block';
+        showStatus('✓ Done!', 'success');
+      } else {
+        showStatus(`Error: ${data.error}`, 'error');
+      }
+    } catch (e) {
+      showStatus(`Error: ${e.message}`, 'error');
+    } finally {
+      document.getElementById('cleanifyBtn').disabled = false;
+    }
+  }
+</script>
+{% endblock %}

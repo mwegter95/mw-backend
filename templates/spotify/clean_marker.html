@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% set active_page = "clean_marker" %}
+
+{% block title %}Clean Marker — Spotify Super User Tools{% endblock %}
+
+{% block content %}
+<h1>🏷️ Clean Marker</h1>
+<p class="subtitle">Add "(clean)" to filenames and ID3 tags for all tracks in a folder</p>
+
+<div style="background:#fff3cd;border:1px solid #ffc107;border-radius:12px;padding:24px;margin-top:10px;">
+  <h3 style="color:#856404;margin-bottom:12px">🖥️ Local Tool Only</h3>
+  <p style="color:#856404;line-height:1.6;">
+    The Clean Marker requires direct access to your local music files and
+    cannot run as a web service. It is available when you run
+    <strong>Spotify Super User Tools locally</strong> on your own machine.
+  </p>
+  <p style="color:#856404;margin-top:12px;line-height:1.6;">
+    To use it, clone the
+    <a href="https://github.com/mwegter95/spotify-super-user-tools"
+       target="_blank" rel="noopener" style="color:#856404;font-weight:600;">
+      SSUT repository
+    </a>
+    and follow the README instructions to run the app locally.
+  </p>
+</div>
+{% endblock %}

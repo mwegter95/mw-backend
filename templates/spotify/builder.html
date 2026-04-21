@@ -1,0 +1,243 @@
+{% extends "base.html" %}
+{% set active_page = "builder" %}
+
+{% block title %}Playlist Builder — Spotify Super User Tools{% endblock %}
+
+{% block extra_styles %}
+.auth-bar { display:flex; align-items:center; justify-content:space-between;
+  background:#f5f5f5; padding:12px 18px; border-radius:10px; margin-bottom:25px; }
+.auth-bar .auth-status { display:flex; align-items:center; gap:8px; font-size:0.95em; }
+.auth-bar .dot { width:10px; height:10px; border-radius:50%; display:inline-block; }
+.dot.green { background:#1DB954; }
+.dot.gray  { background:#ccc; }
+textarea#songList { min-height:220px; font-family:'Monaco','Courier New',monospace;
+  font-size:0.9em; line-height:1.7; }
+.results-section { margin-top:30px; }
+.song-result { border:2px solid #e0e0e0; border-radius:12px; padding:16px;
+  margin-bottom:12px; transition:border-color 0.2s; }
+.song-result:hover { border-color:#1DB954; }
+.song-query { font-weight:600; color:#333; margin-bottom:10px; font-size:1em; }
+.song-query .note { font-weight:400; color:#999; font-size:0.85em; }
+.match-options { display:flex; flex-direction:column; gap:6px; }
+.match-option { display:flex; align-items:center; gap:12px; padding:8px 12px;
+  border-radius:8px; cursor:pointer; transition:background 0.15s; }
+.match-option:hover { background:#f5f5f5; }
+.match-option input[type="radio"] { accent-color:#1DB954; width:18px; height:18px; flex-shrink:0; }
+.match-option img { width:40px; height:40px; border-radius:4px; flex-shrink:0; }
+.match-info { flex:1; min-width:0; }
+.match-name { font-weight:600; font-size:0.95em; color:#191414; }
+.match-detail { font-size:0.82em; color:#888; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.match-score { font-size:0.78em; color:#1DB954; font-weight:600; flex-shrink:0; }
+.no-match { color:#e74c3c; font-style:italic; font-size:0.9em; padding:8px 0; }
+.playlist-name-section { margin-top:20px; display:flex; align-items:center; gap:12px; }
+.playlist-name-section input { flex:1; }
+.success-box { background:#d4edda; border:1px solid #c3e6cb; border-radius:10px;
+  padding:20px; margin-top:20px; text-align:center; }
+.success-box a { color:#1DB954; font-weight:600; }
+{% endblock %}
+
+{% block content %}
+<h1>🔨 Playlist Builder</h1>
+<p class="subtitle">Paste a list of songs and artists to search Spotify and build a playlist</p>
+
+<div class="auth-bar">
+  <div class="auth-status">
+    <span class="dot {{ 'green' if authenticated else 'gray' }}"></span>
+    {% if authenticated %}
+      <span>Connected to Spotify</span>
+    {% else %}
+      <span>Not connected — required to create playlists</span>
+    {% endif %}
+  </div>
+  {% if authenticated %}
+    <a href="/spotify/logout" class="btn btn-danger btn-sm">Disconnect</a>
+  {% else %}
+    <a href="#" class="btn btn-primary btn-sm" onclick="loginWithSpotify(); return false;">
+      Connect to Spotify
+    </a>
+  {% endif %}
+</div>
+
+<div class="input-section">
+  <label for="songList">Song List
+    <span style="font-weight:400;color:#999">(one per line: Song — Artist)</span>
+  </label>
+  <textarea id="songList"
+    placeholder="Can't Help Falling in Love — Tommy Emmanuel
+Thinking Out Loud — The Piano Guys
+All of Me — Simply Three
+A Thousand Years — 2CELLOS
+Perfect — Paul Cardall"></textarea>
+  <p class="example">
+    Supports <strong>—</strong> (em-dash), <strong>–</strong> (en-dash), or
+    <strong>-</strong> (hyphen) as separators.
+    <a href="#" onclick="loadExample(); return false;">Load example list</a>
+  </p>
+  <div class="button-group">
+    <button class="btn-primary" id="searchBtn" onclick="searchSongs()">
+      🔍 Search Songs
+    </button>
+  </div>
+</div>
+
+<div id="status" class="status"></div>
+
+<div id="resultsSection" class="results-section" style="display:none">
+  <h2 style="margin-bottom:15px">Search Results</h2>
+  <p style="color:#666;margin-bottom:15px;font-size:0.9em">
+    Review matches below. The best match is pre-selected — change if needed.
+  </p>
+  <div id="resultsContainer"></div>
+
+  <div class="playlist-name-section">
+    <label for="playlistName" style="margin:0;white-space:nowrap">Playlist Name:</label>
+    <input type="text" id="playlistName" value="My Custom Playlist" style="flex:1" />
+  </div>
+
+  <div class="button-group" style="margin-top:15px">
+    <button class="btn-primary" id="createBtn" onclick="createPlaylist()"
+      {{ 'disabled title="Connect to Spotify first"' if not authenticated else '' }}>
+      🚀 Create Playlist on Spotify
+    </button>
+  </div>
+
+  <div id="successBox" class="success-box" style="display:none"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  let searchResults = [];
+
+  function loginWithSpotify() {
+    const popup = window.open('/spotify/login', 'spotify_auth',
+      'width=600,height=700,scrollbars=yes,resizable=yes');
+    if (!popup) {
+      // Popup blocked — fall back to full redirect
+      window.location.href = '/spotify/login';
+      return;
+    }
+    const pollTimer = setInterval(function () {
+      if (popup.closed) {
+        clearInterval(pollTimer);
+        window.location.reload();
+      }
+    }, 500);
+  }
+
+  function loadExample() {
+    document.getElementById('songList').value =
+      `Can't Help Falling in Love — Tommy Emmanuel (fingerstyle guitar)
+Thinking Out Loud — The Piano Guys
+All of Me — Simply Three (string trio)
+A Thousand Years — 2CELLOS
+Perfect — Paul Cardall (solo piano)`;
+  }
+
+  function showStatus(msg, type) {
+    const el = document.getElementById('status');
+    el.className = `status show ${type}`;
+    el.innerHTML = type === 'loading' ? `<span class="spinner"></span>${msg}` : msg;
+  }
+
+  async function searchSongs() {
+    const text = document.getElementById('songList').value.trim();
+    if (!text) { showStatus('Please enter a song list', 'error'); return; }
+
+    document.getElementById('searchBtn').disabled = true;
+    showStatus('Searching Spotify for each song…', 'loading');
+    document.getElementById('resultsSection').style.display = 'none';
+
+    try {
+      const res = await fetch('/spotify/search-songs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ song_list: text }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        searchResults = data.results;
+        renderResults(data.results);
+        document.getElementById('resultsSection').style.display = 'block';
+        showStatus(`✓ Found matches for ${data.results.length} songs`, 'success');
+      } else {
+        showStatus(`Error: ${data.error}`, 'error');
+      }
+    } catch (e) {
+      showStatus(`Error: ${e.message}`, 'error');
+    } finally {
+      document.getElementById('searchBtn').disabled = false;
+    }
+  }
+
+  function renderResults(results) {
+    const container = document.getElementById('resultsContainer');
+    container.innerHTML = '';
+    results.forEach((result, i) => {
+      const q = result.query;
+      const div = document.createElement('div');
+      div.className = 'song-result';
+      let noteHtml = q.note ? ` <span class="note">(${q.note})</span>` : '';
+      let matchesHtml = '';
+      if (result.matches.length === 0) {
+        matchesHtml = '<div class="no-match">No matches found on Spotify</div>';
+      } else {
+        result.matches.forEach((match, j) => {
+          const checked = j === 0 ? 'checked' : '';
+          matchesHtml += `
+            <label class="match-option">
+              <input type="radio" name="track_${i}" value="${match.uri}" ${checked} />
+              <img src="${match.album_art || ''}" alt="" onerror="this.style.display='none'" />
+              <div class="match-info">
+                <div class="match-name">${match.name}</div>
+                <div class="match-detail">${match.artists} · ${match.album}</div>
+              </div>
+              <span class="match-score">${(match.score * 100).toFixed(0)}%</span>
+            </label>`;
+        });
+      }
+      div.innerHTML = `
+        <div class="song-query">${q.song}${noteHtml}
+          <span style="color:#999;font-weight:400"> — ${q.artist}</span>
+        </div>
+        <div class="match-options">${matchesHtml}</div>`;
+      container.appendChild(div);
+    });
+  }
+
+  async function createPlaylist() {
+    const name = document.getElementById('playlistName').value.trim() || 'My Custom Playlist';
+    const trackUris = [];
+    searchResults.forEach((_, i) => {
+      const selected = document.querySelector(`input[name="track_${i}"]:checked`);
+      if (selected) trackUris.push(selected.value);
+    });
+    if (!trackUris.length) { showStatus('No tracks selected', 'error'); return; }
+
+    document.getElementById('createBtn').disabled = true;
+    showStatus('Creating playlist on Spotify…', 'loading');
+
+    try {
+      const res = await fetch('/spotify/create-playlist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ playlist_name: name, track_uris: trackUris }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        showStatus(`✓ Playlist "${data.playlist_name}" created with ${data.track_count} tracks!`, 'success');
+        document.getElementById('successBox').style.display = 'block';
+        document.getElementById('successBox').innerHTML =
+          `🎉 <strong>${data.playlist_name}</strong> created!<br>
+           <a href="${data.playlist_url}" target="_blank" rel="noopener">Open on Spotify →</a>`;
+      } else {
+        showStatus(`Error: ${data.error}`, 'error');
+      }
+    } catch (e) {
+      showStatus(`Error: ${e.message}`, 'error');
+    } finally {
+      document.getElementById('createBtn').disabled = false;
+    }
+  }
+</script>
+{% endblock %}

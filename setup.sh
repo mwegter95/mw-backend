@@ -70,6 +70,13 @@ PORTFOLIO_URL=https://michaelwegter.com
 # SECRET_KEY is auto-generated and stored in data/.secret_key
 # You can override it here if you want:
 # SECRET_KEY=your-secret-here
+
+# ─── Spotify Super User Tools ────────────────────────────────
+# Get these from https://developer.spotify.com/dashboard
+SPOTIFY_CLIENT_ID=
+SPOTIFY_CLIENT_SECRET=
+# Must match the Redirect URI registered in your Spotify app:
+SPOTIFY_REDIRECT_URI=https://api.michaelwegter.com/spotify/callback
 EOF
   echo "✓ .env created — edit it to add your frontend URLs"
 else

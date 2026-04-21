@@ -10,3 +10,5 @@ playwright>=1.49
 beautifulsoup4>=4.12
 lxml>=5.3
 textstat>=0.7
+# Spotify Super User Tools
+spotipy>=2.23.0

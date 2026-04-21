@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% set active_page = "extractor" %}
+
+{% block title %}Playlist Extractor — Spotify Super User Tools{% endblock %}
+
+{% block content %}
+<h1>📋 Playlist Extractor</h1>
+<p class="subtitle">Extract song names and artists from any public Spotify playlist</p>
+
+<div class="input-section">
+  <label for="playlistUrl">Playlist URL</label>
+  <input type="text" id="playlistUrl"
+    placeholder="https://open.spotify.com/playlist/..."
+    autocomplete="off" />
+  <p class="example">
+    Example:
+    <a href="#" onclick="
+      document.getElementById('playlistUrl').value =
+        'https://open.spotify.com/playlist/7lu6fO7InnFlz70M5DPHKQ?si=ab109e047d6443d5';
+      return false;">Use test playlist</a>
+  </p>
+  <div class="button-group">
+    <button class="btn-primary" id="extractBtn" onclick="extractPlaylist()">
+      Extract Playlist
+    </button>
+  </div>
+</div>
+
+<div id="status" class="status"></div>
+
+<div id="outputSection" style="display:none; margin-top:30px">
+  <div id="playlistInfo" style="background:#f5f5f5;padding:15px;border-radius:10px;margin-bottom:15px;"></div>
+  <label for="output">Output</label>
+  <textarea id="output" readonly style="min-height:300px;font-family:'Monaco','Courier New',monospace;font-size:0.9em;line-height:1.6;"></textarea>
+  <div class="button-group">
+    <button class="btn-secondary" id="copyBtn" onclick="copyToClipboard()">
+      📋 Copy to Clipboard
+    </button>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function showStatus(msg, type) {
+    const el = document.getElementById('status');
+    el.className = `status show ${type}`;
+    el.innerHTML = type === 'loading' ? `<span class="spinner"></span>${msg}` : msg;
+  }
+
+  async function extractPlaylist() {
+    const url = document.getElementById('playlistUrl').value.trim();
+    if (!url) { showStatus('Please enter a playlist URL', 'error'); return; }
+
+    document.getElementById('extractBtn').disabled = true;
+    showStatus('Extracting playlist…', 'loading');
+    document.getElementById('outputSection').style.display = 'none';
+
+    try {
+      const res = await fetch('/spotify/extract', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ playlist_url: url }),
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        document.getElementById('playlistInfo').innerHTML =
+          `<h3 style="color:#1DB954;margin-bottom:5px;">${data.playlist_name}</h3>
+           <p style="color:#666;font-size:0.95em;">${data.count} tracks extracted</p>`;
+        document.getElementById('output').value = data.tracks.join('\n');
+        document.getElementById('outputSection').style.display = 'block';
+        showStatus(`✓ Successfully extracted ${data.count} tracks!`, 'success');
+      } else {
+        showStatus(`Error: ${data.error}`, 'error');
+      }
+    } catch (e) {
+      showStatus(`Error: ${e.message}`, 'error');
+    } finally {
+      document.getElementById('extractBtn').disabled = false;
+    }
+  }
+
+  function copyToClipboard() {
+    const ta = document.getElementById('output');
+    ta.select();
+    document.execCommand('copy');
+    const btn = document.getElementById('copyBtn');
+    const orig = btn.textContent;
+    btn.textContent = '✓ Copied!';
+    setTimeout(() => { btn.textContent = orig; }, 2000);
+  }
+</script>
+{% endblock %}
