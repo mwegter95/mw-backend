@@ -61,6 +61,35 @@
           background: #1DB954;
       }
 
+      @media (max-width: 600px) {
+          nav {
+              height: auto;
+              flex-wrap: wrap;
+              padding: 8px 16px;
+              gap: 6px;
+          }
+          .nav-brand {
+              flex: 1 0 100%;
+              margin-right: 0;
+              font-size: 1.05em;
+              padding-bottom: 6px;
+              border-bottom: 1px solid rgba(255,255,255,0.1);
+          }
+          .nav-links {
+              flex: 1 0 100%;
+              flex-wrap: nowrap;
+              overflow-x: auto;
+              scrollbar-width: none;
+              gap: 4px;
+          }
+          .nav-links::-webkit-scrollbar { display: none; }
+          .nav-links a {
+              padding: 6px 14px;
+              font-size: 0.9em;
+              white-space: nowrap;
+          }
+      }
+
       /* ── Page layout ────────────────────────────────── */
       .page-wrapper {
           display: flex;
