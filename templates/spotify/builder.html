@@ -31,6 +31,10 @@ textarea#songList { min-height:220px; font-family:'Monaco','Courier New',monospa
 .no-match { color:#e74c3c; font-style:italic; font-size:0.9em; padding:8px 0; }
 .playlist-name-section { margin-top:20px; display:flex; align-items:center; gap:12px; }
 .playlist-name-section input { flex:1; }
+.build-bar { display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+  background:#f9f9f9; border:2px solid #e0e0e0; border-radius:12px; padding:14px 16px; }
+.build-bar input[type="text"] { flex:1; min-width:160px; }
+.build-bar-label { font-weight:600; color:#333; white-space:nowrap; font-size:0.95em; }
 .success-box { background:#d4edda; border:1px solid #c3e6cb; border-radius:10px;
   padding:20px; margin-top:20px; text-align:center; }
 .success-box a { color:#1DB954; font-weight:600; }
@@ -87,15 +91,29 @@ Perfect — Paul Cardall"></textarea>
   <p style="color:#666;margin-bottom:15px;font-size:0.9em">
     Review matches below. The best match is pre-selected — change if needed.
   </p>
+
+  <!-- Build bar at top -->
+  <div class="build-bar" style="margin-bottom:20px">
+    <span class="build-bar-label">Playlist Name:</span>
+    <input type="text" id="playlistNameTop" value="My Custom Playlist"
+      oninput="syncPlaylistName('top')" />
+    <button class="btn-primary" id="createBtnTop" onclick="createPlaylist()"
+      {{ 'disabled title="Connect to Spotify first"' if not authenticated else '' }}>
+      🚀 Build Playlist
+    </button>
+  </div>
+
   <div id="resultsContainer"></div>
 
+  <!-- Build bar at bottom -->
   <div class="playlist-name-section">
-    <label for="playlistName" style="margin:0;white-space:nowrap">Playlist Name:</label>
-    <input type="text" id="playlistName" value="My Custom Playlist" style="flex:1" />
+    <label for="playlistNameBottom" style="margin:0;white-space:nowrap">Playlist Name:</label>
+    <input type="text" id="playlistNameBottom" value="My Custom Playlist"
+      oninput="syncPlaylistName('bottom')" style="flex:1" />
   </div>
 
   <div class="button-group" style="margin-top:15px">
-    <button class="btn-primary" id="createBtn" onclick="createPlaylist()"
+    <button class="btn-primary" id="createBtnBottom" onclick="createPlaylist()"
       {{ 'disabled title="Connect to Spotify first"' if not authenticated else '' }}>
       🚀 Create Playlist on Spotify
     </button>
@@ -113,15 +131,11 @@ Perfect — Paul Cardall"></textarea>
     const popup = window.open('/spotify/login', 'spotify_auth',
       'width=600,height=700,scrollbars=yes,resizable=yes');
     if (!popup) {
-      // Popup blocked — fall back to full redirect
       window.location.href = '/spotify/login';
       return;
     }
     const pollTimer = setInterval(function () {
-      if (popup.closed) {
-        clearInterval(pollTimer);
-        window.location.reload();
-      }
+      if (popup.closed) { clearInterval(pollTimer); window.location.reload(); }
     }, 500);
   }
 
@@ -138,6 +152,23 @@ Perfect — Paul Cardall (solo piano)`;
     const el = document.getElementById('status');
     el.className = `status show ${type}`;
     el.innerHTML = type === 'loading' ? `<span class="spinner"></span>${msg}` : msg;
+  }
+
+  /* Keep the two playlist name inputs in sync */
+  function syncPlaylistName(source) {
+    const top    = document.getElementById('playlistNameTop');
+    const bottom = document.getElementById('playlistNameBottom');
+    if (!top || !bottom) return;
+    if (source === 'top')    bottom.value = top.value;
+    if (source === 'bottom') top.value    = bottom.value;
+  }
+
+  /* Disable or enable both create buttons at once */
+  function setCreateBtnsDisabled(disabled) {
+    const top    = document.getElementById('createBtnTop');
+    const bottom = document.getElementById('createBtnBottom');
+    if (top)    top.disabled    = disabled;
+    if (bottom) bottom.disabled = disabled;
   }
 
   async function searchSongs() {
@@ -160,6 +191,8 @@ Perfect — Paul Cardall (solo piano)`;
         renderResults(data.results);
         document.getElementById('resultsSection').style.display = 'block';
         showStatus(`✓ Found matches for ${data.results.length} songs`, 'success');
+        // Scroll to the top build bar so user sees it immediately
+        document.getElementById('resultsSection').scrollIntoView({ behavior: 'smooth', block: 'start' });
       } else {
         showStatus(`Error: ${data.error}`, 'error');
       }
@@ -206,7 +239,11 @@ Perfect — Paul Cardall (solo piano)`;
   }
 
   async function createPlaylist() {
-    const name = document.getElementById('playlistName').value.trim() || 'My Custom Playlist';
+    // Read from whichever name field the user last touched (top takes priority if equal)
+    const topVal    = (document.getElementById('playlistNameTop')    || {}).value || '';
+    const bottomVal = (document.getElementById('playlistNameBottom') || {}).value || '';
+    const name = (topVal.trim() || bottomVal.trim()) || 'My Custom Playlist';
+
     const trackUris = [];
     searchResults.forEach((_, i) => {
       const selected = document.querySelector(`input[name="track_${i}"]:checked`);
@@ -214,7 +251,7 @@ Perfect — Paul Cardall (solo piano)`;
     });
     if (!trackUris.length) { showStatus('No tracks selected', 'error'); return; }
 
-    document.getElementById('createBtn').disabled = true;
+    setCreateBtnsDisabled(true);
     showStatus('Creating playlist on Spotify…', 'loading');
 
     try {
@@ -226,8 +263,9 @@ Perfect — Paul Cardall (solo piano)`;
       const data = await res.json();
       if (data.success) {
         showStatus(`✓ Playlist "${data.playlist_name}" created with ${data.track_count} tracks!`, 'success');
-        document.getElementById('successBox').style.display = 'block';
-        document.getElementById('successBox').innerHTML =
+        const box = document.getElementById('successBox');
+        box.style.display = 'block';
+        box.innerHTML =
           `🎉 <strong>${data.playlist_name}</strong> created!<br>
            <a href="${data.playlist_url}" target="_blank" rel="noopener">Open on Spotify →</a>`;
       } else {
@@ -236,7 +274,7 @@ Perfect — Paul Cardall (solo piano)`;
     } catch (e) {
       showStatus(`Error: ${e.message}`, 'error');
     } finally {
-      document.getElementById('createBtn').disabled = false;
+      setCreateBtnsDisabled(false);
     }
   }
 </script>

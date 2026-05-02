@@ -23,6 +23,7 @@ import uuid
 from pathlib import Path
 from datetime import datetime
 from difflib import SequenceMatcher
+from concurrent.futures import ThreadPoolExecutor
 
 from flask import (
     Blueprint, render_template, request, jsonify,
@@ -319,6 +320,18 @@ def extract():
         return jsonify({"success": False, "error": str(e)})
 
 
+def _search_one(entry):
+    """Search Spotify for a single song entry. Each call gets its own client
+    so concurrent threads don't share a requests.Session."""
+    sp = get_client_credentials_spotify()
+    matches = search_and_rank(sp, entry["song"], entry["artist"])
+    return {
+        "query": entry,
+        "matches": matches,
+        "selected": matches[0]["uri"] if matches else None,
+    }
+
+
 @spotify_bp.route("/search-songs", methods=["POST"])
 def search_songs():
     data = request.get_json(silent=True) or {}
@@ -327,15 +340,10 @@ def search_songs():
         return jsonify({"success": False, "error": "Please provide a song list"})
     try:
         parsed = parse_song_list(song_list_text)
-        sp = get_client_credentials_spotify()
-        results = []
-        for entry in parsed:
-            matches = search_and_rank(sp, entry["song"], entry["artist"])
-            results.append({
-                "query": entry,
-                "matches": matches,
-                "selected": matches[0]["uri"] if matches else None,
-            })
+        workers = min(len(parsed), 10)
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            # executor.map preserves input order
+            results = list(executor.map(_search_one, parsed))
         return jsonify({"success": True, "results": results})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})

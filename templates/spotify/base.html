@@ -61,31 +61,53 @@
           background: #1DB954;
       }
 
+      /* Hamburger button — hidden on desktop */
+      .nav-hamburger {
+          display: none;
+          margin-left: auto;
+          background: none;
+          border: none;
+          cursor: pointer;
+          padding: 8px;
+          color: #b3b3b3;
+          font-size: 1.4em;
+          line-height: 1;
+          border-radius: 8px;
+          transition: color 0.2s, background 0.2s;
+      }
+      .nav-hamburger:hover { color: white; background: rgba(255,255,255,0.1); }
+
       @media (max-width: 600px) {
           nav {
-              height: auto;
               flex-wrap: wrap;
-              padding: 8px 16px;
-              gap: 6px;
+              padding: 0 16px;
+              height: auto;
+              min-height: 52px;
           }
           .nav-brand {
-              flex: 1 0 100%;
-              margin-right: 0;
               font-size: 1.05em;
-              padding-bottom: 6px;
-              border-bottom: 1px solid rgba(255,255,255,0.1);
+              margin-right: 0;
+              padding: 14px 0;
+              flex: 1;
+          }
+          .nav-hamburger {
+              display: block;
           }
           .nav-links {
-              flex: 1 0 100%;
-              flex-wrap: nowrap;
-              overflow-x: auto;
-              scrollbar-width: none;
-              gap: 4px;
+              display: none;
+              flex-direction: column;
+              width: 100%;
+              padding: 8px 0 12px;
+              border-top: 1px solid rgba(255,255,255,0.1);
+              gap: 2px;
           }
-          .nav-links::-webkit-scrollbar { display: none; }
+          .nav-links.open {
+              display: flex;
+          }
           .nav-links a {
-              padding: 6px 14px;
-              font-size: 0.9em;
+              padding: 10px 12px;
+              font-size: 0.95em;
+              border-radius: 8px;
               white-space: nowrap;
           }
       }
@@ -243,12 +265,33 @@
   <body>
     <nav>
       <a href="/spotify/" class="nav-brand">Spotify Super User Tools</a>
-      <div class="nav-links">
+      <button class="nav-hamburger" id="navHamburger" aria-label="Toggle menu" aria-expanded="false">☰</button>
+      <div class="nav-links" id="navLinks">
         <a href="/spotify/extractor" class="{{ 'active' if active_page == 'extractor' else '' }}">Extractor</a>
         <a href="/spotify/builder"   class="{{ 'active' if active_page == 'builder'   else '' }}">Builder</a>
         <a href="/spotify/cleanify"  class="{{ 'active' if active_page == 'cleanify'  else '' }}">Cleanify</a>
       </div>
     </nav>
+    <script>
+      (function () {
+        var btn   = document.getElementById('navHamburger');
+        var links = document.getElementById('navLinks');
+        if (!btn || !links) return;
+        btn.addEventListener('click', function () {
+          var open = links.classList.toggle('open');
+          btn.setAttribute('aria-expanded', open);
+          btn.textContent = open ? '✕' : '☰';
+        });
+        // Close menu when any nav link is tapped
+        links.querySelectorAll('a').forEach(function (a) {
+          a.addEventListener('click', function () {
+            links.classList.remove('open');
+            btn.setAttribute('aria-expanded', 'false');
+            btn.textContent = '☰';
+          });
+        });
+      })();
+    </script>
 
     <div class="page-wrapper">
       <div class="container">
