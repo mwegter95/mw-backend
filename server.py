@@ -24,6 +24,10 @@ import urllib.request as _urllib_req
 from pathlib import Path
 from functools import wraps
 
+# Load .env before anything else so all os.getenv() calls see the values
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parent / ".env")
+
 from flask import Flask, request, jsonify, g, send_from_directory, send_file, Response
 from flask_cors import CORS
 import bcrypt
