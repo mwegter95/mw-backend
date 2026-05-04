@@ -168,12 +168,13 @@ CREATE TABLE IF NOT EXISTS gallery_walls (
 
 -- Gallery layouts (list of pieces per wall per named layout)
 CREATE TABLE IF NOT EXISTS gallery_layouts (
-    wall_id     TEXT NOT NULL,
-    owner_type  TEXT NOT NULL,
-    owner_id    TEXT NOT NULL,
-    name        TEXT NOT NULL,
-    pieces      TEXT NOT NULL,   -- JSON array
-    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    wall_id          TEXT NOT NULL,
+    owner_type       TEXT NOT NULL,
+    owner_id         TEXT NOT NULL,
+    name             TEXT NOT NULL,
+    pieces           TEXT NOT NULL,   -- JSON array
+    paint_layer_ids  TEXT,            -- JSON array of paint layer IDs (nullable = none)
+    updated_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (wall_id, owner_type, owner_id, name)
 );
 
@@ -204,6 +205,15 @@ CREATE TABLE IF NOT EXISTS gallery_paint_layers (
     updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (wall_id, layer_id, owner_type, owner_id)
 );
+
+-- 3D Rooms (rectangular prisms with up to 6 photo-mapped surfaces)
+CREATE TABLE IF NOT EXISTS gallery_rooms (
+    id          TEXT PRIMARY KEY,
+    owner_type  TEXT NOT NULL,
+    owner_id    TEXT NOT NULL,
+    data        TEXT NOT NULL,   -- JSON (id, name, roomWidth, roomHeight, roomDepth, surfaces, createdAt)
+    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 def get_db():
@@ -223,6 +233,12 @@ def close_db(exc):
 def init_db():
     conn = sqlite3.connect(str(DB_PATH))
     conn.executescript(SCHEMA)
+    # Migrate: add paint_layer_ids column to gallery_layouts if it doesn't exist yet
+    try:
+        conn.execute("ALTER TABLE gallery_layouts ADD COLUMN paint_layer_ids TEXT")
+        conn.commit()
+    except Exception:
+        pass  # column already exists
     conn.commit()
     conn.close()
     print(f"✓ Database ready: {DB_PATH}")
@@ -475,12 +491,15 @@ def gallery_state():
 
     # layouts
     layout_rows = db.execute(
-        "SELECT wall_id, name, pieces FROM gallery_layouts WHERE owner_type=? AND owner_id=?",
+        "SELECT wall_id, name, pieces, paint_layer_ids FROM gallery_layouts WHERE owner_type=? AND owner_id=?",
         (g.owner_type, g.owner_id)
     ).fetchall()
     layouts = {}
     for r in layout_rows:
-        layouts.setdefault(r["wall_id"], {})[r["name"]] = json.loads(r["pieces"])
+        layouts.setdefault(r["wall_id"], {})[r["name"]] = {
+            "pieces":         json.loads(r["pieces"]),
+            "paintLayerIds":  json.loads(r["paint_layer_ids"]) if r["paint_layer_ids"] else [],
+        }
 
     # library
     lib_rows = db.execute(
@@ -498,7 +517,14 @@ def gallery_state():
     for r in paint_rows:
         paint_layers.setdefault(r["wall_id"], {})[r["layer_id"]] = json.loads(r["data"])
 
-    return jsonify({"walls": walls, "layouts": layouts, "library": library, "paintLayers": paint_layers})
+    # rooms
+    room_rows = db.execute(
+        "SELECT id, data FROM gallery_rooms WHERE owner_type=? AND owner_id=? ORDER BY updated_at DESC",
+        (g.owner_type, g.owner_id)
+    ).fetchall()
+    rooms = {r["id"]: json.loads(r["data"]) for r in room_rows}
+
+    return jsonify({"walls": walls, "layouts": layouts, "library": library, "paintLayers": paint_layers, "rooms": rooms})
 
 # ─── Gallery: walls ───────────────────────────────────────────────────────────
 
@@ -557,13 +583,16 @@ def gallery_wall_image(wall_id):
 @app.put("/api/layouts/<wall_id>/<name>")
 @require_owner
 def gallery_put_layout(wall_id, name):
-    pieces = (request.get_json(silent=True) or {}).get("pieces", [])
-    now    = datetime.datetime.utcnow().isoformat()
-    db     = get_db()
+    body            = request.get_json(silent=True) or {}
+    pieces          = body.get("pieces", [])
+    paint_layer_ids = body.get("paintLayerIds", [])
+    now             = datetime.datetime.utcnow().isoformat()
+    db              = get_db()
     db.execute(
-        "INSERT INTO gallery_layouts (wall_id, owner_type, owner_id, name, pieces, updated_at) VALUES (?,?,?,?,?,?) "
-        "ON CONFLICT(wall_id, owner_type, owner_id, name) DO UPDATE SET pieces=excluded.pieces, updated_at=excluded.updated_at",
-        (wall_id, g.owner_type, g.owner_id, name, json.dumps(pieces), now)
+        "INSERT INTO gallery_layouts (wall_id, owner_type, owner_id, name, pieces, paint_layer_ids, updated_at) VALUES (?,?,?,?,?,?,?) "
+        "ON CONFLICT(wall_id, owner_type, owner_id, name) DO UPDATE SET "
+        "pieces=excluded.pieces, paint_layer_ids=excluded.paint_layer_ids, updated_at=excluded.updated_at",
+        (wall_id, g.owner_type, g.owner_id, name, json.dumps(pieces), json.dumps(paint_layer_ids), now)
     )
     db.commit()
     return jsonify({"ok": True})
@@ -608,6 +637,81 @@ def gallery_delete_paint_layer(wall_id, layer_id):
     )
     db.commit()
     return jsonify({"ok": True})
+
+
+# ─── Gallery: 3D rooms ───────────────────────────────────────────────────────
+
+@app.get("/api/rooms")
+@require_owner
+def gallery_list_rooms():
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, data FROM gallery_rooms WHERE owner_type=? AND owner_id=? ORDER BY updated_at DESC",
+        (g.owner_type, g.owner_id)
+    ).fetchall()
+    rooms = {}
+    for r in rows:
+        room_data = json.loads(r["data"])
+        # Fix relative image URLs in surface warpedImageUrls
+        for surface in (room_data.get("surfaces") or {}).values():
+            if surface.get("warpedImageUrl") and surface["warpedImageUrl"].startswith("/"):
+                surface["warpedImageUrl"] = surface["warpedImageUrl"]  # kept relative; frontend prepends BASE
+        rooms[r["id"]] = room_data
+    return jsonify({"rooms": rooms})
+
+
+@app.put("/api/rooms/<room_id>")
+@require_owner
+def gallery_put_room(room_id):
+    db  = get_db()
+    now = datetime.datetime.utcnow().isoformat()
+    data = request.get_json(silent=True) or {}
+    # Strip any large data URL payloads stored in warpedImageUrl before persisting
+    # (images are saved separately via /api/rooms/<id>/surfaces/<face>/image)
+    db.execute(
+        "INSERT INTO gallery_rooms (id, owner_type, owner_id, data, updated_at) VALUES (?,?,?,?,?) "
+        "ON CONFLICT(id) DO UPDATE SET owner_type=excluded.owner_type, owner_id=excluded.owner_id, "
+        "data=excluded.data, updated_at=excluded.updated_at",
+        (room_id, g.owner_type, g.owner_id, json.dumps(data), now)
+    )
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.delete("/api/rooms/<room_id>")
+@require_owner
+def gallery_delete_room(room_id):
+    db = get_db()
+    db.execute("DELETE FROM gallery_rooms WHERE id=? AND owner_type=? AND owner_id=?",
+               (room_id, g.owner_type, g.owner_id))
+    db.commit()
+    # Remove any surface image files for this room
+    for face_id in ["north", "south", "east", "west", "floor", "ceiling"]:
+        for ext in ["jpg", "jpeg", "png", "webp"]:
+            p = UPLOADS_DIR / "walls" / f"{room_id}_{face_id}.{ext}"
+            if p.exists():
+                p.unlink()
+    return jsonify({"ok": True})
+
+
+@app.post("/api/rooms/<room_id>/surfaces/<face_id>/image")
+@require_owner
+def gallery_room_surface_image(room_id, face_id):
+    valid_faces = {"north", "south", "east", "west", "floor", "ceiling"}
+    if face_id not in valid_faces:
+        return jsonify({"error": "Invalid face_id"}), 400
+    data_url = (request.get_json(silent=True) or {}).get("dataUrl", "")
+    buf, ext = _decode_data_url(data_url)
+    if buf is None:
+        return jsonify({"error": "Invalid dataUrl"}), 400
+    slug = f"{room_id}_{face_id}"
+    for e in ["jpg", "jpeg", "png", "webp"]:
+        old = UPLOADS_DIR / "walls" / f"{slug}.{e}"
+        if e != ext and old.exists():
+            old.unlink()
+    path = UPLOADS_DIR / "walls" / f"{slug}.{ext}"
+    write_encrypted(path, buf)
+    return jsonify({"url": f"/uploads/walls/{slug}.{ext}"})
 
 
 # ─── Gallery: piece images ───────────────────────────────────────────────────
@@ -727,13 +831,20 @@ def admin_import():
 
     # Layouts
     for wall_id, named in (body.get("layouts") or {}).items():
-        for name, pieces in named.items():
+        for name, layout_data in named.items():
+            # layout_data may be the new { pieces, paintLayerIds } object or a legacy array
+            if isinstance(layout_data, list):
+                pieces          = layout_data
+                paint_layer_ids = []
+            else:
+                pieces          = layout_data.get("pieces", [])
+                paint_layer_ids = layout_data.get("paintLayerIds", [])
             db.execute(
-                "INSERT INTO gallery_layouts(wall_id,owner_type,owner_id,name,pieces,updated_at) "
-                "VALUES(?,?,?,?,?,?) "
+                "INSERT INTO gallery_layouts(wall_id,owner_type,owner_id,name,pieces,paint_layer_ids,updated_at) "
+                "VALUES(?,?,?,?,?,?,?) "
                 "ON CONFLICT(wall_id,owner_type,owner_id,name) DO UPDATE SET "
-                "pieces=excluded.pieces, updated_at=excluded.updated_at",
-                (wall_id, "user", user_id, name, json.dumps(pieces), now)
+                "pieces=excluded.pieces, paint_layer_ids=excluded.paint_layer_ids, updated_at=excluded.updated_at",
+                (wall_id, "user", user_id, name, json.dumps(pieces), json.dumps(paint_layer_ids), now)
             )
             counts["layouts"] += 1
 
