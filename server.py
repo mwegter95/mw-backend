@@ -193,6 +193,17 @@ CREATE TABLE IF NOT EXISTS gallery_library (
     data        TEXT NOT NULL,   -- JSON
     updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Gallery paint layers (per-wall virtual paint layers)
+CREATE TABLE IF NOT EXISTS gallery_paint_layers (
+    wall_id     TEXT NOT NULL,
+    layer_id    TEXT NOT NULL,
+    owner_type  TEXT NOT NULL,
+    owner_id    TEXT NOT NULL,
+    data        TEXT NOT NULL,   -- JSON (id, name, color, maskDataUrl, visible, createdAt)
+    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (wall_id, layer_id, owner_type, owner_id)
+);
 """
 
 def get_db():
@@ -478,7 +489,16 @@ def gallery_state():
     ).fetchall()
     library = {r["id"]: json.loads(r["data"]) for r in lib_rows}
 
-    return jsonify({"walls": walls, "layouts": layouts, "library": library})
+    # paint layers — keyed by wall_id, then layer_id
+    paint_rows = db.execute(
+        "SELECT wall_id, layer_id, data FROM gallery_paint_layers WHERE owner_type=? AND owner_id=?",
+        (g.owner_type, g.owner_id)
+    ).fetchall()
+    paint_layers = {}
+    for r in paint_rows:
+        paint_layers.setdefault(r["wall_id"], {})[r["layer_id"]] = json.loads(r["data"])
+
+    return jsonify({"walls": walls, "layouts": layouts, "library": library, "paintLayers": paint_layers})
 
 # ─── Gallery: walls ───────────────────────────────────────────────────────────
 
@@ -504,6 +524,8 @@ def gallery_delete_wall(wall_id):
     db.execute("DELETE FROM gallery_walls WHERE id=? AND owner_type=? AND owner_id=?",
                (wall_id, g.owner_type, g.owner_id))
     db.execute("DELETE FROM gallery_layouts WHERE wall_id=? AND owner_type=? AND owner_id=?",
+               (wall_id, g.owner_type, g.owner_id))
+    db.execute("DELETE FROM gallery_paint_layers WHERE wall_id=? AND owner_type=? AND owner_id=?",
                (wall_id, g.owner_type, g.owner_id))
     db.commit()
     # Remove wall image file
@@ -557,6 +579,36 @@ def gallery_delete_layout(wall_id, name):
     )
     db.commit()
     return jsonify({"ok": True})
+
+# ─── Gallery: paint layers ───────────────────────────────────────────────────
+
+@app.put("/api/paint-layers/<wall_id>/<layer_id>")
+@require_owner
+def gallery_put_paint_layer(wall_id, layer_id):
+    data = request.get_json(silent=True) or {}
+    now  = datetime.datetime.utcnow().isoformat()
+    db   = get_db()
+    db.execute(
+        "INSERT INTO gallery_paint_layers (wall_id, layer_id, owner_type, owner_id, data, updated_at) "
+        "VALUES (?,?,?,?,?,?) "
+        "ON CONFLICT(wall_id, layer_id, owner_type, owner_id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at",
+        (wall_id, layer_id, g.owner_type, g.owner_id, json.dumps(data), now)
+    )
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.delete("/api/paint-layers/<wall_id>/<layer_id>")
+@require_owner
+def gallery_delete_paint_layer(wall_id, layer_id):
+    db = get_db()
+    db.execute(
+        "DELETE FROM gallery_paint_layers WHERE wall_id=? AND layer_id=? AND owner_type=? AND owner_id=?",
+        (wall_id, layer_id, g.owner_type, g.owner_id)
+    )
+    db.commit()
+    return jsonify({"ok": True})
+
 
 # ─── Gallery: piece images ───────────────────────────────────────────────────
 
