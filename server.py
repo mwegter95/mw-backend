@@ -39,8 +39,9 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 BASE_DIR     = Path(__file__).parent
 DATA_DIR     = BASE_DIR / "data"
 UPLOADS_DIR  = DATA_DIR / "uploads"
+CHUNK_UPLOADS_DIR = DATA_DIR / "chunk_uploads"
 
-for d in [DATA_DIR, UPLOADS_DIR / "walls", UPLOADS_DIR / "pieces", UPLOADS_DIR / "library"]:
+for d in [DATA_DIR, UPLOADS_DIR / "walls", UPLOADS_DIR / "pieces", UPLOADS_DIR / "library", CHUNK_UPLOADS_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 DB_PATH           = DATA_DIR / "mw.db"
@@ -676,6 +677,95 @@ def gallery_put_room(room_id):
     )
     db.commit()
     return jsonify({"ok": True})
+
+
+@app.post("/api/rooms/<room_id>/pointcloud")
+@require_owner
+def gallery_upload_pointcloud(room_id):
+    """Accept raw Float32 binary point cloud, store encrypted, return URL.
+    Client sends Content-Type: application/octet-stream with the raw bytes."""
+    buf = request.data
+    if not buf:
+        return jsonify({"error": "No data"}), 400
+    MAX_PC_SIZE = 640 * 1024 * 1024  # 640 MB cap (~26M points)
+    if len(buf) > MAX_PC_SIZE:
+        return jsonify({"error": "Point cloud exceeds size limit"}), 413
+    path = UPLOADS_DIR / "walls" / f"{room_id}_pointcloud.bin"
+    write_encrypted(path, buf)
+    return jsonify({"url": f"/uploads/walls/{room_id}_pointcloud.bin"})
+
+
+@app.post("/api/rooms/<room_id>/pointcloud/chunk")
+@require_owner
+def gallery_upload_pointcloud_chunk(room_id):
+    """Accept chunked binary uploads and assemble server-side before encrypting."""
+    buf = request.data
+    if not buf:
+        return jsonify({"error": "No data"}), 400
+
+    upload_id = (request.headers.get("X-Upload-Id") or "").strip()
+    try:
+        chunk_index = int(request.headers.get("X-Chunk-Index", "-1"))
+        chunk_total = int(request.headers.get("X-Chunk-Total", "-1"))
+    except Exception:
+        return jsonify({"error": "Invalid chunk headers"}), 400
+
+    if not upload_id or chunk_index < 0 or chunk_total <= 0 or chunk_index >= chunk_total:
+        return jsonify({"error": "Invalid chunk metadata"}), 400
+
+    safe_room = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in room_id)
+    safe_upload = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in upload_id)
+    safe_owner = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in f"{g.owner_type}_{g.owner_id}")
+    stem = f"{safe_owner}_{safe_room}_{safe_upload}"
+    part_path = CHUNK_UPLOADS_DIR / f"{stem}.part"
+    meta_path = CHUNK_UPLOADS_DIR / f"{stem}.json"
+
+    if chunk_index == 0:
+        if part_path.exists():
+            part_path.unlink()
+        if meta_path.exists():
+            meta_path.unlink()
+        meta = {"next_index": 0, "total": chunk_total, "size": 0}
+    else:
+        if not part_path.exists() or not meta_path.exists():
+            return jsonify({"error": "Upload session missing or expired"}), 409
+        try:
+            meta = json.loads(meta_path.read_text())
+        except Exception:
+            return jsonify({"error": "Upload session corrupted"}), 409
+        if int(meta.get("total", -1)) != chunk_total:
+            return jsonify({"error": "Chunk total mismatch"}), 409
+
+    if int(meta.get("next_index", 0)) != chunk_index:
+        return jsonify({"error": "Out-of-order chunk", "expected": int(meta.get("next_index", 0))}), 409
+
+    with part_path.open("ab") as f:
+        f.write(buf)
+
+    meta["next_index"] = chunk_index + 1
+    meta["size"] = int(meta.get("size", 0)) + len(buf)
+
+    MAX_PC_SIZE = 640 * 1024 * 1024  # 640 MB cap (~26M points)
+    if meta["size"] > MAX_PC_SIZE:
+        if part_path.exists():
+            part_path.unlink()
+        if meta_path.exists():
+            meta_path.unlink()
+        return jsonify({"error": "Point cloud exceeds size limit"}), 413
+
+    if chunk_index + 1 < chunk_total:
+        meta_path.write_text(json.dumps(meta))
+        return jsonify({"ok": True, "received": chunk_index + 1, "total": chunk_total, "complete": False})
+
+    # Final chunk received -> encrypt assembled payload and return room URL.
+    assembled = part_path.read_bytes()
+    path = UPLOADS_DIR / "walls" / f"{room_id}_pointcloud.bin"
+    write_encrypted(path, assembled)
+    if part_path.exists():
+        part_path.unlink()
+    if meta_path.exists():
+        meta_path.unlink()
+    return jsonify({"url": f"/uploads/walls/{room_id}_pointcloud.bin", "complete": True})
 
 
 @app.delete("/api/rooms/<room_id>")
