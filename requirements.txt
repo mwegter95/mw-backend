@@ -13,3 +13,7 @@ lxml>=5.3
 textstat>=0.7
 # Spotify Super User Tools
 spotipy>=2.23.0
+# 3D mesh reconstruction for LiDAR room scans
+open3d>=0.18
+trimesh>=4.4
+pygltflib>=1.16

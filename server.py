@@ -20,6 +20,8 @@ import mimetypes
 import subprocess
 import tempfile
 import traceback
+import threading
+import struct
 import urllib.request as _urllib_req
 from pathlib import Path
 from functools import wraps
@@ -765,7 +767,147 @@ def gallery_upload_pointcloud_chunk(room_id):
         part_path.unlink()
     if meta_path.exists():
         meta_path.unlink()
+
+    # Kick off background Poisson mesh reconstruction.
+    # Runs in a daemon thread so the upload response is instant.
+    threading.Thread(
+        target=_build_poisson_mesh,
+        args=(room_id, path),
+        daemon=True,
+    ).start()
+
     return jsonify({"url": f"/uploads/walls/{room_id}_pointcloud.bin", "complete": True})
+
+
+# ─── Poisson mesh reconstruction ─────────────────────────────────────────────
+# Runs in a background daemon thread after the final chunk arrives.
+# Writes a GLB file alongside the encrypted point cloud:
+#   uploads/walls/<room_id>_mesh.glb   (plain, not encrypted — same auth as PC)
+# Status is tracked with a lightweight sentinel file:
+#   uploads/walls/<room_id>_mesh.status  ("processing" | "ready" | "failed")
+
+def _build_poisson_mesh(room_id: str, pc_path: Path):
+    """Decode encrypted point cloud, run Open3D Poisson, export GLB."""
+    status_path = UPLOADS_DIR / "walls" / f"{room_id}_mesh.status"
+    glb_path    = UPLOADS_DIR / "walls" / f"{room_id}_mesh.glb"
+    status_path.write_text("processing")
+    try:
+        import numpy as np
+        import open3d as o3d
+        import trimesh
+
+        # ── 1. Decode point cloud ──────────────────────────────────────────
+        raw   = read_encrypted(pc_path)
+        arr   = np.frombuffer(raw, dtype=np.float32).reshape(-1, 6)
+        xyz   = arr[:, :3].astype(np.float64)
+        rgb   = np.clip(arr[:, 3:6], 0.0, 1.0).astype(np.float64)
+
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(xyz)
+        pcd.colors = o3d.utility.Vector3dVector(rgb)
+
+        # ── 2. Voxel downsample (3 mm) ─────────────────────────────────────
+        # Reduces 12 M → ~500 K points; Poisson peaks at ~1 GB RAM at depth=8.
+        pcd = pcd.voxel_down_sample(voxel_size=0.003)
+
+        # ── 3. Estimate normals (oriented toward room centroid) ────────────
+        pcd.estimate_normals(
+            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.05, max_nn=30)
+        )
+        centroid = xyz.mean(axis=0)
+        pcd.orient_normals_towards_camera_location(centroid)
+
+        # ── 4. Screened Poisson reconstruction ────────────────────────────
+        # depth=8 → ~4 mm detail, peak ~1 GB RAM; safe on Surface Pro 3 (4 GB).
+        mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+            pcd, depth=8, linear_fit=False
+        )
+
+        # ── 5. Trim low-density "blobby" exterior vertices ─────────────────
+        import numpy as _np
+        d = _np.asarray(densities)
+        threshold = _np.percentile(d, 5)   # remove bottom 5% density
+        mesh.remove_vertices_by_mask(d < threshold)
+        mesh.remove_degenerate_triangles()
+        mesh.remove_duplicated_vertices()
+        mesh.remove_non_manifold_edges()
+
+        # ── 6. Transfer colors from input point cloud to mesh vertices ──────
+        # Build a KD-tree on the original (pre-downsample would be better but
+        # post-downsample is already ~500K — fast enough and color is already
+        # merged by the voxel step).
+        pcd_tree = o3d.geometry.KDTreeFlann(pcd)
+        mesh_pts = _np.asarray(mesh.vertices)
+        pcd_rgb  = _np.asarray(pcd.colors)
+        vtx_colors = _np.zeros((len(mesh_pts), 3), dtype=_np.float64)
+        for i, pt in enumerate(mesh_pts):
+            _, idx, _ = pcd_tree.search_knn_vector_3d(pt, 1)
+            vtx_colors[i] = pcd_rgb[idx[0]]
+        mesh.vertex_colors = o3d.utility.Vector3dVector(vtx_colors)
+
+        # ── 7. Export as GLB ───────────────────────────────────────────────
+        # Convert to trimesh for GLB export (Open3D's own exporter omits colors).
+        verts  = _np.asarray(mesh.vertices).astype(_np.float32)
+        faces  = _np.asarray(mesh.triangles).astype(_np.uint32)
+        colors_u8 = (_np.clip(vtx_colors, 0, 1) * 255).astype(_np.uint8)
+        # trimesh expects RGBA
+        colors_rgba = _np.concatenate([colors_u8, _np.full((len(colors_u8), 1), 255, dtype=_np.uint8)], axis=1)
+
+        tm = trimesh.Trimesh(
+            vertices=verts,
+            faces=faces,
+            vertex_colors=colors_rgba,
+            process=False,
+        )
+        glb_bytes = tm.export(file_type="glb")
+        glb_path.write_bytes(glb_bytes)
+        status_path.write_text("ready")
+        logging.info(f"[mesh] {room_id}: Poisson complete — {len(verts):,} verts, {len(faces):,} faces, {len(glb_bytes)//1024} KB")
+
+    except Exception:
+        logging.exception(f"[mesh] {room_id}: Poisson reconstruction failed")
+        status_path.write_text("failed")
+
+
+@app.get("/api/rooms/<room_id>/mesh")
+@require_owner
+def gallery_get_mesh(room_id):
+    """Return mesh build status and URL (if ready)."""
+    status_path = UPLOADS_DIR / "walls" / f"{room_id}_mesh.status"
+    glb_path    = UPLOADS_DIR / "walls" / f"{room_id}_mesh.glb"
+    if not status_path.exists():
+        # No mesh job started — trigger one now if the point cloud exists
+        pc_path = UPLOADS_DIR / "walls" / f"{room_id}_pointcloud.bin"
+        if pc_path.exists():
+            threading.Thread(
+                target=_build_poisson_mesh,
+                args=(room_id, pc_path),
+                daemon=True,
+            ).start()
+            return jsonify({"status": "processing"})
+        return jsonify({"status": "unavailable"})
+    status = status_path.read_text().strip()
+    if status == "ready" and glb_path.exists():
+        return jsonify({"status": "ready", "url": f"/uploads/walls/{room_id}_mesh.glb"})
+    return jsonify({"status": status})
+
+
+@app.get("/uploads/walls/<filename>")
+def serve_wall_upload(filename):
+    """Serve wall uploads — images plain, point clouds and meshes decrypted on the fly."""
+    path = UPLOADS_DIR / "walls" / filename
+    if not path.exists():
+        return jsonify({"error": "Not found"}), 404
+    if filename.endswith("_mesh.glb"):
+        # GLB files are stored plain (large binary, no PII)
+        return send_file(path, mimetype="model/gltf-binary")
+    # All other uploads are AES-GCM encrypted
+    try:
+        data = read_encrypted(path)
+    except Exception:
+        return jsonify({"error": "Decryption failed"}), 500
+    mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    return Response(data, mimetype=mime)
 
 
 @app.delete("/api/rooms/<room_id>")
