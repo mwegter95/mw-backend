@@ -132,6 +132,26 @@ app.config["SESSION_COOKIE_SAMESITE"] = "None"
 app.config["SESSION_COOKIE_SECURE"]   = True
 CORS(app, origins=_CORS_ORIGINS, supports_credentials=True)
 
+
+def utc_now():
+    return datetime.datetime.now(datetime.UTC)
+
+
+def utc_now_iso_legacy():
+    # Keep DB timestamp format compatible with existing naive UTC values.
+    return utc_now().replace(tzinfo=None).isoformat()
+
+
+def parse_utc_iso(value: str):
+    dt = datetime.datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=datetime.UTC)
+    return dt.astimezone(datetime.UTC)
+
+
+def is_sqlite_storage_full_error(err):
+    return isinstance(err, sqlite3.OperationalError) and "database or disk is full" in str(err).lower()
+
 # ─── Spotify Super User Tools blueprint ──────────────────────────────────────
 from spotify_blueprint import spotify_bp
 app.register_blueprint(spotify_bp)
@@ -143,6 +163,17 @@ def handle_exception(e):
     """Return JSON instead of HTML for unhandled non-HTTP exceptions."""
     if isinstance(e, HTTPException):
         return e  # let Flask handle normal HTTP errors normally
+
+    if is_sqlite_storage_full_error(e):
+        db = g.get("db")
+        if db:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        log.error("[storage full] %s", str(e))
+        return jsonify({"error": "Storage full", "detail": "Server database or disk is full. Free up disk space and retry."}), 507
+
     tb = traceback.format_exc()
     log.error("[unhandled exception] %s\n%s", str(e), tb)
     return jsonify({"error": "Internal server error", "detail": str(e)}), 500
@@ -249,7 +280,7 @@ def init_db():
 def make_token(user_id, user=None):
     payload = {
         "sub": str(user_id),
-        "exp": datetime.datetime.utcnow() + ACCESS_TTL,
+        "exp": utc_now() + ACCESS_TTL,
     }
     if user:
         payload["email"]        = user["email"]
@@ -439,7 +470,7 @@ def auth_forgot_password():
     # Invalidate old tokens for this user
     db.execute("UPDATE password_reset_tokens SET used=1 WHERE user_id=? AND used=0", (user["id"],))
     token      = secrets.token_urlsafe(32)
-    expires_at = (datetime.datetime.utcnow() + datetime.timedelta(hours=RESET_TOKEN_TTL_H)).isoformat()
+    expires_at = (utc_now() + datetime.timedelta(hours=RESET_TOKEN_TTL_H)).isoformat()
     db.execute("INSERT INTO password_reset_tokens (token, user_id, expires_at) VALUES (?,?,?)",
                (token, user["id"], expires_at))
     db.commit()
@@ -464,8 +495,8 @@ def auth_reset_password():
     if not row:
         return jsonify({"error": "Invalid or expired reset link"}), 400
     # Check expiry
-    expires = datetime.datetime.fromisoformat(row["expires_at"])
-    if datetime.datetime.utcnow() > expires:
+    expires = parse_utc_iso(row["expires_at"])
+    if utc_now() > expires:
         db.execute("UPDATE password_reset_tokens SET used=1 WHERE token=?", (token,))
         db.commit()
         return jsonify({"error": "Reset link has expired. Please request a new one."}), 400
@@ -533,7 +564,7 @@ def gallery_state():
 @require_owner
 def gallery_put_wall(wall_id):
     db  = get_db()
-    now = datetime.datetime.utcnow().isoformat()
+    now = utc_now_iso_legacy()
     db.execute(
         "INSERT INTO gallery_walls (id, owner_type, owner_id, data, updated_at) VALUES (?,?,?,?,?) "
         "ON CONFLICT(id) DO UPDATE SET owner_type=excluded.owner_type, owner_id=excluded.owner_id, "
@@ -587,7 +618,7 @@ def gallery_put_layout(wall_id, name):
     body            = request.get_json(silent=True) or {}
     pieces          = body.get("pieces", [])
     paint_layer_ids = body.get("paintLayerIds", [])
-    now             = datetime.datetime.utcnow().isoformat()
+    now             = utc_now_iso_legacy()
     db              = get_db()
     db.execute(
         "INSERT INTO gallery_layouts (wall_id, owner_type, owner_id, name, pieces, paint_layer_ids, updated_at) VALUES (?,?,?,?,?,?,?) "
@@ -616,7 +647,7 @@ def gallery_delete_layout(wall_id, name):
 @require_owner
 def gallery_put_paint_layer(wall_id, layer_id):
     data = request.get_json(silent=True) or {}
-    now  = datetime.datetime.utcnow().isoformat()
+    now  = utc_now_iso_legacy()
     db   = get_db()
     db.execute(
         "INSERT INTO gallery_paint_layers (wall_id, layer_id, owner_type, owner_id, data, updated_at) "
@@ -665,7 +696,7 @@ def gallery_list_rooms():
 @require_owner
 def gallery_put_room(room_id):
     db  = get_db()
-    now = datetime.datetime.utcnow().isoformat()
+    now = utc_now_iso_legacy()
     data = request.get_json(silent=True) or {}
     # Strip any large data URL payloads stored in warpedImageUrl before persisting
     # (images are saved separately via /api/rooms/<id>/surfaces/<face>/image)
@@ -836,7 +867,7 @@ def gallery_delete_piece_image(piece_id):
 @app.put("/api/library/<lib_id>")
 @require_owner
 def gallery_put_library(lib_id):
-    now = datetime.datetime.utcnow().isoformat()
+    now = utc_now_iso_legacy()
     db  = get_db()
     db.execute(
         "INSERT INTO gallery_library (id, owner_type, owner_id, data, updated_at) VALUES (?,?,?,?,?) "
@@ -898,7 +929,7 @@ def admin_import():
         log.warning("admin_import auth failed: %s", exc)
         return jsonify({"error": "Forbidden"}), 403
     db = get_db()
-    now = datetime.datetime.utcnow().isoformat()
+    now = utc_now_iso_legacy()
     counts = {"walls": 0, "layouts": 0, "library": 0, "images": 0}
 
     # Optional: wipe existing user data before import so re-runs are clean
