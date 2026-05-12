@@ -173,12 +173,24 @@ try:
     except Exception as _e:
         logging.warning("[mesh] %s: laplacian smooth unavailable (%s)", room_id, _e)
 
+    # 5c. Remove any NaN/Inf vertices introduced by Poisson or smoothing.
+    mesh_pts_check = np.asarray(mesh.vertices)
+    bad_mask = ~np.isfinite(mesh_pts_check).all(axis=1)
+    n_bad = int(bad_mask.sum())
+    if n_bad > 0:
+        logging.warning("[mesh] %s: removing %d non-finite vertices before color transfer", room_id, n_bad)
+        mesh.remove_vertices_by_mask(bad_mask)
+        mesh.remove_degenerate_triangles()
+        mesh.remove_duplicated_vertices()
+
     # 6. Color transfer — workers=1 avoids subprocess spawning on Windows
     _progress(70, f"Transferring colors from {n_pts:,}-point cloud")
     from scipy.spatial import cKDTree
     pcd_pts = np.asarray(pcd_full.points)
     pcd_rgb = np.asarray(pcd_full.colors)
     mesh_pts = np.asarray(mesh.vertices)
+    if len(mesh_pts) == 0:
+        raise ValueError("Mesh has no vertices after cleaning — point cloud may be too sparse or corrupted")
     kd = cKDTree(pcd_pts)
     _progress(74, "KD-tree built — querying nearest neighbours (IDW k=7)")
     # Inverse-distance-weighted k=7: weights nearby points more than far ones.
