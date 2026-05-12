@@ -40,6 +40,7 @@ import numpy as np
 def project_photos(
     mesh_verts:   np.ndarray,   # (N, 3) float64 — vertex positions in ARKit world space
     mesh_normals: np.ndarray,   # (N, 3) float64 — vertex normals in ARKit world space
+    source_points: np.ndarray,  # (M, 3) float64 — raw/depth cloud used to build a visibility z-buffer
     snap_dir:     Path,         # directory containing <room_id>_snaps.json + JPEG files
     room_id:      str,
 ) -> tuple[np.ndarray, np.ndarray] | None:
@@ -77,6 +78,13 @@ def project_photos(
     N = len(mesh_verts)
     best_colors = np.zeros((N, 3), dtype=np.float64)
     best_score  = np.full(N, -np.inf)
+    # Use a stable visibility subset so each photo gets a cheap z-buffer pass.
+    if len(source_points) > 350_000:
+        step = max(1, len(source_points) // 350_000)
+        visibility_pts = source_points[::step]
+    else:
+        visibility_pts = source_points
+    visibility_h = np.column_stack([visibility_pts, np.ones(len(visibility_pts))])
 
     # Normalise mesh normals once
     nlen = np.linalg.norm(mesh_normals, axis=1, keepdims=True)
@@ -126,21 +134,44 @@ def project_photos(
         # ── Project all vertices ──────────────────────────────────────────────
         verts_h   = np.column_stack([mesh_verts, np.ones(N)])   # (N, 4)
         verts_cam = (w2c @ verts_h.T).T                         # (N, 4)
+        vis_cam   = (w2c @ visibility_h.T).T                    # (M, 4)
 
         z_cam = verts_cam[:, 2]
         x_cam = verts_cam[:, 0]
         y_cam = verts_cam[:, 1]
+        vis_z_cam = vis_cam[:, 2]
+        vis_x_cam = vis_cam[:, 0]
+        vis_y_cam = vis_cam[:, 1]
 
         # In ARKit camera space, camera looks along −Z: in-front ⟺ z_cam < 0
         in_front = z_cam < -0.05   # at least 5 cm in front
+        vis_in_front = vis_z_cam < -0.05
 
         # Project (safe denominator avoids div-by-zero outside in_front mask)
         neg_z = np.where(in_front, -z_cam, 1.0)
         px = fx * x_cam / neg_z + cx
         py = fy * y_cam / neg_z + cy
+        vis_neg_z = np.where(vis_in_front, -vis_z_cam, 1.0)
+        vis_px = fx * vis_x_cam / vis_neg_z + cx
+        vis_py = fy * vis_y_cam / vis_neg_z + cy
 
         # Leave 1-pixel border so bilinear never reads outside bounds
         in_bounds = (px >= 0.0) & (px < W - 1.0) & (py >= 0.0) & (py < H - 1.0)
+        vis_in_bounds = (vis_px >= 0.0) & (vis_px < W) & (vis_py >= 0.0) & (vis_py < H)
+
+        # Visibility z-buffer: only let a photo color mesh vertices that land near the
+        # front-most observed depth at that pixel. This prevents painting back walls
+        # through sofas, lamps, and other foreground geometry.
+        z_scale = 2.0
+        z_w = max(1, int(np.ceil(W / z_scale)))
+        z_h = max(1, int(np.ceil(H / z_scale)))
+        zbuf = np.full((z_h, z_w), np.inf, dtype=np.float32)
+        vis_mask = vis_in_front & vis_in_bounds
+        if vis_mask.any():
+            zx = np.clip(np.rint(vis_px[vis_mask] / z_scale).astype(np.int32), 0, z_w - 1)
+            zy = np.clip(np.rint(vis_py[vis_mask] / z_scale).astype(np.int32), 0, z_h - 1)
+            zdepth = (-vis_z_cam[vis_mask]).astype(np.float32)
+            np.minimum.at(zbuf, (zy, zx), zdepth)
 
         # ── Facing / visibility score ─────────────────────────────────────────
         cam_pos       = c2w[:3, 3]                                   # (3,)
@@ -152,7 +183,14 @@ def project_photos(
         # (surface is facing the camera)
         facing = (-normals_n * cam_to_vert_n).sum(axis=1)     # (N,)
 
-        valid  = in_front & in_bounds & (facing > 0.05)        # 5° from grazing
+        pix_x = np.clip(np.rint(px / z_scale).astype(np.int32), 0, z_w - 1)
+        pix_y = np.clip(np.rint(py / z_scale).astype(np.int32), 0, z_h - 1)
+        z_ref = zbuf[pix_y, pix_x]
+        depth = -z_cam
+        # Depth tolerance grows slightly with distance to absorb Poisson smoothing.
+        visible = np.isfinite(z_ref) & (depth <= z_ref + np.maximum(0.04, 0.015 * z_ref))
+
+        valid  = in_front & in_bounds & visible & (facing > 0.05)  # 5° from grazing
         better = valid & (facing > best_score)
 
         if not better.any():

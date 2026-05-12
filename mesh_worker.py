@@ -179,7 +179,7 @@ try:
     try:
         sys.path.insert(0, str(Path(__file__).parent))
         from photo_project import project_photos
-        result = project_photos(mesh_pts, mesh_nrm, snap_dir, room_id)
+        result = project_photos(mesh_pts, mesh_nrm, pcd_pts, snap_dir, room_id)
     except Exception as _pe:
         logging.warning("[mesh] %s: photo_project failed (%s) - using IDW fallback", room_id, _pe)
         result = None
