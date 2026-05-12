@@ -94,16 +94,22 @@ try:
     pcd_full.points = o3d.utility.Vector3dVector(xyz)
     pcd_full.colors = o3d.utility.Vector3dVector(rgb)
 
-    # 2. Downsample — 8 mm voxel grid.
-    # 8 mm preserves wall texture and edge detail while keeping the point count
-    # manageable.  15 mm was erasing fine structure and producing a blobby surface.
-    _progress(10, f"Resampling {n_pts:,} points (8 mm grid)")
-    pcd = pcd_full.voxel_down_sample(voxel_size=0.008)
-    n_down = len(pcd.points)
-    logging.info("[mesh] %s: downsampled to %s points", room_id, f"{n_down:,}")
+    # 2. Downsample — only if the scan is already dense enough to warrant it.
+    # If the scan has ≤ 500 K points, skip voxel sampling entirely: throwing away
+    # points on a sparse scan makes Poisson blobby and colours speckled.
+    # For dense scans, use a fine 5 mm grid to preserve wall texture.
+    _progress(10, f"Analysing {n_pts:,} points…")
+    if n_pts <= 500_000:
+        pcd = pcd_full
+        n_down = n_pts
+        logging.info("[mesh] %s: sparse scan (%s pts) — skipping voxel downsample", room_id, f"{n_down:,}")
+    else:
+        _progress(10, f"Resampling {n_pts:,} points (5 mm grid)")
+        pcd = pcd_full.voxel_down_sample(voxel_size=0.005)
+        n_down = len(pcd.points)
+        logging.info("[mesh] %s: downsampled to %s points", room_id, f"{n_down:,}")
 
-    # Hard cap: safety net for unusually dense scans.  700 K into Poisson depth=9
-    # takes ~90-150 s on Surface Pro 3, which is acceptable for photorealistic quality.
+    # Hard cap: prevent OOM on 4 GB Surface Pro 3.
     MAX_PTS = 700_000
     if n_down > MAX_PTS:
         ratio = MAX_PTS / n_down
@@ -114,28 +120,30 @@ try:
     # 3. Normals -- orient towards the centroid of the scan.
     # orient_normals_towards_camera_location is O(N) and correct for room
     # scans taken from one interior position (every surface faces inward).
-    _progress(20, f"Estimating normals ({n_down:,} pts)")
+    # Larger radius for sparse scans: ensures 30 neighbours are reachable even
+    # when points are far apart, giving stable normals.
+    normal_radius = 0.10 if n_down < 200_000 else 0.06
+    _progress(20, f"Estimating normals ({n_down:,} pts, r={normal_radius*100:.0f} cm)")
     pcd.estimate_normals(
-        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.04, max_nn=30)
+        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=normal_radius, max_nn=30)
     )
     _progress(32, "Orienting normals (towards scan centroid)")
     centroid = np.asarray(pcd.points).mean(axis=0)
     pcd.orient_normals_towards_camera_location(centroid)
 
-    # 4. Poisson — depth=9 gives ~1 mm surface resolution at 5 m scale and
-    #    produces photorealistic sharpness.  Adds ~60-90 s on Surface Pro 3
-    #    vs depth=8 but the quality gain is dramatic.
-    _progress(42, "Running Screened Poisson (depth=9)…")
+    # 4. Poisson — depth=8 for sparse scans (< 200 K pts can't support depth=9
+    #    resolution without holes/artefacts), depth=9 for medium-dense scans.
+    poisson_depth = 8 if n_down < 200_000 else 9
+    _progress(42, f"Running Screened Poisson (depth={poisson_depth})…")
     mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-        pcd, depth=9, linear_fit=False
+        pcd, depth=poisson_depth, linear_fit=False
     )
     n_verts_raw = len(mesh.vertices)
     n_faces_raw = len(mesh.triangles)
     logging.info("[mesh] %s: Poisson produced %s verts, %s faces",
                  room_id, f"{n_verts_raw:,}", f"{n_faces_raw:,}")
 
-    # 5. Trim — 1% removes only the very lowest-density phantom geometry
-    #    at scan edges while keeping all real surface coverage.
+    # 5. Trim — 1% removes only phantom geometry at scan edges.
     _progress(62, "Trimming low-density exterior")
     d = np.asarray(densities)
     mesh.remove_vertices_by_mask(d < np.percentile(d, 1))
@@ -145,6 +153,16 @@ try:
     logging.info("[mesh] %s: after trim — %s verts, %s faces",
                  room_id, f"{len(mesh.vertices):,}", f"{len(mesh.triangles):,}")
 
+    # 5b. Light Laplacian smooth — 3 iterations removes jagged triangles that
+    #     arise from sparse input without blurring real surface structure.
+    try:
+        _progress(66, "Smoothing mesh surface")
+        mesh = mesh.filter_smooth_laplacian(number_of_iterations=3)
+        mesh.compute_vertex_normals()
+        logging.info("[mesh] %s: laplacian smooth done", room_id)
+    except Exception as _e:
+        logging.warning("[mesh] %s: laplacian smooth unavailable (%s)", room_id, _e)
+
     # 6. Color transfer — workers=1 avoids subprocess spawning on Windows
     _progress(70, f"Transferring colors from {n_pts:,}-point cloud")
     from scipy.spatial import cKDTree
@@ -152,12 +170,14 @@ try:
     pcd_rgb = np.asarray(pcd_full.colors)
     mesh_pts = np.asarray(mesh.vertices)
     kd = cKDTree(pcd_pts)
-    _progress(74, "KD-tree built — querying nearest neighbors")
-    # k=1: take the single nearest point from the full-resolution cloud.
-    # The full cloud has 10M+ points so every mesh vertex has a sub-mm neighbour;
-    # averaging over k=5 was blurring colors and causing the painted/blurry look.
-    _, idxs = kd.query(mesh_pts, k=1, workers=1)
-    vtx_colors = pcd_rgb[idxs]
+    _progress(74, "KD-tree built — querying nearest neighbours (IDW k=7)")
+    # Inverse-distance-weighted k=7: weights nearby points more than far ones.
+    # k=1 on a sparse cloud picks random noisy sensor readings, causing speckle.
+    # IDW keeps colour edges sharp on dense regions while smoothing uniform surfaces.
+    dists, idxs = kd.query(mesh_pts, k=7, workers=1)
+    weights = 1.0 / (dists + 1e-6)
+    weights /= weights.sum(axis=1, keepdims=True)
+    vtx_colors = (pcd_rgb[idxs] * weights[:, :, None]).sum(axis=1)
     mesh.vertex_colors = o3d.utility.Vector3dVector(vtx_colors)
     logging.info("[mesh] %s: color transfer done", room_id)
 
