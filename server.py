@@ -845,6 +845,114 @@ def gallery_upload_pointcloud_chunk(room_id):
     return jsonify({"url": f"/uploads/walls/{room_id}_pointcloud.bin", "complete": True})
 
 
+@app.post("/api/rooms/<room_id>/pointcloud/stream-chunk")
+@require_owner
+def gallery_upload_pointcloud_stream_chunk(room_id):
+    """Append one live point-cloud chunk while scan is still running.
+
+    Required headers:
+      X-Upload-Id
+      X-Chunk-Index (0-based, must be in-order)
+    """
+    buf = request.data
+    if not buf:
+        return jsonify({"error": "No data"}), 400
+
+    upload_id = (request.headers.get("X-Upload-Id") or "").strip()
+    try:
+        chunk_index = int(request.headers.get("X-Chunk-Index", "-1"))
+    except Exception:
+        return jsonify({"error": "Invalid chunk headers"}), 400
+
+    if not upload_id or chunk_index < 0:
+        return jsonify({"error": "Invalid chunk metadata"}), 400
+
+    safe_room = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in room_id)
+    safe_upload = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in upload_id)
+    safe_owner = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in f"{g.owner_type}_{g.owner_id}")
+    stem = f"{safe_owner}_{safe_room}_{safe_upload}"
+    part_path = CHUNK_UPLOADS_DIR / f"{stem}.stream.part"
+    meta_path = CHUNK_UPLOADS_DIR / f"{stem}.stream.json"
+
+    if chunk_index == 0:
+        if part_path.exists():
+            part_path.unlink()
+        if meta_path.exists():
+            meta_path.unlink()
+        meta = {"next_index": 0, "size": 0}
+    else:
+        if not part_path.exists() or not meta_path.exists():
+            return jsonify({"error": "Upload session missing or expired"}), 409
+        try:
+            meta = json.loads(meta_path.read_text())
+        except Exception:
+            return jsonify({"error": "Upload session corrupted"}), 409
+
+    expected = int(meta.get("next_index", 0))
+    if expected != chunk_index:
+        return jsonify({"error": "Out-of-order chunk", "expected": expected}), 409
+
+    with part_path.open("ab") as f:
+        f.write(buf)
+
+    meta["next_index"] = chunk_index + 1
+    meta["size"] = int(meta.get("size", 0)) + len(buf)
+
+    MAX_PC_SIZE = 640 * 1024 * 1024  # 640 MB cap (~26M points)
+    if meta["size"] > MAX_PC_SIZE:
+        if part_path.exists():
+            part_path.unlink()
+        if meta_path.exists():
+            meta_path.unlink()
+        return jsonify({"error": "Point cloud exceeds size limit"}), 413
+
+    meta_path.write_text(json.dumps(meta))
+    return jsonify({"ok": True, "received": chunk_index + 1, "complete": False})
+
+
+@app.post("/api/rooms/<room_id>/pointcloud/stream-finalize")
+@require_owner
+def gallery_upload_pointcloud_stream_finalize(room_id):
+    """Finalize a live stream upload, encrypt assembled point cloud, start mesh build."""
+    upload_id = (request.headers.get("X-Upload-Id") or "").strip()
+    if not upload_id:
+        return jsonify({"error": "Missing X-Upload-Id"}), 400
+
+    safe_room = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in room_id)
+    safe_upload = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in upload_id)
+    safe_owner = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in f"{g.owner_type}_{g.owner_id}")
+    stem = f"{safe_owner}_{safe_room}_{safe_upload}"
+    part_path = CHUNK_UPLOADS_DIR / f"{stem}.stream.part"
+    meta_path = CHUNK_UPLOADS_DIR / f"{stem}.stream.json"
+
+    if not part_path.exists() or not meta_path.exists():
+        existing = UPLOADS_DIR / "walls" / f"{room_id}_pointcloud.bin"
+        if existing.exists():
+            return jsonify({"ok": True, "url": f"/uploads/walls/{room_id}_pointcloud.bin", "complete": True})
+        return jsonify({"error": "Upload session missing or expired"}), 409
+
+    try:
+        meta = json.loads(meta_path.read_text())
+    except Exception:
+        return jsonify({"error": "Upload session corrupted"}), 409
+
+    received_chunks = int(meta.get("next_index", 0))
+    if received_chunks <= 0:
+        return jsonify({"error": "No chunks uploaded"}), 409
+
+    assembled = part_path.read_bytes()
+    path = UPLOADS_DIR / "walls" / f"{room_id}_pointcloud.bin"
+    write_encrypted(path, assembled)
+
+    if part_path.exists():
+        part_path.unlink()
+    if meta_path.exists():
+        meta_path.unlink()
+
+    _start_mesh_subprocess(room_id, path)
+    return jsonify({"ok": True, "url": f"/uploads/walls/{room_id}_pointcloud.bin", "complete": True, "chunks": received_chunks})
+
+
 @app.post("/api/rooms/<room_id>/snapshots")
 @require_owner
 def gallery_upload_snapshots(room_id):
