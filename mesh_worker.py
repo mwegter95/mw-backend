@@ -97,57 +97,49 @@ try:
     pcd_full.points = o3d.utility.Vector3dVector(xyz)
     pcd_full.colors = o3d.utility.Vector3dVector(rgb)
 
-    # 2. Downsample — fixed 5 mm voxel grid.
-    # 5 mm on a 10M-point room scan produces ~800K-1.5M points which gives
-    # Poisson enough density for photorealistic sharpness without OOM on Surface Pro 3.
-    VOXEL = 0.005
-    _progress(10, f"Resampling {n_pts:,} pts (5 mm voxel)…")
+    # 2. Downsample — 2 mm voxel grid (was 5 mm).
+    # 2 mm on a 10M-point room scan produces ~3-6M points — roughly 3× more input
+    # than the old 5 mm grid.  Combined with depth=11 this gives ~5× more mesh
+    # faces and resolves sub-centimetre texture detail (wood grain, brick mortar).
+    # No hard cap: let the full density drive the Poisson solver.
+    VOXEL = 0.002
+    _progress(10, f"Resampling {n_pts:,} pts (2 mm voxel)…")
     pcd    = pcd_full.voxel_down_sample(voxel_size=VOXEL)
     n_down = len(pcd.points)
-    logging.info("[mesh] %s: 5 mm voxel → %s pts", room_id, f"{n_down:,}")
+    logging.info("[mesh] %s: 2 mm voxel → %s pts", room_id, f"{n_down:,}")
 
-    # Safety cap: if voxel still leaves > 1.2 M points (very dense scanner),
-    # random-subsample so Poisson stays under ~4 min on Surface Pro 3.
-    MAX_PTS = 1_200_000
-    if n_down > MAX_PTS:
-        pcd    = pcd.random_down_sample(MAX_PTS / n_down)
-        n_down = len(pcd.points)
-        logging.info("[mesh] %s: capped to %s pts", room_id, f"{n_down:,}")
-
-    # 3. Normals -- orient towards the centroid of the scan.
-    # orient_normals_towards_camera_location is O(N) and correct for room
-    # scans taken from one interior position (every surface faces inward).
-    # Larger radius for sparse scans: ensures 30 neighbours are reachable even
-    # when points are far apart, giving stable normals.
-    # 3. Normals — tight radius for dense data gives sharp, accurate normals.
-    # 3 cm radius at 5 mm spacing = ~36 neighbours in a disc → stable but precise.
-    # max_nn=50 allows more neighbours in high-curvature regions like doorframes.
+    # 3. Normals — tighter radius matches the denser 2 mm grid.
+    # 2 cm search at 2 mm spacing gives ~30 neighbours in a flat disc → sharp,
+    # accurate normals.  max_nn=30 caps the search so it stays fast even in
+    # dense overlap regions.
     _progress(20, f"Estimating normals ({n_down:,} pts)…")
     pcd.estimate_normals(
-        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.03, max_nn=50)
+        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.02, max_nn=30)
     )
     _progress(32, "Orienting normals (towards scan centroid)")
     centroid = np.asarray(pcd.points).mean(axis=0)
     pcd.orient_normals_towards_camera_location(centroid)
 
-    # 4. Poisson depth=9: resolves ~1 mm features at 5 m room scale.
-    # linear_fit=True uses a linear interpolant inside each octree cell —
-    # produces slightly sharper edges on planar surfaces like walls.
-    _progress(42, "Running Screened Poisson (depth=9)…")
+    # 4. Poisson depth=11: 2^11 = 2048 octree subdivisions.
+    # At a 5 m room scale this resolves ~2.5 mm features — fine enough to
+    # capture mortar lines, wood grain, and portrait-level wall texture.
+    # linear_fit=True: linear interpolant inside each cell gives sharper planar
+    # walls than the default trilinear interpolant.
+    _progress(42, f"Running Screened Poisson (depth=11, {n_down:,} pts) — this may take several minutes…")
     mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-        pcd, depth=9, linear_fit=True
+        pcd, depth=11, linear_fit=True
     )
     n_verts_raw = len(mesh.vertices)
     n_faces_raw = len(mesh.triangles)
     logging.info("[mesh] %s: Poisson produced %s verts, %s faces",
                  room_id, f"{n_verts_raw:,}", f"{n_faces_raw:,}")
 
-    # 5. Trim — 0.5%: remove only the very lowest-density phantom geometry.
-    # At high input density the Poisson exterior is thin and 0.5% is enough
-    # to remove it without eating real surface.
-    _progress(62, "Trimming low-density exterior")
+    # 5. Trim — 1 %: at depth=11 the low-density exterior shell is thinner and
+    # more numerous than at depth=9, so a slightly higher threshold cleans it
+    # without touching real geometry.
+    _progress(62, "Trimming low-density exterior (1 %)")
     d = np.asarray(densities)
-    mesh.remove_vertices_by_mask(d < np.percentile(d, 0.5))
+    mesh.remove_vertices_by_mask(d < np.percentile(d, 1.0))
     mesh.remove_degenerate_triangles()
     mesh.remove_duplicated_vertices()
     mesh.remove_non_manifold_edges()
@@ -166,7 +158,12 @@ try:
         mesh.remove_degenerate_triangles()
         mesh.remove_duplicated_vertices()
 
-    # 6. Color transfer — workers=1 avoids subprocess spawning on Windows
+    # 6. Color transfer — IDW from the full (un-downsampled) point cloud.
+    # workers=1 avoids subprocess spawning issues on Windows.
+    # k=3 at 2 mm mesh density: with ~3-6M input points the nearest 3 are
+    # almost always sub-millimetre apart — IDW still smooths sensor noise while
+    # preserving sharp colour transitions (e.g. wall/floor boundary).
+    # k=7 would over-smooth at this density.
     _progress(70, f"Transferring colors from {n_pts:,}-point cloud")
     from scipy.spatial import cKDTree
     pcd_pts = np.asarray(pcd_full.points)
@@ -175,11 +172,8 @@ try:
     if len(mesh_pts) == 0:
         raise ValueError("Mesh has no vertices after cleaning — point cloud may be too sparse or corrupted")
     kd = cKDTree(pcd_pts)
-    _progress(74, "KD-tree built — querying nearest neighbours (IDW k=7)")
-    # Inverse-distance-weighted k=7: weights nearby points more than far ones.
-    # k=1 on a sparse cloud picks random noisy sensor readings, causing speckle.
-    # IDW keeps colour edges sharp on dense regions while smoothing uniform surfaces.
-    dists, idxs = kd.query(mesh_pts, k=7, workers=1)
+    _progress(74, f"KD-tree built — querying nearest neighbours (IDW k=3, {len(mesh_pts):,} mesh verts)")
+    dists, idxs = kd.query(mesh_pts, k=3, workers=1)
     weights = 1.0 / (dists + 1e-6)
     weights /= weights.sum(axis=1, keepdims=True)
     vtx_colors = (pcd_rgb[idxs] * weights[:, :, None]).sum(axis=1)
@@ -201,7 +195,8 @@ try:
 
     elapsed = time.time() - t0
     build_stats = {"rawPts": n_pts, "poissonPts": n_down,
-                   "meshVerts": len(verts), "meshFaces": len(faces)}
+                   "meshVerts": len(verts), "meshFaces": len(faces),
+                   "voxelMm": int(VOXEL * 1000), "poissonDepth": 11}
     _progress(100, f"Done — {len(verts):,} verts, {len(faces):,} faces, "
                    f"{len(glb_bytes)//1024} KB, {elapsed:.0f}s",
                    extra=build_stats)
