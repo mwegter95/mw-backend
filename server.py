@@ -873,6 +873,7 @@ def gallery_upload_snapshots(room_id):
     # If the mesh is already built with LiDAR colors, clear it so the next
     # rebuild uses the new photos.  If it's currently processing, let it finish
     # (it will pick up the snapshots if they arrive before the color step).
+    snap_dir = UPLOADS_DIR / "walls"
     status_path = snap_dir / f"{room_id}_mesh.status"
     if status_path.exists() and status_path.read_text().strip() == "ready":
         status_path.unlink(missing_ok=True)

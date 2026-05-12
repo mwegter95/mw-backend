@@ -1,5 +1,5 @@
 """
-Standalone Poisson mesh builder — runs as a subprocess spawned by server.py.
+Standalone Poisson mesh builder - runs as a subprocess spawned by server.py.
 
 Because this is a separate process (not a thread) Flask keeps its own GIL and
 stays fully responsive to HTTP polling requests while this job runs.
@@ -16,7 +16,7 @@ import hashlib
 import time
 from pathlib import Path
 
-# ─── Parse arguments ──────────────────────────────────────────────────────────
+# --- Parse arguments --------------------------------------------------------
 if len(sys.argv) != 5:
     print("Usage: mesh_worker.py <room_id> <pc_path> <uploads_dir> <data_dir>", file=sys.stderr)
     sys.exit(1)
@@ -26,8 +26,8 @@ pc_path     = Path(sys.argv[2])
 uploads_dir = Path(sys.argv[3])
 data_dir    = Path(sys.argv[4])
 
-# ─── Logging (stdout so server.py can stream it) ──────────────────────────────
-# MUST reconfigure stdout BEFORE logging.basicConfig on Windows — piped stdout
+# --- Logging (stdout so server.py can stream it) ----------------------------
+# MUST reconfigure stdout BEFORE logging.basicConfig on Windows - piped stdout
 # is block-buffered by default even with -u; line_buffering=True flushes after
 # every newline so server.py sees each log line in real time.
 import io as _io
@@ -40,7 +40,7 @@ logging.basicConfig(
     force=True,
 )
 
-# ─── Encryption helpers (mirrors server.py) ───────────────────────────────────
+# --- Encryption helpers (mirrors server.py) ---------------------------------
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 def _load_file_key():
@@ -55,7 +55,7 @@ def read_encrypted(path: Path) -> bytes:
     nonce, ct = blob[:12], blob[12:]
     return AESGCM(_FILE_KEY).decrypt(nonce, ct, None)
 
-# ─── Progress / status helpers ────────────────────────────────────────────────
+# --- Progress / status helpers ----------------------------------------------
 status_path   = uploads_dir / "walls" / f"{room_id}_mesh.status"
 progress_path = uploads_dir / "walls" / f"{room_id}_mesh.progress"
 glb_path      = uploads_dir / "walls" / f"{room_id}_mesh.glb"
@@ -69,13 +69,13 @@ def _progress(pct: int, phase: str, extra: dict = None):
     except Exception:
         pass
     logging.info("[mesh] %s: %3d%%  %s", room_id, pct, phase)
-    # Explicit flush — belt-and-suspenders on Windows piped stdout
+    # Explicit flush - belt-and-suspenders on Windows piped stdout
     try:
         sys.stdout.flush()
     except Exception:
         pass
 
-# ─── Main build ───────────────────────────────────────────────────────────────
+# --- Main build -------------------------------------------------------------
 _progress(0, "Starting reconstruction")
 t0 = time.time()
 
@@ -97,17 +97,17 @@ try:
     pcd_full.points = o3d.utility.Vector3dVector(xyz)
     pcd_full.colors = o3d.utility.Vector3dVector(rgb)
 
-    # 2. Downsample — 5 mm voxel grid.
+    # 2. Downsample - 5 mm voxel grid.
     # 5 mm on a 10M-point room scan produces ~800K-1.5M points: enough density
     # for depth=9 Poisson to resolve all visible room features, while keeping
     # the build under 60-90 s on a Surface Pro 3.
-    # The previous 2mm/depth=11 combo produced 10M input points and 485s —
+    # The previous 2mm/depth=11 combo produced 10M input points and 485s -
     # that's 64× more work than depth=9 for a 2× linear resolution gain.
     VOXEL = 0.005
-    _progress(10, f"Resampling {n_pts:,} pts (5 mm voxel)…")
+    _progress(10, f"Resampling {n_pts:,} pts (5 mm voxel)...")
     pcd    = pcd_full.voxel_down_sample(voxel_size=VOXEL)
     n_down = len(pcd.points)
-    logging.info("[mesh] %s: 5 mm voxel → %s pts", room_id, f"{n_down:,}")
+    logging.info("[mesh] %s: 5 mm voxel -> %s pts", room_id, f"{n_down:,}")
 
     # Hard cap: safety net for unusually dense scans.
     MAX_PTS = 1_200_000
@@ -116,8 +116,8 @@ try:
         n_down = len(pcd.points)
         logging.info("[mesh] %s: capped to %s pts", room_id, f"{n_down:,}")
 
-    # 3. Normals — 3 cm radius at 5 mm spacing = ~30 neighbours in a disc.
-    _progress(20, f"Estimating normals ({n_down:,} pts)…")
+    # 3. Normals - 3 cm radius at 5 mm spacing = ~30 neighbours in a disc.
+    _progress(20, f"Estimating normals ({n_down:,} pts)...")
     pcd.estimate_normals(
         search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.03, max_nn=50)
     )
@@ -126,9 +126,9 @@ try:
     pcd.orient_normals_towards_camera_location(centroid)
 
     # 4. Poisson depth=9: ~1 mm surface resolution at 5 m room scale.
-    # linear_fit=True uses a linear interpolant inside each octree cell —
+    # linear_fit=True uses a linear interpolant inside each octree cell -
     # produces sharper edges on planar surfaces like walls.
-    _progress(42, "Running Screened Poisson (depth=9)…")
+    _progress(42, "Running Screened Poisson (depth=9)...")
     mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
         pcd, depth=9, linear_fit=True
     )
@@ -137,16 +137,16 @@ try:
     logging.info("[mesh] %s: Poisson produced %s verts, %s faces",
                  room_id, f"{n_verts_raw:,}", f"{n_faces_raw:,}")
 
-    # 5. Trim — 0.5 %: remove only the very lowest-density phantom geometry.
+    # 5. Trim - 0.5 %: remove only the very lowest-density phantom geometry.
     _progress(62, "Trimming low-density exterior")
     d = np.asarray(densities)
     mesh.remove_vertices_by_mask(d < np.percentile(d, 0.5))
     mesh.remove_degenerate_triangles()
     mesh.remove_duplicated_vertices()
     mesh.remove_non_manifold_edges()
-    logging.info("[mesh] %s: after trim — %s verts, %s faces",
+    logging.info("[mesh] %s: after trim - %s verts, %s faces",
                  room_id, f"{len(mesh.vertices):,}", f"{len(mesh.triangles):,}")
-    # NOTE: No Laplacian smoothing — at 5 mm / depth=9 density the surface is
+    # NOTE: No Laplacian smoothing - at 5 mm / depth=9 density the surface is
     # already smooth; smoothing would blur the wall texture we want to preserve.
 
     # 5c. Remove any NaN/Inf vertices introduced by Poisson or smoothing.
@@ -164,7 +164,7 @@ try:
     # Fallback: IDW from the low-res LiDAR depth-sensor colors.
     # Photo snapshots give ~50× better color resolution (12MP RGB vs ~256×192
     # LiDAR color) and eliminate the orange warmth / blurry gradient artifacts.
-    _progress(70, f"Transferring colors…")
+    _progress(70, "Transferring colors...")
     from scipy.spatial import cKDTree
     pcd_pts = np.asarray(pcd_full.points)
     pcd_rgb = np.asarray(pcd_full.colors)
@@ -181,7 +181,7 @@ try:
         from photo_project import project_photos
         result = project_photos(mesh_pts, mesh_nrm, snap_dir, room_id)
     except Exception as _pe:
-        logging.warning("[mesh] %s: photo_project failed (%s) — using IDW fallback", room_id, _pe)
+        logging.warning("[mesh] %s: photo_project failed (%s) - using IDW fallback", room_id, _pe)
         result = None
 
     if result is not None:
@@ -204,7 +204,7 @@ try:
     else:
         _progress(70, f"IDW from {n_pts:,}-point LiDAR cloud (k=3)")
         kd = cKDTree(pcd_pts)
-        _progress(74, "KD-tree built — querying nearest neighbours")
+        _progress(74, "KD-tree built - querying nearest neighbours")
         dists, idxs = kd.query(mesh_pts, k=3, workers=1)
         w = 1.0 / (dists + 1e-6)
         w /= w.sum(axis=1, keepdims=True)
@@ -229,16 +229,16 @@ try:
                    "meshVerts": len(verts), "meshFaces": len(faces),
                    "voxelMm": int(VOXEL * 1000), "poissonDepth": 9,
                    "colorMethod": color_method}
-    _progress(100, f"Done — {len(verts):,} verts, {len(faces):,} faces, "
+    _progress(100, f"Done - {len(verts):,} verts, {len(faces):,} faces, "
                    f"{len(glb_bytes)//1024} KB, {elapsed:.0f}s",
                    extra=build_stats)
     status_path.write_text("ready")
-    logging.info("[mesh] %s: COMPLETE in %.1fs — %s verts, %s faces, %d KB",
+    logging.info("[mesh] %s: COMPLETE in %.1fs - %s verts, %s faces, %d KB",
                  room_id, elapsed, f"{len(verts):,}", f"{len(faces):,}", len(glb_bytes)//1024)
 
 except Exception:
     import traceback
     logging.error("[mesh] %s: Poisson reconstruction FAILED", room_id)
     logging.error(traceback.format_exc())
-    _progress(0, "Build failed — check server logs")
+    _progress(0, "Build failed - check server logs")
     status_path.write_text("failed")

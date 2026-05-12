@@ -52,6 +52,7 @@ def project_photos(
     """
     meta_path = snap_dir / f"{room_id}_snaps.json"
     if not meta_path.exists():
+        logging.info("[photo] %s: no snapshot metadata file found at %s", room_id, meta_path.name)
         return None
 
     try:
@@ -61,14 +62,17 @@ def project_photos(
         return None
 
     if not snaps:
+        logging.info("[photo] %s: snapshot metadata file is empty", room_id)
         return None
 
     try:
         from PIL import Image
         import io as _io
     except ImportError:
-        logging.warning("[photo] Pillow not installed — cannot do photo projection")
+        logging.warning("[photo] Pillow not installed - cannot do photo projection")
         return None
+
+    logging.info("[photo] %s: loaded %d snapshots from metadata", room_id, len(snaps))
 
     N = len(mesh_verts)
     best_colors = np.zeros((N, 3), dtype=np.float64)
