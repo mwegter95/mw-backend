@@ -845,6 +845,109 @@ def gallery_upload_pointcloud_chunk(room_id):
     return jsonify({"url": f"/uploads/walls/{room_id}_pointcloud.bin", "complete": True})
 
 
+@app.post("/api/rooms/<room_id>/snapshots")
+@require_owner
+def gallery_upload_snapshots(room_id):
+    """Receive a bundle of RGB JPEG snapshots with ARKit camera matrices.
+
+    These are 25%-resolution iPhone RGB camera frames taken during the scan.
+    mesh_worker.py will use photo_project.py to project them onto the Poisson
+    mesh vertices, replacing the blurry LiDAR depth-sensor colors with
+    photorealistic 12MP RGB color.
+
+    Body JSON:
+      { snapshots: [{ jpeg: "<base64>", c2w: [16 floats], K: [9 floats],
+                      fw: <full_width>, fh: <full_height> }, ...] }
+    """
+    data  = request.get_json(silent=True) or {}
+    snaps = data.get("snapshots") or []
+    if not snaps:
+        return jsonify({"error": "no snapshots provided"}), 400
+
+    stored = 0
+    for i, s in enumerate(snaps):
+        if _store_single_snapshot(room_id, i, s):
+            stored += 1
+    log.info("[snapshots] %s: stored %d snapshots (batch)", room_id, stored)
+
+    # If the mesh is already built with LiDAR colors, clear it so the next
+    # rebuild uses the new photos.  If it's currently processing, let it finish
+    # (it will pick up the snapshots if they arrive before the color step).
+    status_path = snap_dir / f"{room_id}_mesh.status"
+    if status_path.exists() and status_path.read_text().strip() == "ready":
+        status_path.unlink(missing_ok=True)
+        (snap_dir / f"{room_id}_mesh.glb").unlink(missing_ok=True)
+        (snap_dir / f"{room_id}_mesh.progress").unlink(missing_ok=True)
+        log.info("[snapshots] %s: cleared stale LiDAR-only GLB — rebuild required", room_id)
+
+    return jsonify({"ok": True, "count": stored})
+
+
+def _store_single_snapshot(room_id: str, snap_idx: int, s: dict) -> bool:
+    import base64 as _b64
+
+    if snap_idx < 0 or snap_idx > 9999:
+        return False
+
+    snap_dir = UPLOADS_DIR / "walls"
+    meta_path = snap_dir / f"{room_id}_snaps.json"
+
+    try:
+        jpeg_bytes = _b64.b64decode(s["jpeg"])
+    except Exception:
+        log.warning("[snapshots] %s: snapshot %d had invalid base64 — skipped", room_id, snap_idx)
+        return False
+
+    fname = f"{room_id}_snap_{snap_idx:03d}.jpg"
+    (snap_dir / fname).write_bytes(jpeg_bytes)
+
+    existing = []
+    if meta_path.exists():
+        try:
+            existing = json.loads(meta_path.read_text())
+        except Exception:
+            existing = []
+
+    by_file = {m.get("file"): m for m in existing if isinstance(m, dict) and m.get("file")}
+    by_file[fname] = {
+        "file": fname,
+        "c2w": s.get("c2w", []),
+        "K": s.get("K", []),
+        "fw": s.get("fw", 0),
+        "fh": s.get("fh", 0),
+    }
+
+    def _snap_sort_key(name: str) -> int:
+        try:
+            return int(name.rsplit("_snap_", 1)[1].split(".", 1)[0])
+        except Exception:
+            return 1_000_000
+
+    merged = [by_file[k] for k in sorted(by_file.keys(), key=_snap_sort_key)]
+    meta_path.write_text(json.dumps(merged))
+    return True
+
+
+@app.post("/api/rooms/<room_id>/snapshots/<int:snap_idx>")
+@require_owner
+def gallery_upload_snapshot(room_id, snap_idx):
+    """Receive one snapshot incrementally during scan.
+
+    Body JSON:
+      { snapshot: { jpeg: "<base64>", c2w: [16], K: [9], fw: N, fh: N } }
+    """
+    data = request.get_json(silent=True) or {}
+    snap = data.get("snapshot") or {}
+    if not snap:
+        return jsonify({"error": "no snapshot provided"}), 400
+
+    ok = _store_single_snapshot(room_id, int(snap_idx), snap)
+    if not ok:
+        return jsonify({"error": "invalid snapshot"}), 400
+
+    return jsonify({"ok": True, "index": int(snap_idx)})
+
+
 # ─── Poisson mesh reconstruction ─────────────────────────────────────────────
 # Runs as a subprocess (mesh_worker.py) so Flask never shares a GIL with
 # Open3D.  Status + progress are communicated via small sentinel files:
