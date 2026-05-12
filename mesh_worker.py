@@ -97,81 +97,64 @@ try:
     pcd_full.points = o3d.utility.Vector3dVector(xyz)
     pcd_full.colors = o3d.utility.Vector3dVector(rgb)
 
-    # 2. Downsample to a target of ~500 K points for Poisson input.
-    # Strategy: use voxel_down_sample with a size chosen so the output is
-    # close to TARGET_PTS.  We do one pass, measure, then rescale if needed.
-    # For scans already under 500 K we skip entirely (no quality to gain by thinning).
-    TARGET_PTS = 500_000
-    _progress(10, f"Analysing {n_pts:,} raw points…")
+    # 2. Downsample — fixed 5 mm voxel grid.
+    # 5 mm on a 10M-point room scan produces ~800K-1.5M points which gives
+    # Poisson enough density for photorealistic sharpness without OOM on Surface Pro 3.
+    VOXEL = 0.005
+    _progress(10, f"Resampling {n_pts:,} pts (5 mm voxel)…")
+    pcd    = pcd_full.voxel_down_sample(voxel_size=VOXEL)
+    n_down = len(pcd.points)
+    logging.info("[mesh] %s: 5 mm voxel → %s pts", room_id, f"{n_down:,}")
 
-    if n_pts <= TARGET_PTS:
-        pcd = pcd_full
-        n_down = n_pts
-        logging.info("[mesh] %s: scan has %s pts — using all (no downsample)", room_id, f"{n_down:,}")
-    else:
-        # Estimate voxel size: surface area heuristic.
-        # We want ~TARGET_PTS samples.  Start with a guess, then clamp.
-        pts_arr = np.asarray(pcd_full.points)
-        bbox    = pts_arr.max(axis=0) - pts_arr.min(axis=0)
-        # Rough surface area of a room (walls + floor + ceiling ~ 2*(lw+lh+wh)).
-        # Approximate with bbox volume^(2/3) * 6 as a proxy.
-        vol = float(np.prod(np.clip(bbox, 0.1, None)))
-        est_surface = 6 * (vol ** (2/3))
-        guess_voxel = max(0.003, (est_surface / TARGET_PTS) ** 0.5)
-        _progress(10, f"Resampling {n_pts:,} → ~{TARGET_PTS//1000}K pts (voxel ≈{guess_voxel*100:.1f} cm)")
-        pcd    = pcd_full.voxel_down_sample(voxel_size=guess_voxel)
+    # Safety cap: if voxel still leaves > 1.2 M points (very dense scanner),
+    # random-subsample so Poisson stays under ~4 min on Surface Pro 3.
+    MAX_PTS = 1_200_000
+    if n_down > MAX_PTS:
+        pcd    = pcd.random_down_sample(MAX_PTS / n_down)
         n_down = len(pcd.points)
-        # If estimate was off by more than 2×, do a random subsample to cap.
-        if n_down > TARGET_PTS * 2:
-            pcd    = pcd.random_down_sample(TARGET_PTS / n_down)
-            n_down = len(pcd.points)
-        logging.info("[mesh] %s: downsampled to %s pts (voxel %.3f m)", room_id, f"{n_down:,}", guess_voxel)
+        logging.info("[mesh] %s: capped to %s pts", room_id, f"{n_down:,}")
 
     # 3. Normals -- orient towards the centroid of the scan.
     # orient_normals_towards_camera_location is O(N) and correct for room
     # scans taken from one interior position (every surface faces inward).
     # Larger radius for sparse scans: ensures 30 neighbours are reachable even
     # when points are far apart, giving stable normals.
-    normal_radius = 0.10 if n_down < 200_000 else 0.06
-    _progress(20, f"Estimating normals ({n_down:,} pts, r={normal_radius*100:.0f} cm)")
+    # 3. Normals — tight radius for dense data gives sharp, accurate normals.
+    # 3 cm radius at 5 mm spacing = ~36 neighbours in a disc → stable but precise.
+    # max_nn=50 allows more neighbours in high-curvature regions like doorframes.
+    _progress(20, f"Estimating normals ({n_down:,} pts)…")
     pcd.estimate_normals(
-        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=normal_radius, max_nn=30)
+        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.03, max_nn=50)
     )
     _progress(32, "Orienting normals (towards scan centroid)")
     centroid = np.asarray(pcd.points).mean(axis=0)
     pcd.orient_normals_towards_camera_location(centroid)
 
-    # 4. Poisson — depth=8 for sparse scans (< 200 K pts can't support depth=9
-    #    resolution without holes/artefacts), depth=9 for medium-dense scans.
-    poisson_depth = 8 if n_down < 200_000 else 9
-    _progress(42, f"Running Screened Poisson (depth={poisson_depth})…")
+    # 4. Poisson depth=9: resolves ~1 mm features at 5 m room scale.
+    # linear_fit=True uses a linear interpolant inside each octree cell —
+    # produces slightly sharper edges on planar surfaces like walls.
+    _progress(42, "Running Screened Poisson (depth=9)…")
     mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-        pcd, depth=poisson_depth, linear_fit=False
+        pcd, depth=9, linear_fit=True
     )
     n_verts_raw = len(mesh.vertices)
     n_faces_raw = len(mesh.triangles)
     logging.info("[mesh] %s: Poisson produced %s verts, %s faces",
                  room_id, f"{n_verts_raw:,}", f"{n_faces_raw:,}")
 
-    # 5. Trim — 1% removes only phantom geometry at scan edges.
+    # 5. Trim — 0.5%: remove only the very lowest-density phantom geometry.
+    # At high input density the Poisson exterior is thin and 0.5% is enough
+    # to remove it without eating real surface.
     _progress(62, "Trimming low-density exterior")
     d = np.asarray(densities)
-    mesh.remove_vertices_by_mask(d < np.percentile(d, 1))
+    mesh.remove_vertices_by_mask(d < np.percentile(d, 0.5))
     mesh.remove_degenerate_triangles()
     mesh.remove_duplicated_vertices()
     mesh.remove_non_manifold_edges()
     logging.info("[mesh] %s: after trim — %s verts, %s faces",
                  room_id, f"{len(mesh.vertices):,}", f"{len(mesh.triangles):,}")
-
-    # 5b. Light Laplacian smooth — 3 iterations removes jagged triangles that
-    #     arise from sparse input without blurring real surface structure.
-    try:
-        _progress(66, "Smoothing mesh surface")
-        mesh = mesh.filter_smooth_laplacian(number_of_iterations=3)
-        mesh.compute_vertex_normals()
-        logging.info("[mesh] %s: laplacian smooth done", room_id)
-    except Exception as _e:
-        logging.warning("[mesh] %s: laplacian smooth unavailable (%s)", room_id, _e)
+    # NOTE: No Laplacian smoothing — at 5 mm / depth=9 density the surface is
+    # already smooth; smoothing would blur the wall texture we want to preserve.
 
     # 5c. Remove any NaN/Inf vertices introduced by Poisson or smoothing.
     mesh_pts_check = np.asarray(mesh.vertices)
