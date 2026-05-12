@@ -837,7 +837,8 @@ def _build_poisson_mesh(room_id: str, pc_path: Path):
             pass
         logging.info(f"[mesh] {room_id}: {pct:3d}%  {phase}")
 
-    status_path.write_text("processing")
+    # status_path already written to "processing" by the endpoint before
+    # this thread started — no need to write it again here.
     _progress(0, "Starting reconstruction")
     t0 = _time.time()
     try:
@@ -902,7 +903,7 @@ def _build_poisson_mesh(room_id: str, pc_path: Path):
         mesh_pts = _np.asarray(mesh.vertices)
         kd = cKDTree(pcd_pts)
         _progress(74, "KD-tree built — querying nearest neighbors")
-        _, idxs = kd.query(mesh_pts, k=5, workers=-1)
+        _, idxs = kd.query(mesh_pts, k=5, workers=1)
         vtx_colors = pcd_rgb[idxs].mean(axis=1)
         mesh.vertex_colors = o3d.utility.Vector3dVector(vtx_colors)
         logging.info(f"[mesh] {room_id}: color transfer done")
@@ -953,6 +954,10 @@ def gallery_get_mesh(room_id):
 
     if not status_path.exists():
         if pc_path.exists():
+            # Write the sentinel BEFORE starting the thread so that any
+            # concurrent poll arriving in the milliseconds before the thread
+            # runs sees "processing" and does NOT spawn a second build.
+            status_path.write_text("processing")
             threading.Thread(
                 target=_build_poisson_mesh,
                 args=(room_id, pc_path),
