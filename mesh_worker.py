@@ -94,26 +94,31 @@ try:
     pcd_full.points = o3d.utility.Vector3dVector(xyz)
     pcd_full.colors = o3d.utility.Vector3dVector(rgb)
 
-    # 2. Downsample — 15 mm grid keeps ~300–700 K points on a typical room scan,
-    #    which is fast enough for a Surface Pro 3.  5 mm was producing 6.8 M
-    #    points which held the GIL for minutes on normal estimation.
+    # 2. Downsample — 15 mm voxel grid.
     _progress(10, f"Resampling {n_pts:,} points (15 mm grid)")
     pcd = pcd_full.voxel_down_sample(voxel_size=0.015)
     n_down = len(pcd.points)
     logging.info("[mesh] %s: downsampled to %s points", room_id, f"{n_down:,}")
 
-# 3. Normals — orient towards the centroid of the scan.
-        # orient_normals_towards_camera_location is O(N) vs O(N log N) for the
-        # MST approach.  For a LiDAR room scan taken from one interior position
-        # every visible surface already faces inward toward the scanner, so the
-        # centroid is a good proxy for the camera location.
-        _progress(20, f"Estimating normals ({n_down:,} pts)")
-        pcd.estimate_normals(
-            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.06, max_nn=30)
-        )
-        _progress(32, "Orienting normals (towards scan centroid)")
-        centroid = np.asarray(pcd.points).mean(axis=0)
-        pcd.orient_normals_towards_camera_location(centroid)
+    # Hard cap: if still > 250 K points after voxel sampling (very dense scan),
+    # random-subsample so estimate_normals stays under ~30 s on Surface Pro 3.
+    MAX_PTS = 250_000
+    if n_down > MAX_PTS:
+        ratio = MAX_PTS / n_down
+        pcd = pcd.random_down_sample(ratio)
+        n_down = len(pcd.points)
+        logging.info("[mesh] %s: subsampled to %s points (cap)", room_id, f"{n_down:,}")
+
+    # 3. Normals -- orient towards the centroid of the scan.
+    # orient_normals_towards_camera_location is O(N) and correct for room
+    # scans taken from one interior position (every surface faces inward).
+    _progress(20, f"Estimating normals ({n_down:,} pts)")
+    pcd.estimate_normals(
+        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.06, max_nn=30)
+    )
+    _progress(32, "Orienting normals (towards scan centroid)")
+    centroid = np.asarray(pcd.points).mean(axis=0)
+    pcd.orient_normals_towards_camera_location(centroid)
 
     # 4. Poisson — depth=8 is 4× faster than depth=9 with still-excellent
     #    ~2 mm resolution at 5 m scale.  Appropriate for Surface Pro 3.

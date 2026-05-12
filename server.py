@@ -863,14 +863,17 @@ def _start_mesh_subprocess(room_id: str, pc_path: Path):
         [sys.executable, "-u", str(_WORKER_SCRIPT), room_id, str(pc_path), str(UPLOADS_DIR), str(DATA_DIR)],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
+        # Binary mode avoids Windows cp1252/utf-8 encoding mismatch killing the pipe.
+        # We decode manually with errors='replace' so no single bad byte stops logging.
         creationflags=flags,
     )
 
     def _stream_logs():
-        # iter(readline, sentinel) is more reliable on Windows than for-in
-        for line in iter(proc.stdout.readline, ""):
-            line = line.rstrip()
+        for raw in iter(proc.stdout.readline, b""):
+            try:
+                line = raw.decode("utf-8", errors="replace").rstrip()
+            except Exception:
+                line = repr(raw)
             if line:
                 logging.info("[mesh-proc] %s", line)
         proc.wait()
@@ -2326,6 +2329,17 @@ def _decode_data_url(data_url):
 
 if __name__ == "__main__":
     init_db()
+    # Clean up any .status files left in "processing" state from a previous server
+    # run whose worker threads/processes were killed when the server restarted.
+    _walls_dir = UPLOADS_DIR / "walls"
+    if _walls_dir.exists():
+        for _sf in _walls_dir.glob("*_mesh.status"):
+            try:
+                if _sf.read_text().strip() == "processing":
+                    _sf.write_text("failed")
+                    logging.info("[startup] reset stale processing status: %s", _sf.name)
+            except Exception:
+                pass
     log.info("✓ mw-backend starting on http://0.0.0.0:%s", PORT)
     from waitress import serve
     serve(app, host="0.0.0.0", port=PORT)
