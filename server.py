@@ -1037,7 +1037,18 @@ def gallery_get_mesh(room_id):
             pass
 
     if status == "ready" and glb_path.exists():
-        return jsonify({"status": "ready", "url": f"/uploads/walls/{room_id}_mesh.glb", "pct": 100, "phase": phase})
+        resp = {"status": "ready", "url": f"/uploads/walls/{room_id}_mesh.glb", "pct": 100, "phase": phase}
+        # Forward build stats stored in progress file so frontend can show real counts
+        if progress_path.exists():
+            try:
+                import json as _j2
+                prog2 = _j2.loads(progress_path.read_text())
+                for k in ("rawPts", "poissonPts", "meshVerts", "meshFaces"):
+                    if k in prog2:
+                        resp[k] = prog2[k]
+            except Exception:
+                pass
+        return jsonify(resp)
     return jsonify({"status": status, "pct": pct, "phase": phase})
 
 

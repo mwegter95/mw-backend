@@ -60,9 +60,12 @@ status_path   = uploads_dir / "walls" / f"{room_id}_mesh.status"
 progress_path = uploads_dir / "walls" / f"{room_id}_mesh.progress"
 glb_path      = uploads_dir / "walls" / f"{room_id}_mesh.glb"
 
-def _progress(pct: int, phase: str):
+def _progress(pct: int, phase: str, extra: dict = None):
     try:
-        progress_path.write_text(json.dumps({"pct": pct, "phase": phase}))
+        data = {"pct": pct, "phase": phase}
+        if extra:
+            data.update(extra)
+        progress_path.write_text(json.dumps(data))
     except Exception:
         pass
     logging.info("[mesh] %s: %3d%%  %s", room_id, pct, phase)
@@ -94,28 +97,35 @@ try:
     pcd_full.points = o3d.utility.Vector3dVector(xyz)
     pcd_full.colors = o3d.utility.Vector3dVector(rgb)
 
-    # 2. Downsample — only if the scan is already dense enough to warrant it.
-    # If the scan has ≤ 500 K points, skip voxel sampling entirely: throwing away
-    # points on a sparse scan makes Poisson blobby and colours speckled.
-    # For dense scans, use a fine 5 mm grid to preserve wall texture.
-    _progress(10, f"Analysing {n_pts:,} points…")
-    if n_pts <= 500_000:
+    # 2. Downsample to a target of ~500 K points for Poisson input.
+    # Strategy: use voxel_down_sample with a size chosen so the output is
+    # close to TARGET_PTS.  We do one pass, measure, then rescale if needed.
+    # For scans already under 500 K we skip entirely (no quality to gain by thinning).
+    TARGET_PTS = 500_000
+    _progress(10, f"Analysing {n_pts:,} raw points…")
+
+    if n_pts <= TARGET_PTS:
         pcd = pcd_full
         n_down = n_pts
-        logging.info("[mesh] %s: sparse scan (%s pts) — skipping voxel downsample", room_id, f"{n_down:,}")
+        logging.info("[mesh] %s: scan has %s pts — using all (no downsample)", room_id, f"{n_down:,}")
     else:
-        _progress(10, f"Resampling {n_pts:,} points (5 mm grid)")
-        pcd = pcd_full.voxel_down_sample(voxel_size=0.005)
+        # Estimate voxel size: surface area heuristic.
+        # We want ~TARGET_PTS samples.  Start with a guess, then clamp.
+        pts_arr = np.asarray(pcd_full.points)
+        bbox    = pts_arr.max(axis=0) - pts_arr.min(axis=0)
+        # Rough surface area of a room (walls + floor + ceiling ~ 2*(lw+lh+wh)).
+        # Approximate with bbox volume^(2/3) * 6 as a proxy.
+        vol = float(np.prod(np.clip(bbox, 0.1, None)))
+        est_surface = 6 * (vol ** (2/3))
+        guess_voxel = max(0.003, (est_surface / TARGET_PTS) ** 0.5)
+        _progress(10, f"Resampling {n_pts:,} → ~{TARGET_PTS//1000}K pts (voxel ≈{guess_voxel*100:.1f} cm)")
+        pcd    = pcd_full.voxel_down_sample(voxel_size=guess_voxel)
         n_down = len(pcd.points)
-        logging.info("[mesh] %s: downsampled to %s points", room_id, f"{n_down:,}")
-
-    # Hard cap: prevent OOM on 4 GB Surface Pro 3.
-    MAX_PTS = 700_000
-    if n_down > MAX_PTS:
-        ratio = MAX_PTS / n_down
-        pcd = pcd.random_down_sample(ratio)
-        n_down = len(pcd.points)
-        logging.info("[mesh] %s: subsampled to %s points (cap)", room_id, f"{n_down:,}")
+        # If estimate was off by more than 2×, do a random subsample to cap.
+        if n_down > TARGET_PTS * 2:
+            pcd    = pcd.random_down_sample(TARGET_PTS / n_down)
+            n_down = len(pcd.points)
+        logging.info("[mesh] %s: downsampled to %s pts (voxel %.3f m)", room_id, f"{n_down:,}", guess_voxel)
 
     # 3. Normals -- orient towards the centroid of the scan.
     # orient_normals_towards_camera_location is O(N) and correct for room
@@ -195,8 +205,11 @@ try:
     glb_path.write_bytes(glb_bytes)
 
     elapsed = time.time() - t0
+    build_stats = {"rawPts": n_pts, "poissonPts": n_down,
+                   "meshVerts": len(verts), "meshFaces": len(faces)}
     _progress(100, f"Done — {len(verts):,} verts, {len(faces):,} faces, "
-                   f"{len(glb_bytes)//1024} KB, {elapsed:.0f}s")
+                   f"{len(glb_bytes)//1024} KB, {elapsed:.0f}s",
+                   extra=build_stats)
     status_path.write_text("ready")
     logging.info("[mesh] %s: COMPLETE in %.1fs — %s verts, %s faces, %d KB",
                  room_id, elapsed, f"{len(verts):,}", f"{len(faces):,}", len(glb_bytes)//1024)
