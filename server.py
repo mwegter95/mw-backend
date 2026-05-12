@@ -873,17 +873,16 @@ def _build_poisson_mesh(room_id: str, pc_path: Path):
         mesh.remove_non_manifold_edges()
 
         # ── 6. Color transfer from FULL-resolution cloud ───────────────────
-        # The 5 mm resampled cloud has only 1/20th the color samples of the
-        # original scan.  Using the full cloud + k=5 averaging gives much
-        # sharper, more accurate vertex colors without noise.
-        pcd_tree   = o3d.geometry.KDTreeFlann(pcd_full)
-        mesh_pts   = _np.asarray(mesh.vertices)
-        pcd_rgb    = _np.asarray(pcd_full.colors)
-        K_COLOR    = 5
-        vtx_colors = _np.zeros((len(mesh_pts), 3), dtype=_np.float64)
-        for i, pt in enumerate(mesh_pts):
-            _, idx, _ = pcd_tree.search_knn_vector_3d(pt, K_COLOR)
-            vtx_colors[i] = pcd_rgb[list(idx)].mean(axis=0)
+        # scipy cKDTree.query() is a vectorized C call — does all N vertices in
+        # one shot without holding the Python GIL, so Flask stays responsive.
+        from scipy.spatial import cKDTree
+        pcd_pts  = _np.asarray(pcd_full.points)
+        pcd_rgb  = _np.asarray(pcd_full.colors)
+        mesh_pts = _np.asarray(mesh.vertices)
+        K_COLOR  = 5
+        kd = cKDTree(pcd_pts)
+        _, idxs = kd.query(mesh_pts, k=K_COLOR, workers=-1)   # parallel, releases GIL
+        vtx_colors = pcd_rgb[idxs].mean(axis=1)               # shape (V, 3)
         mesh.vertex_colors = o3d.utility.Vector3dVector(vtx_colors)
 
         # ── 7. Export as GLB ───────────────────────────────────────────────
