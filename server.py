@@ -551,12 +551,31 @@ def gallery_state():
     for r in paint_rows:
         paint_layers.setdefault(r["wall_id"], {})[r["layer_id"]] = json.loads(r["data"])
 
-    # rooms
+    # rooms — spaces can have large surfaces blobs; return a compact summary so
+    # /api/state loads fast regardless of how many scans the user has.
+    # Full room data is fetched on demand via GET /api/rooms/<room_id>.
     room_rows = db.execute(
         "SELECT id, data FROM gallery_rooms WHERE owner_type=? AND owner_id=? ORDER BY updated_at DESC",
         (g.owner_type, g.owner_id)
     ).fetchall()
-    rooms = {r["id"]: json.loads(r["data"]) for r in room_rows}
+    rooms = {}
+    for r in room_rows:
+        d = json.loads(r["data"])
+        if d.get("roomType") == "space":
+            # Strip surfaces — they hold per-surface warp data + placed pieces
+            # and can be hundreds of KB per room.  Frontend lazy-loads on open.
+            pc = (d.get("roomScan") or {}).get("pointCloud") or {}
+            rooms[r["id"]] = {
+                "id":          r["id"],
+                "name":        d.get("name", ""),
+                "roomType":    "space",
+                "updatedAt":   d.get("updatedAt"),
+                "hasScan":     bool(pc.get("url")),
+                "surfaceCount": len(d.get("surfaces") or {}),
+                "_summary":    True,
+            }
+        else:
+            rooms[r["id"]] = d  # 3D rooms are small — return full data
 
     return jsonify({"walls": walls, "layouts": layouts, "library": library, "paintLayers": paint_layers, "rooms": rooms})
 
@@ -694,14 +713,32 @@ def gallery_list_rooms():
     return jsonify({"rooms": rooms})
 
 
+@app.get("/api/rooms/<room_id>")
+@require_owner
+def gallery_get_room(room_id):
+    """Return full room JSON for a single room (lazy-loaded by the frontend)."""
+    db = get_db()
+    row = db.execute(
+        "SELECT data FROM gallery_rooms WHERE id=? AND owner_type=? AND owner_id=?",
+        (room_id, g.owner_type, g.owner_id)
+    ).fetchone()
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify(json.loads(row["data"]))
+
+
 @app.put("/api/rooms/<room_id>")
 @require_owner
 def gallery_put_room(room_id):
     db  = get_db()
     now = utc_now_iso_legacy()
     data = request.get_json(silent=True) or {}
-    # Strip any large data URL payloads stored in warpedImageUrl before persisting
-    # (images are saved separately via /api/rooms/<id>/surfaces/<face>/image)
+    # Defensively strip any inline base64 images from warpedImageUrl fields
+    # (they should have been uploaded separately, but guard just in case).
+    if isinstance(data.get("surfaces"), dict):
+        for s in data["surfaces"].values():
+            if isinstance(s.get("warpedImageUrl"), str) and s["warpedImageUrl"].startswith("data:"):
+                s["warpedImageUrl"] = None
     db.execute(
         "INSERT INTO gallery_rooms (id, owner_type, owner_id, data, updated_at) VALUES (?,?,?,?,?) "
         "ON CONFLICT(id) DO UPDATE SET owner_type=excluded.owner_type, owner_id=excluded.owner_id, "
@@ -823,7 +860,7 @@ def _start_mesh_subprocess(room_id: str, pc_path: Path):
 
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # hide console on Windows
     proc = subprocess.Popen(
-        [sys.executable, str(_WORKER_SCRIPT), room_id, str(pc_path), str(UPLOADS_DIR), str(DATA_DIR)],
+        [sys.executable, "-u", str(_WORKER_SCRIPT), room_id, str(pc_path), str(UPLOADS_DIR), str(DATA_DIR)],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -831,7 +868,8 @@ def _start_mesh_subprocess(room_id: str, pc_path: Path):
     )
 
     def _stream_logs():
-        for line in proc.stdout:
+        # iter(readline, sentinel) is more reliable on Windows than for-in
+        for line in iter(proc.stdout.readline, ""):
             line = line.rstrip()
             if line:
                 logging.info("[mesh-proc] %s", line)
