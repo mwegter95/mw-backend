@@ -27,14 +27,18 @@ uploads_dir = Path(sys.argv[3])
 data_dir    = Path(sys.argv[4])
 
 # ─── Logging (stdout so server.py can stream it) ──────────────────────────────
+# MUST reconfigure stdout BEFORE logging.basicConfig on Windows — piped stdout
+# is block-buffered by default even with -u; line_buffering=True flushes after
+# every newline so server.py sees each log line in real time.
+import io as _io
+sys.stdout = _io.TextIOWrapper(sys.stdout.buffer, line_buffering=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [INFO] %(message)s",
     stream=sys.stdout,
     force=True,
 )
-# Flush immediately — Windows buffers stdout by default
-sys.stdout.reconfigure(line_buffering=True)
 
 # ─── Encryption helpers (mirrors server.py) ───────────────────────────────────
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -62,6 +66,11 @@ def _progress(pct: int, phase: str):
     except Exception:
         pass
     logging.info("[mesh] %s: %3d%%  %s", room_id, pct, phase)
+    # Explicit flush — belt-and-suspenders on Windows piped stdout
+    try:
+        sys.stdout.flush()
+    except Exception:
+        pass
 
 # ─── Main build ───────────────────────────────────────────────────────────────
 _progress(0, "Starting reconstruction")
@@ -93,13 +102,18 @@ try:
     n_down = len(pcd.points)
     logging.info("[mesh] %s: downsampled to %s points", room_id, f"{n_down:,}")
 
-    # 3. Normals
-    _progress(20, f"Estimating normals ({n_down:,} pts)")
-    pcd.estimate_normals(
-        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.06, max_nn=30)
-    )
-    _progress(32, "Orienting normals (consistent tangent plane)")
-    pcd.orient_normals_consistent_tangent_plane(k=15)
+# 3. Normals — orient towards the centroid of the scan.
+        # orient_normals_towards_camera_location is O(N) vs O(N log N) for the
+        # MST approach.  For a LiDAR room scan taken from one interior position
+        # every visible surface already faces inward toward the scanner, so the
+        # centroid is a good proxy for the camera location.
+        _progress(20, f"Estimating normals ({n_down:,} pts)")
+        pcd.estimate_normals(
+            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.06, max_nn=30)
+        )
+        _progress(32, "Orienting normals (towards scan centroid)")
+        centroid = np.asarray(pcd.points).mean(axis=0)
+        pcd.orient_normals_towards_camera_location(centroid)
 
     # 4. Poisson — depth=8 is 4× faster than depth=9 with still-excellent
     #    ~2 mm resolution at 5 m scale.  Appropriate for Surface Pro 3.
