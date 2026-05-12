@@ -828,72 +828,79 @@ def _build_poisson_mesh(room_id: str, pc_path: Path):
         import trimesh
 
         # ── 1. Decode point cloud ──────────────────────────────────────────
-        raw   = read_encrypted(pc_path)
-        arr   = np.frombuffer(raw, dtype=np.float32).reshape(-1, 6)
-        xyz   = arr[:, :3].astype(np.float64)
-        rgb   = np.clip(arr[:, 3:6], 0.0, 1.0).astype(np.float64)
+        raw = read_encrypted(pc_path)
+        arr = np.frombuffer(raw, dtype=np.float32).reshape(-1, 6)
+        xyz = arr[:, :3].astype(np.float64)
+        rgb = np.clip(arr[:, 3:6], 0.0, 1.0).astype(np.float64)
 
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(xyz)
-        pcd.colors = o3d.utility.Vector3dVector(rgb)
+        # Keep the full-resolution cloud — used only for color transfer later.
+        pcd_full = o3d.geometry.PointCloud()
+        pcd_full.points = o3d.utility.Vector3dVector(xyz)
+        pcd_full.colors = o3d.utility.Vector3dVector(rgb)
 
-        # ── 2. Voxel downsample (3 mm) ─────────────────────────────────────
-        # Reduces 12 M → ~500 K points; Poisson peaks at ~1 GB RAM at depth=8.
-        pcd = pcd.voxel_down_sample(voxel_size=0.003)
+        # ── 2. Uniform resampling for normal estimation + Poisson ──────────
+        # Poisson is octree-based; points closer than the leaf cell (~5 mm at
+        # depth=9 on a 5 m room) don't add detail but slow down normal
+        # estimation.  A 5 mm uniform grid gives consistent point density
+        # across near (dense) and far (sparse) surfaces.
+        pcd = pcd_full.voxel_down_sample(voxel_size=0.005)
 
-        # ── 3. Estimate normals (oriented toward room centroid) ────────────
+        # ── 3. Estimate + orient normals ───────────────────────────────────
+        # orient_normals_consistent_tangent_plane propagates orientation via an
+        # MST over the point graph — correct for BOTH room boundaries AND
+        # furniture/objects inside the room.  The centroid-towards approach was
+        # wrong for any surface that doesn't face the room center (lamps,
+        # couches, etc.), causing the "melted" swirly Poisson artifacts.
         pcd.estimate_normals(
             search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.05, max_nn=30)
         )
-        centroid = xyz.mean(axis=0)
-        pcd.orient_normals_towards_camera_location(centroid)
+        pcd.orient_normals_consistent_tangent_plane(k=15)
 
         # ── 4. Screened Poisson reconstruction ────────────────────────────
-        # depth=8 → ~4 mm detail, peak ~1 GB RAM; safe on Surface Pro 3 (4 GB).
+        # depth=9 → ~2.5 mm leaf at 5 m scale; ~4× more triangles than depth=8.
+        # Peak RAM ~1.5–2 GB — safe on Surface Pro 3 (4 GB).
         mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-            pcd, depth=8, linear_fit=False
+            pcd, depth=9, linear_fit=False
         )
 
-        # ── 5. Trim low-density "blobby" exterior vertices ─────────────────
+        # ── 5. Trim low-density exterior artifacts ─────────────────────────
         import numpy as _np
         d = _np.asarray(densities)
-        threshold = _np.percentile(d, 5)   # remove bottom 5% density
+        threshold = _np.percentile(d, 2)   # only cull the outermost 2% — keep more surface
         mesh.remove_vertices_by_mask(d < threshold)
         mesh.remove_degenerate_triangles()
         mesh.remove_duplicated_vertices()
         mesh.remove_non_manifold_edges()
 
-        # ── 6. Transfer colors from input point cloud to mesh vertices ──────
-        # Build a KD-tree on the original (pre-downsample would be better but
-        # post-downsample is already ~500K — fast enough and color is already
-        # merged by the voxel step).
-        pcd_tree = o3d.geometry.KDTreeFlann(pcd)
-        mesh_pts = _np.asarray(mesh.vertices)
-        pcd_rgb  = _np.asarray(pcd.colors)
+        # ── 6. Color transfer from FULL-resolution cloud ───────────────────
+        # The 5 mm resampled cloud has only 1/20th the color samples of the
+        # original scan.  Using the full cloud + k=5 averaging gives much
+        # sharper, more accurate vertex colors without noise.
+        pcd_tree   = o3d.geometry.KDTreeFlann(pcd_full)
+        mesh_pts   = _np.asarray(mesh.vertices)
+        pcd_rgb    = _np.asarray(pcd_full.colors)
+        K_COLOR    = 5
         vtx_colors = _np.zeros((len(mesh_pts), 3), dtype=_np.float64)
         for i, pt in enumerate(mesh_pts):
-            _, idx, _ = pcd_tree.search_knn_vector_3d(pt, 1)
-            vtx_colors[i] = pcd_rgb[idx[0]]
+            _, idx, _ = pcd_tree.search_knn_vector_3d(pt, K_COLOR)
+            vtx_colors[i] = pcd_rgb[list(idx)].mean(axis=0)
         mesh.vertex_colors = o3d.utility.Vector3dVector(vtx_colors)
 
         # ── 7. Export as GLB ───────────────────────────────────────────────
-        # Convert to trimesh for GLB export (Open3D's own exporter omits colors).
-        verts  = _np.asarray(mesh.vertices).astype(_np.float32)
-        faces  = _np.asarray(mesh.triangles).astype(_np.uint32)
-        colors_u8 = (_np.clip(vtx_colors, 0, 1) * 255).astype(_np.uint8)
-        # trimesh expects RGBA
-        colors_rgba = _np.concatenate([colors_u8, _np.full((len(colors_u8), 1), 255, dtype=_np.uint8)], axis=1)
-
-        tm = trimesh.Trimesh(
-            vertices=verts,
-            faces=faces,
-            vertex_colors=colors_rgba,
-            process=False,
+        verts      = _np.asarray(mesh.vertices).astype(_np.float32)
+        faces      = _np.asarray(mesh.triangles).astype(_np.uint32)
+        colors_u8  = (_np.clip(vtx_colors, 0, 1) * 255).astype(_np.uint8)
+        colors_rgba = _np.concatenate(
+            [colors_u8, _np.full((len(colors_u8), 1), 255, dtype=_np.uint8)], axis=1
         )
+        tm = trimesh.Trimesh(vertices=verts, faces=faces, vertex_colors=colors_rgba, process=False)
         glb_bytes = tm.export(file_type="glb")
         glb_path.write_bytes(glb_bytes)
         status_path.write_text("ready")
-        logging.info(f"[mesh] {room_id}: Poisson complete — {len(verts):,} verts, {len(faces):,} faces, {len(glb_bytes)//1024} KB")
+        logging.info(
+            f"[mesh] {room_id}: Poisson complete — {len(verts):,} verts, "
+            f"{len(faces):,} faces, {len(glb_bytes)//1024} KB"
+        )
 
     except Exception:
         logging.exception(f"[mesh] {room_id}: Poisson reconstruction failed")
@@ -903,12 +910,18 @@ def _build_poisson_mesh(room_id: str, pc_path: Path):
 @app.get("/api/rooms/<room_id>/mesh")
 @require_owner
 def gallery_get_mesh(room_id):
-    """Return mesh build status and URL (if ready)."""
+    """Return mesh build status and URL (if ready).
+    Pass ?rebuild=1 to discard the existing mesh and re-run Poisson."""
     status_path = UPLOADS_DIR / "walls" / f"{room_id}_mesh.status"
     glb_path    = UPLOADS_DIR / "walls" / f"{room_id}_mesh.glb"
+    pc_path     = UPLOADS_DIR / "walls" / f"{room_id}_pointcloud.bin"
+
+    rebuild = request.args.get("rebuild") == "1"
+    if rebuild and status_path.exists():
+        status_path.unlink(missing_ok=True)
+        glb_path.unlink(missing_ok=True)
+
     if not status_path.exists():
-        # No mesh job started — trigger one now if the point cloud exists
-        pc_path = UPLOADS_DIR / "walls" / f"{room_id}_pointcloud.bin"
         if pc_path.exists():
             threading.Thread(
                 target=_build_poisson_mesh,
