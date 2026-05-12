@@ -818,74 +818,97 @@ def gallery_upload_pointcloud_chunk(room_id):
 #   uploads/walls/<room_id>_mesh.status  ("processing" | "ready" | "failed")
 
 def _build_poisson_mesh(room_id: str, pc_path: Path):
-    """Decode encrypted point cloud, run Open3D Poisson, export GLB."""
-    status_path = UPLOADS_DIR / "walls" / f"{room_id}_mesh.status"
-    glb_path    = UPLOADS_DIR / "walls" / f"{room_id}_mesh.glb"
+    """Decode encrypted point cloud, run Open3D Poisson, export GLB.
+    Writes <room_id>_mesh.progress (JSON: {pct, phase}) at each stage so
+    the frontend can show a real stage-informed progress bar.
+    """
+    status_path   = UPLOADS_DIR / "walls" / f"{room_id}_mesh.status"
+    progress_path = UPLOADS_DIR / "walls" / f"{room_id}_mesh.progress"
+    glb_path      = UPLOADS_DIR / "walls" / f"{room_id}_mesh.glb"
+
+    import json as _json
+    import time as _time
+
+    def _progress(pct: int, phase: str):
+        """Write progress file and emit a log line."""
+        try:
+            progress_path.write_text(_json.dumps({"pct": pct, "phase": phase}))
+        except Exception:
+            pass
+        logging.info(f"[mesh] {room_id}: {pct:3d}%  {phase}")
+
     status_path.write_text("processing")
+    _progress(0, "Starting reconstruction")
+    t0 = _time.time()
     try:
         import numpy as np
         import open3d as o3d
         import trimesh
 
-        # ── 1. Decode point cloud ──────────────────────────────────────────
+        # ── 1. Decode + load point cloud ──────────────────────────────────
+        _progress(2, "Decoding point cloud")
         raw = read_encrypted(pc_path)
         arr = np.frombuffer(raw, dtype=np.float32).reshape(-1, 6)
         xyz = arr[:, :3].astype(np.float64)
         rgb = np.clip(arr[:, 3:6], 0.0, 1.0).astype(np.float64)
+        n_pts = len(xyz)
+        logging.info(f"[mesh] {room_id}: loaded {n_pts:,} points")
 
-        # Keep the full-resolution cloud — used only for color transfer later.
         pcd_full = o3d.geometry.PointCloud()
         pcd_full.points = o3d.utility.Vector3dVector(xyz)
         pcd_full.colors = o3d.utility.Vector3dVector(rgb)
 
-        # ── 2. Uniform resampling for normal estimation + Poisson ──────────
-        # Poisson is octree-based; points closer than the leaf cell (~5 mm at
-        # depth=9 on a 5 m room) don't add detail but slow down normal
-        # estimation.  A 5 mm uniform grid gives consistent point density
-        # across near (dense) and far (sparse) surfaces.
+        # ── 2. Uniform resampling ──────────────────────────────────────────
+        _progress(10, f"Resampling {n_pts:,} points (5 mm grid)")
         pcd = pcd_full.voxel_down_sample(voxel_size=0.005)
+        n_down = len(pcd.points)
+        logging.info(f"[mesh] {room_id}: downsampled to {n_down:,} points")
 
-        # ── 3. Estimate + orient normals ───────────────────────────────────
-        # orient_normals_consistent_tangent_plane propagates orientation via an
-        # MST over the point graph — correct for BOTH room boundaries AND
-        # furniture/objects inside the room.  The centroid-towards approach was
-        # wrong for any surface that doesn't face the room center (lamps,
-        # couches, etc.), causing the "melted" swirly Poisson artifacts.
+        # ── 3. Normal estimation ───────────────────────────────────────────
+        _progress(20, f"Estimating normals ({n_down:,} pts)")
         pcd.estimate_normals(
             search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.05, max_nn=30)
         )
+        _progress(32, "Orienting normals (consistent tangent plane)")
         pcd.orient_normals_consistent_tangent_plane(k=15)
 
         # ── 4. Screened Poisson reconstruction ────────────────────────────
-        # depth=9 → ~2.5 mm leaf at 5 m scale; ~4× more triangles than depth=8.
-        # Peak RAM ~1.5–2 GB — safe on Surface Pro 3 (4 GB).
+        _progress(42, "Running Screened Poisson (depth=9) — this takes ~30–90 s")
         mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
             pcd, depth=9, linear_fit=False
         )
+        n_verts_raw = len(mesh.vertices)
+        n_faces_raw = len(mesh.triangles)
+        logging.info(f"[mesh] {room_id}: Poisson produced {n_verts_raw:,} verts, {n_faces_raw:,} faces")
 
         # ── 5. Trim low-density exterior artifacts ─────────────────────────
+        _progress(62, "Trimming low-density exterior")
         import numpy as _np
         d = _np.asarray(densities)
-        threshold = _np.percentile(d, 2)   # only cull the outermost 2% — keep more surface
+        threshold = _np.percentile(d, 2)
         mesh.remove_vertices_by_mask(d < threshold)
         mesh.remove_degenerate_triangles()
         mesh.remove_duplicated_vertices()
         mesh.remove_non_manifold_edges()
+        logging.info(
+            f"[mesh] {room_id}: after trim — {len(mesh.vertices):,} verts, {len(mesh.triangles):,} faces"
+        )
 
-        # ── 6. Color transfer from FULL-resolution cloud ───────────────────
-        # scipy cKDTree.query() is a vectorized C call — does all N vertices in
-        # one shot without holding the Python GIL, so Flask stays responsive.
+        # ── 6. Color transfer from full-resolution cloud ───────────────────
+        _progress(70, f"Transferring colors from {n_pts:,}-point cloud")
         from scipy.spatial import cKDTree
         pcd_pts  = _np.asarray(pcd_full.points)
         pcd_rgb  = _np.asarray(pcd_full.colors)
         mesh_pts = _np.asarray(mesh.vertices)
-        K_COLOR  = 5
         kd = cKDTree(pcd_pts)
-        _, idxs = kd.query(mesh_pts, k=K_COLOR, workers=-1)   # parallel, releases GIL
-        vtx_colors = pcd_rgb[idxs].mean(axis=1)               # shape (V, 3)
+        _progress(74, "KD-tree built — querying nearest neighbors")
+        _, idxs = kd.query(mesh_pts, k=5, workers=-1)
+        vtx_colors = pcd_rgb[idxs].mean(axis=1)
         mesh.vertex_colors = o3d.utility.Vector3dVector(vtx_colors)
+        logging.info(f"[mesh] {room_id}: color transfer done")
 
         # ── 7. Export as GLB ───────────────────────────────────────────────
+        _progress(88, "Exporting GLB")
         verts      = _np.asarray(mesh.vertices).astype(_np.float32)
         faces      = _np.asarray(mesh.triangles).astype(_np.uint32)
         colors_u8  = (_np.clip(vtx_colors, 0, 1) * 255).astype(_np.uint8)
@@ -894,15 +917,20 @@ def _build_poisson_mesh(room_id: str, pc_path: Path):
         )
         tm = trimesh.Trimesh(vertices=verts, faces=faces, vertex_colors=colors_rgba, process=False)
         glb_bytes = tm.export(file_type="glb")
+        _progress(96, "Writing GLB to disk")
         glb_path.write_bytes(glb_bytes)
+
+        elapsed = _time.time() - t0
+        _progress(100, f"Done — {len(verts):,} verts, {len(faces):,} faces, {len(glb_bytes)//1024} KB, {elapsed:.0f}s")
         status_path.write_text("ready")
         logging.info(
-            f"[mesh] {room_id}: Poisson complete — {len(verts):,} verts, "
-            f"{len(faces):,} faces, {len(glb_bytes)//1024} KB"
+            f"[mesh] {room_id}: COMPLETE in {elapsed:.1f}s — "
+            f"{len(verts):,} verts, {len(faces):,} faces, {len(glb_bytes)//1024} KB"
         )
 
     except Exception:
-        logging.exception(f"[mesh] {room_id}: Poisson reconstruction failed")
+        logging.exception(f"[mesh] {room_id}: Poisson reconstruction FAILED")
+        _progress(0, "Build failed — check server logs")
         status_path.write_text("failed")
 
 
@@ -915,10 +943,13 @@ def gallery_get_mesh(room_id):
     glb_path    = UPLOADS_DIR / "walls" / f"{room_id}_mesh.glb"
     pc_path     = UPLOADS_DIR / "walls" / f"{room_id}_pointcloud.bin"
 
+    progress_path = UPLOADS_DIR / "walls" / f"{room_id}_mesh.progress"
+
     rebuild = request.args.get("rebuild") == "1"
     if rebuild and status_path.exists():
         status_path.unlink(missing_ok=True)
         glb_path.unlink(missing_ok=True)
+        progress_path.unlink(missing_ok=True)
 
     if not status_path.exists():
         if pc_path.exists():
@@ -927,12 +958,25 @@ def gallery_get_mesh(room_id):
                 args=(room_id, pc_path),
                 daemon=True,
             ).start()
-            return jsonify({"status": "processing"})
+            return jsonify({"status": "processing", "pct": 0, "phase": "Queued"})
         return jsonify({"status": "unavailable"})
+
     status = status_path.read_text().strip()
+
+    # Read stage progress if available
+    pct, phase = 0, ""
+    if progress_path.exists():
+        try:
+            import json as _j
+            prog = _j.loads(progress_path.read_text())
+            pct   = prog.get("pct",   0)
+            phase = prog.get("phase", "")
+        except Exception:
+            pass
+
     if status == "ready" and glb_path.exists():
-        return jsonify({"status": "ready", "url": f"/uploads/walls/{room_id}_mesh.glb"})
-    return jsonify({"status": status})
+        return jsonify({"status": "ready", "url": f"/uploads/walls/{room_id}_mesh.glb", "pct": 100, "phase": phase})
+    return jsonify({"status": status, "pct": pct, "phase": phase})
 
 
 @app.get("/uploads/walls/<filename>")
