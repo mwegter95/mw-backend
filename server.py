@@ -799,25 +799,49 @@ def gallery_upload_pointcloud_chunk(room_id):
     if meta_path.exists():
         meta_path.unlink()
 
-    # Kick off background Poisson mesh reconstruction.
-    # Runs in a daemon thread so the upload response is instant.
-    threading.Thread(
-        target=_build_poisson_mesh,
-        args=(room_id, path),
-        daemon=True,
-    ).start()
+    # Kick off background Poisson mesh reconstruction as a separate process.
+    # Running as a subprocess (not a thread) means Flask keeps its own Python
+    # GIL and stays responsive to HTTP polling requests while the heavy
+    # Open3D work runs completely independently.
+    _start_mesh_subprocess(room_id, path)
 
     return jsonify({"url": f"/uploads/walls/{room_id}_pointcloud.bin", "complete": True})
 
 
 # ─── Poisson mesh reconstruction ─────────────────────────────────────────────
-# Runs in a background daemon thread after the final chunk arrives.
-# Writes a GLB file alongside the encrypted point cloud:
-#   uploads/walls/<room_id>_mesh.glb   (plain, not encrypted — same auth as PC)
-# Status is tracked with a lightweight sentinel file:
-#   uploads/walls/<room_id>_mesh.status  ("processing" | "ready" | "failed")
+# Runs as a subprocess (mesh_worker.py) so Flask never shares a GIL with
+# Open3D.  Status + progress are communicated via small sentinel files:
+#   uploads/walls/<room_id>_mesh.status   ("processing" | "ready" | "failed")
+#   uploads/walls/<room_id>_mesh.progress (JSON: {pct, phase})
 
-def _build_poisson_mesh(room_id: str, pc_path: Path):
+_WORKER_SCRIPT = BASE_DIR / "mesh_worker.py"
+
+def _start_mesh_subprocess(room_id: str, pc_path: Path):
+    """Spawn mesh_worker.py as an isolated subprocess and stream its logs."""
+    status_path   = UPLOADS_DIR / "walls" / f"{room_id}_mesh.status"
+    status_path.write_text("processing")  # sentinel before spawn — prevents duplicate launches
+
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # hide console on Windows
+    proc = subprocess.Popen(
+        [sys.executable, str(_WORKER_SCRIPT), room_id, str(pc_path), str(UPLOADS_DIR), str(DATA_DIR)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        creationflags=flags,
+    )
+
+    def _stream_logs():
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line:
+                logging.info("[mesh-proc] %s", line)
+        proc.wait()
+        logging.info("[mesh-proc] worker exited with code %d", proc.returncode)
+
+    threading.Thread(target=_stream_logs, daemon=True).start()
+
+
+def _build_poisson_mesh(room_id: str, pc_path: Path):  # kept for reference — no longer called
     """Decode encrypted point cloud, run Open3D Poisson, export GLB.
     Writes <room_id>_mesh.progress (JSON: {pct, phase}) at each stage so
     the frontend can show a real stage-informed progress bar.
@@ -954,15 +978,7 @@ def gallery_get_mesh(room_id):
 
     if not status_path.exists():
         if pc_path.exists():
-            # Write the sentinel BEFORE starting the thread so that any
-            # concurrent poll arriving in the milliseconds before the thread
-            # runs sees "processing" and does NOT spawn a second build.
-            status_path.write_text("processing")
-            threading.Thread(
-                target=_build_poisson_mesh,
-                args=(room_id, pc_path),
-                daemon=True,
-            ).start()
+            _start_mesh_subprocess(room_id, pc_path)  # writes status sentinel before spawning
             return jsonify({"status": "processing", "pct": 0, "phase": "Queued"})
         return jsonify({"status": "unavailable"})
 
