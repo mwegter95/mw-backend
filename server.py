@@ -1255,7 +1255,10 @@ def gallery_get_mesh(room_id):
             try:
                 import json as _j2
                 prog2 = _j2.loads(progress_path.read_text())
-                for k in ("rawPts", "poissonPts", "meshVerts", "meshFaces"):
+                for k in (
+                    "rawPts", "poissonPts", "meshVerts", "meshFaces",
+                    "voxelMm", "poissonDepth", "colorMethod",
+                ):
                     if k in prog2:
                         resp[k] = prog2[k]
             except Exception:

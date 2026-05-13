@@ -68,7 +68,6 @@ def project_photos(
 
     try:
         from PIL import Image
-        import io as _io
     except ImportError:
         logging.warning("[photo] Pillow not installed - cannot do photo projection")
         return None
@@ -91,6 +90,20 @@ def project_photos(
     nlen = np.linalg.norm(mesh_normals, axis=1, keepdims=True)
     nlen = np.where(nlen > 1e-6, nlen, 1.0)
     normals_n = mesh_normals / nlen
+
+    def _map_uv_orientation(u: np.ndarray, v: np.ndarray, ori: int,
+                            W: int, H: int, fw: float, fh: float) -> tuple[np.ndarray, np.ndarray]:
+        """Map full-res camera-plane coordinates (u, v) into JPEG pixels for a tested orientation.
+
+        ori: 0=0deg, 1=90deg CW, 2=180deg, 3=270deg CW
+        """
+        if ori == 0:
+            return u * (W / fw), v * (H / fh)
+        if ori == 1:
+            return (fh - 1.0 - v) * (W / fh), u * (H / fw)
+        if ori == 2:
+            return (fw - 1.0 - u) * (W / fw), (fh - 1.0 - v) * (H / fh)
+        return v * (W / fh), (fw - 1.0 - u) * (H / fw)
 
     for snap_idx, snap_meta in enumerate(snaps):
         jpeg_path = snap_dir / snap_meta["file"]
@@ -118,19 +131,22 @@ def project_photos(
         except np.linalg.LinAlgError:
             continue
 
-        # Intrinsics (column-major 3×3) → standard row-major:
-        #   K[0,0]=fx  K[1,1]=fy  K[0,2]=cx  K[1,2]=cy
-        K  = np.array(snap_meta["K"], dtype=np.float64).reshape(3, 3, order="F")
-        fw = float(snap_meta["fw"])   # full image width the intrinsics were calibrated for
-        fh = float(snap_meta["fh"])   # full image height
+        if len(snap_meta.get("K", [])) != 9 or len(snap_meta.get("c2w", [])) != 16:
+            logging.warning("[photo] %s: snapshot %s has invalid camera metadata", room_id, snap_meta.get("file"))
+            continue
 
-        # Scale intrinsics to the actual JPEG resolution (25% of full res)
-        sx = W / fw
-        sy = H / fh
-        fx = K[0, 0] * sx
-        fy = K[1, 1] * sy
-        cx = K[0, 2] * sx
-        cy = K[1, 2] * sy
+        # Intrinsics (column-major 3x3) in full-res camera-pixel coordinates.
+        K  = np.array(snap_meta["K"], dtype=np.float64).reshape(3, 3, order="F")
+        fw = float(snap_meta.get("fw", 0.0))
+        fh = float(snap_meta.get("fh", 0.0))
+        if fw <= 1.0 or fh <= 1.0:
+            logging.warning("[photo] %s: snapshot %s missing fw/fh", room_id, snap_meta.get("file"))
+            continue
+
+        fx = K[0, 0]
+        fy = K[1, 1]
+        cx = K[0, 2]
+        cy = K[1, 2]
 
         # ── Project all vertices ──────────────────────────────────────────────
         verts_h   = np.column_stack([mesh_verts, np.ones(N)])   # (N, 4)
@@ -148,15 +164,36 @@ def project_photos(
         in_front = z_cam < -0.05   # at least 5 cm in front
         vis_in_front = vis_z_cam < -0.05
 
-        # Project (safe denominator avoids div-by-zero outside in_front mask)
+        # Project into full-res camera coordinates first; orientation+scale are applied later.
         neg_z = np.where(in_front, -z_cam, 1.0)
-        px = fx * x_cam / neg_z + cx
-        py = fy * y_cam / neg_z + cy
+        u = fx * x_cam / neg_z + cx
+        v = fy * y_cam / neg_z + cy
         vis_neg_z = np.where(vis_in_front, -vis_z_cam, 1.0)
-        vis_px = fx * vis_x_cam / vis_neg_z + cx
-        vis_py = fy * vis_y_cam / vis_neg_z + cy
+        vis_u = fx * vis_x_cam / vis_neg_z + cx
+        vis_v = fy * vis_y_cam / vis_neg_z + cy
 
-        # Leave 1-pixel border so bilinear never reads outside bounds
+        # Auto-select image orientation by maximising in-bounds projection count.
+        best_ori = 0
+        best_ori_hits = -1
+        best_px = None
+        best_py = None
+        best_vis_px = None
+        best_vis_py = None
+        for ori in (0, 1, 2, 3):
+            cand_px, cand_py = _map_uv_orientation(u, v, ori, W, H, fw, fh)
+            hits = int((in_front & (cand_px >= 0.0) & (cand_px < W - 1.0) & (cand_py >= 0.0) & (cand_py < H - 1.0)).sum())
+            if hits > best_ori_hits:
+                best_ori_hits = hits
+                best_ori = ori
+                best_px, best_py = cand_px, cand_py
+                best_vis_px, best_vis_py = _map_uv_orientation(vis_u, vis_v, ori, W, H, fw, fh)
+
+        px = best_px
+        py = best_py
+        vis_px = best_vis_px
+        vis_py = best_vis_py
+
+        # Leave 1-pixel border so bilinear never reads outside bounds.
         in_bounds = (px >= 0.0) & (px < W - 1.0) & (py >= 0.0) & (py < H - 1.0)
         vis_in_bounds = (vis_px >= 0.0) & (vis_px < W) & (vis_py >= 0.0) & (vis_py < H)
 
@@ -174,24 +211,23 @@ def project_photos(
             zdepth = (-vis_z_cam[vis_mask]).astype(np.float32)
             np.minimum.at(zbuf, (zy, zx), zdepth)
 
-        # ── Facing / visibility score ─────────────────────────────────────────
+        # ── Visibility / weighting score ──────────────────────────────────────
         cam_pos       = c2w[:3, 3]                                   # (3,)
         cam_to_vert   = mesh_verts - cam_pos                         # (N, 3)
         dist          = np.linalg.norm(cam_to_vert, axis=1, keepdims=True)
         cam_to_vert_n = cam_to_vert / np.where(dist > 1e-6, dist, 1.0)
 
-        # Positive facing score when vertex normal opposes the cam→vertex ray
-        # (surface is facing the camera)
-        facing = (-normals_n * cam_to_vert_n).sum(axis=1)     # (N,)
+        # Use abs(cos) to avoid dropping valid samples when Poisson normals are flipped.
+        facing_abs = np.abs((-normals_n * cam_to_vert_n).sum(axis=1))
 
         pix_x = np.clip(np.rint(px / z_scale).astype(np.int32), 0, z_w - 1)
         pix_y = np.clip(np.rint(py / z_scale).astype(np.int32), 0, z_h - 1)
         z_ref = zbuf[pix_y, pix_x]
         depth = -z_cam
-        # Depth tolerance grows slightly with distance to absorb Poisson smoothing.
-        visible = np.isfinite(z_ref) & (depth <= z_ref + np.maximum(0.04, 0.015 * z_ref))
+        # Depth tolerance grows with distance to absorb Poisson smoothing drift.
+        visible = np.isfinite(z_ref) & (depth <= z_ref + np.maximum(0.08, 0.03 * z_ref))
 
-        valid  = in_front & in_bounds & visible & (facing > 0.05)  # 5° from grazing
+        valid  = in_front & in_bounds & visible
         if not valid.any():
             continue
 
@@ -212,19 +248,27 @@ def project_photos(
                    img[y1, x0] * (1 - dx)  * dy       +
                    img[y1, x1] * dx        * dy)
 
-        # Weight: favor more orthogonal (higher facing), closer (lower dist)
-        # Use softplus to keep weights positive and smooth
-        facing_valid = facing[v_idx]
+        # Weight: favor orthogonal views and nearby cameras.
+        facing_valid = np.clip(facing_abs[v_idx], 0.10, 1.0)
         cam_to_vert_valid = cam_to_vert[v_idx]
         dist_valid = np.linalg.norm(cam_to_vert_valid, axis=1)
-        weight = np.clip(facing_valid, 0.05, 1.0) / (dist_valid + 0.1)
+        weight = facing_valid / (dist_valid + 0.2)
 
         for i, vi in enumerate(v_idx):
             color_samples[vi].append((sampled[i], weight[i]))
             coverage_mask[vi] = True
 
-        logging.info("[photo] %s: snap %d/%d projected onto %s vertices",
-                     room_id, snap_idx + 1, len(snaps), f"{int(valid.sum()):,}")
+        logging.info(
+            "[photo] %s: snap %d/%d ori=%d projected=%s in_front=%s in_bounds=%s visible=%s",
+            room_id,
+            snap_idx + 1,
+            len(snaps),
+            best_ori,
+            f"{int(valid.sum()):,}",
+            f"{int(in_front.sum()):,}",
+            f"{int((in_front & in_bounds).sum()):,}",
+            f"{int((in_front & in_bounds & visible).sum()):,}",
+        )
 
     # Blend samples for each vertex, reject outliers
     blended_colors = np.zeros((N, 3), dtype=np.float64)
