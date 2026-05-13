@@ -109,21 +109,28 @@ def write_encrypted(path: Path, data: bytes):
 def read_encrypted(path: Path) -> bytes:
     return decrypt_bytes(path.read_bytes())
 
+# ─── Debug flag ───────────────────────────────────────────────────────────────
+# Pass --debug on the command line (e.g. python server.py --debug) to enable
+# verbose per-request logging, request body dumps, and detailed endpoint traces.
+DEBUG_MODE = "--debug" in sys.argv
+
 # ─── Logging ──────────────────────────────────────────────────────────────────
 # Force stdout to be unbuffered so print() shows up immediately in the terminal.
 sys.stdout.reconfigure(line_buffering=True)
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG if DEBUG_MODE else logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     stream=sys.stdout,
 )
 log = logging.getLogger("mw-backend")
+if DEBUG_MODE:
+    log.info("🐛  DEBUG mode enabled — verbose request/response logging active")
 
 # Make Werkzeug (Flask dev server) request logs visible too
-logging.getLogger("werkzeug").setLevel(logging.INFO)
-logging.getLogger("werkzeug").handlers = []   # remove default stderr handler
+logging.getLogger("werkzeug").setLevel(logging.WARNING)   # suppress its own request lines
+logging.getLogger("werkzeug").handlers = []
 logging.getLogger("werkzeug").addHandler(logging.StreamHandler(sys.stdout))
 
 app = Flask(__name__)
@@ -133,6 +140,54 @@ app.secret_key = SECRET_KEY   # enables Flask sessions (used by Spotify OAuth bl
 app.config["SESSION_COOKIE_SAMESITE"] = "None"
 app.config["SESSION_COOKIE_SECURE"]   = True
 CORS(app, origins=_CORS_ORIGINS, supports_credentials=True)
+
+# ─── Morgan-like request / response logging ───────────────────────────────────
+import time as _time
+
+_SKIP_LOG_PREFIXES = ("/health", "/favicon")
+
+@app.before_request
+def _log_request():
+    g._req_start = _time.monotonic()
+    if any(request.path.startswith(p) for p in _SKIP_LOG_PREFIXES):
+        return
+    origin = request.headers.get("Origin", "")
+    log.info("→  %s %s  [%s]", request.method, request.path, origin or request.remote_addr)
+    if DEBUG_MODE:
+        # Log query params if present
+        if request.args:
+            log.debug("   params: %s", dict(request.args))
+        # Log JSON body for non-binary requests (truncate large ones)
+        ct = request.content_type or ""
+        if "json" in ct:
+            try:
+                body = request.get_json(silent=True, force=True)
+                if body is not None:
+                    body_str = json.dumps(body)
+                    if len(body_str) > 800:
+                        body_str = body_str[:800] + "…"
+                    log.debug("   body:   %s", body_str)
+            except Exception:
+                pass
+        elif "multipart" in ct or "octet-stream" in ct:
+            log.debug("   body:   <binary %s bytes>", request.content_length or "?")
+
+@app.after_request
+def _log_response(response):
+    if any(request.path.startswith(p) for p in _SKIP_LOG_PREFIXES):
+        return response
+    elapsed_ms = (_time.monotonic() - getattr(g, "_req_start", _time.monotonic())) * 1000
+    status = response.status_code
+    level = logging.WARNING if status >= 400 else logging.INFO
+    log.log(level, "←  %s %s  %d  %.1f ms", request.method, request.path, status, elapsed_ms)
+    if DEBUG_MODE and status >= 400:
+        try:
+            err_body = response.get_data(as_text=True)
+            if err_body:
+                log.debug("   error:  %s", err_body[:400])
+        except Exception:
+            pass
+    return response
 
 
 def utc_now():
@@ -755,13 +810,17 @@ def gallery_upload_pointcloud(room_id):
     """Accept raw Float32 binary point cloud, store encrypted, return URL.
     Client sends Content-Type: application/octet-stream with the raw bytes."""
     buf = request.data
+    log.debug("[pc-upload] %s  raw bytes received: %d", room_id, len(buf) if buf else 0)
     if not buf:
         return jsonify({"error": "No data"}), 400
     MAX_PC_SIZE = 640 * 1024 * 1024  # 640 MB cap (~26M points)
     if len(buf) > MAX_PC_SIZE:
+        log.warning("[pc-upload] %s  rejected — size %d > %d", room_id, len(buf), MAX_PC_SIZE)
         return jsonify({"error": "Point cloud exceeds size limit"}), 413
     path = UPLOADS_DIR / "walls" / f"{room_id}_pointcloud.bin"
     write_encrypted(path, buf)
+    n_pts = len(buf) // 24  # 6 floats × 4 bytes
+    log.info("[pc-upload] %s  stored %d pts (%.1f MB)", room_id, n_pts, len(buf) / 1e6)
     return jsonify({"url": f"/uploads/walls/{room_id}_pointcloud.bin"})
 
 
@@ -855,6 +914,10 @@ def gallery_upload_pointcloud_stream_chunk(room_id):
       X-Chunk-Index (0-based, must be in-order)
     """
     buf = request.data
+    log.debug("[stream-chunk] %s  idx=%s  bytes=%d",
+              room_id,
+              request.headers.get("X-Chunk-Index", "?"),
+              len(buf) if buf else 0)
     if not buf:
         return jsonify({"error": "No data"}), 400
 
@@ -913,8 +976,9 @@ def gallery_upload_pointcloud_stream_chunk(room_id):
 @app.post("/api/rooms/<room_id>/pointcloud/stream-finalize")
 @require_owner
 def gallery_upload_pointcloud_stream_finalize(room_id):
-    """Finalize a live stream upload, encrypt assembled point cloud, start mesh build."""
+    """Finalize a live stream upload, encrypt assembled point cloud, mark ready."""
     upload_id = (request.headers.get("X-Upload-Id") or "").strip()
+    log.debug("[stream-finalize] %s  upload_id=%s", room_id, upload_id or "<missing>")
     if not upload_id:
         return jsonify({"error": "Missing X-Upload-Id"}), 400
 
@@ -949,6 +1013,8 @@ def gallery_upload_pointcloud_stream_finalize(room_id):
     if meta_path.exists():
         meta_path.unlink()
 
+    n_pts = len(assembled) // 24
+    log.info("[stream-finalize] %s  assembled %d chunks → %d pts (%.1f MB)", room_id, received_chunks, n_pts, len(assembled) / 1e6)
     _mark_pointcloud_ready(room_id)
     return jsonify({"ok": True, "url": f"/uploads/walls/{room_id}_pointcloud.bin", "complete": True, "chunks": received_chunks})
 
