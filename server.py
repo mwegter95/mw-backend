@@ -840,7 +840,7 @@ def gallery_upload_pointcloud_chunk(room_id):
     # Running as a subprocess (not a thread) means Flask keeps its own Python
     # GIL and stays responsive to HTTP polling requests while the heavy
     # Open3D work runs completely independently.
-    _start_mesh_subprocess(room_id, path)
+    _mark_pointcloud_ready(room_id)
 
     return jsonify({"url": f"/uploads/walls/{room_id}_pointcloud.bin", "complete": True})
 
@@ -949,8 +949,31 @@ def gallery_upload_pointcloud_stream_finalize(room_id):
     if meta_path.exists():
         meta_path.unlink()
 
-    _start_mesh_subprocess(room_id, path)
+    _mark_pointcloud_ready(room_id)
     return jsonify({"ok": True, "url": f"/uploads/walls/{room_id}_pointcloud.bin", "complete": True, "chunks": received_chunks})
+
+
+@app.get("/api/rooms/<room_id>/pointcloud/download")
+@require_owner
+def gallery_download_pointcloud(room_id):
+    """Stream the decrypted pre-colored point cloud binary to the web viewer.
+
+    Returns raw Float32 interleaved [x,y,z,r,g,b …] bytes.
+    The web viewer (Room3DViewer) parses this directly into a THREE.Points mesh.
+    """
+    pc_path = UPLOADS_DIR / "walls" / f"{room_id}_pointcloud.bin"
+    if not pc_path.exists():
+        return jsonify({"error": "Point cloud not found"}), 404
+    try:
+        data = read_encrypted(pc_path)
+    except Exception as e:
+        log.error("[pointcloud] %s: failed to decrypt for download: %s", room_id, e)
+        return jsonify({"error": "Failed to read point cloud"}), 500
+    return Response(
+        data,
+        mimetype="application/octet-stream",
+        headers={"Content-Disposition": f'inline; filename="{room_id}_pointcloud.bin"'},
+    )
 
 
 @app.post("/api/rooms/<room_id>/snapshots")
@@ -1064,6 +1087,22 @@ def gallery_upload_snapshot(room_id, snap_idx):
 #   uploads/walls/<room_id>_mesh.progress (JSON: {pct, phase})
 
 _WORKER_SCRIPT = BASE_DIR / "mesh_worker.py"
+
+
+def _mark_pointcloud_ready(room_id: str):
+    """Mark the point cloud as ready for viewing without running Poisson meshing.
+
+    The point cloud arrives pre-colored from the iOS photo projector, so no
+    server-side reconstruction is needed.  We write the same status/progress
+    sentinel files that the old mesh_worker wrote so the frontend polling
+    path continues to work unchanged.
+    """
+    walls_dir = UPLOADS_DIR / "walls"
+    (walls_dir / f"{room_id}_mesh.status").write_text("ready")
+    (walls_dir / f"{room_id}_mesh.progress").write_text(
+        json.dumps({"pct": 100, "phase": "Done — photo projection completed on device"})
+    )
+    log.info("[pointcloud] %s: marked ready (on-device projection)", room_id)
 
 def _start_mesh_subprocess(room_id: str, pc_path: Path):
     """Spawn mesh_worker.py as an isolated subprocess and stream its logs."""
@@ -1231,8 +1270,8 @@ def gallery_get_mesh(room_id):
 
     if not status_path.exists():
         if pc_path.exists():
-            _start_mesh_subprocess(room_id, pc_path)  # writes status sentinel before spawning
-            return jsonify({"status": "processing", "pct": 0, "phase": "Queued"})
+            _mark_pointcloud_ready(room_id)
+            return jsonify({"status": "ready", "pct": 100, "phase": "Done — photo projection completed on device"})
         return jsonify({"status": "unavailable"})
 
     status = status_path.read_text().strip()
