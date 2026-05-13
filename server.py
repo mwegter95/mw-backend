@@ -821,6 +821,7 @@ def gallery_upload_pointcloud(room_id):
     write_encrypted(path, buf)
     n_pts = len(buf) // 24  # 6 floats × 4 bytes
     log.info("[pc-upload] %s  stored %d pts (%.1f MB)", room_id, n_pts, len(buf) / 1e6)
+    _mark_pointcloud_ready(room_id)
     return jsonify({"url": f"/uploads/walls/{room_id}_pointcloud.bin"})
 
 
