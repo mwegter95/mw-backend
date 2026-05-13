@@ -75,8 +75,8 @@ def project_photos(
     logging.info("[photo] %s: loaded %d snapshots from metadata", room_id, len(snaps))
 
     N = len(mesh_verts)
-    # For each vertex, collect all valid (color, weight) samples from all photos
-    color_samples = [[] for _ in range(N)]  # List of (color, weight) tuples per vertex
+    best_colors = np.zeros((N, 3), dtype=np.float64)
+    best_score  = np.full(N, -np.inf)
     coverage_mask = np.zeros(N, dtype=bool)
     # Use a stable visibility subset so each photo gets a cheap z-buffer pass.
     if len(source_points) > 350_000:
@@ -211,14 +211,15 @@ def project_photos(
             zdepth = (-vis_z_cam[vis_mask]).astype(np.float32)
             np.minimum.at(zbuf, (zy, zx), zdepth)
 
-        # ── Visibility / weighting score ──────────────────────────────────────
+        # ── Score: favor face-on views and nearby cameras ─────────────────────
         cam_pos       = c2w[:3, 3]                                   # (3,)
         cam_to_vert   = mesh_verts - cam_pos                         # (N, 3)
         dist          = np.linalg.norm(cam_to_vert, axis=1, keepdims=True)
         cam_to_vert_n = cam_to_vert / np.where(dist > 1e-6, dist, 1.0)
 
-        # Use abs(cos) to avoid dropping valid samples when Poisson normals are flipped.
+        # abs(cos) so Poisson-flipped normals don't drop valid samples.
         facing_abs = np.abs((-normals_n * cam_to_vert_n).sum(axis=1))
+        score = facing_abs / (dist.squeeze() + 0.2)
 
         pix_x = np.clip(np.rint(px / z_scale).astype(np.int32), 0, z_w - 1)
         pix_y = np.clip(np.rint(py / z_scale).astype(np.int32), 0, z_h - 1)
@@ -228,71 +229,47 @@ def project_photos(
         visible = np.isfinite(z_ref) & (depth <= z_ref + np.maximum(0.08, 0.03 * z_ref))
 
         valid  = in_front & in_bounds & visible
-        if not valid.any():
+        better = valid & (score > best_score)
+
+        if not better.any():
             continue
 
-        v_idx = np.where(valid)[0]
-        vpx = px[v_idx]
-        vpy = py[v_idx]
+        # ── Bilinear color sampling ───────────────────────────────────────────
+        bv  = np.where(better)[0]
+        bpx = px[bv]
+        bpy = py[bv]
 
-        x0 = vpx.astype(np.int32)
-        y0 = vpy.astype(np.int32)
+        x0 = bpx.astype(np.int32)
+        y0 = bpy.astype(np.int32)
         x1 = np.minimum(x0 + 1, W - 1)
         y1 = np.minimum(y0 + 1, H - 1)
 
-        dx = (vpx - x0)[:, None]
-        dy = (vpy - y0)[:, None]
+        dx = (bpx - x0)[:, None]
+        dy = (bpy - y0)[:, None]
 
         sampled = (img[y0, x0] * (1 - dx) * (1 - dy) +
                    img[y0, x1] * dx        * (1 - dy) +
                    img[y1, x0] * (1 - dx)  * dy       +
                    img[y1, x1] * dx        * dy)
 
-        # Weight: favor orthogonal views and nearby cameras.
-        facing_valid = np.clip(facing_abs[v_idx], 0.10, 1.0)
-        cam_to_vert_valid = cam_to_vert[v_idx]
-        dist_valid = np.linalg.norm(cam_to_vert_valid, axis=1)
-        weight = facing_valid / (dist_valid + 0.2)
-
-        for i, vi in enumerate(v_idx):
-            color_samples[vi].append((sampled[i], weight[i]))
-            coverage_mask[vi] = True
+        best_colors[bv] = sampled
+        best_score[bv]  = score[bv]
+        coverage_mask[bv] = True
 
         logging.info(
-            "[photo] %s: snap %d/%d ori=%d projected=%s in_front=%s in_bounds=%s visible=%s",
+            "[photo] %s: snap %d/%d ori=%d better=%s in_front=%s in_bounds=%s visible=%s",
             room_id,
             snap_idx + 1,
             len(snaps),
             best_ori,
-            f"{int(valid.sum()):,}",
+            f"{int(better.sum()):,}",
             f"{int(in_front.sum()):,}",
             f"{int((in_front & in_bounds).sum()):,}",
             f"{int((in_front & in_bounds & visible).sum()):,}",
         )
 
-    # Blend samples for each vertex, reject outliers
-    blended_colors = np.zeros((N, 3), dtype=np.float64)
-    for vi, samples in enumerate(color_samples):
-        if not samples:
-            continue
-        arr = np.array([c for c, w in samples])
-        ws = np.array([w for c, w in samples])
-        ws = ws / (ws.sum() + 1e-8)
-        # Outlier rejection: remove samples >2 std from weighted mean
-        mean = (arr * ws[:, None]).sum(axis=0)
-        dists = np.linalg.norm(arr - mean, axis=1)
-        std = np.sqrt((ws * (dists ** 2)).sum())
-        keep = dists < (2.0 * std + 1e-6)
-        if keep.sum() == 0:
-            keep = np.ones_like(dists, dtype=bool)
-        arr = arr[keep]
-        ws = ws[keep]
-        ws = ws / (ws.sum() + 1e-8)
-        blended = (arr * ws[:, None]).sum(axis=0)
-        blended_colors[vi] = blended
-
     pct = 100.0 * coverage_mask.mean() if N > 0 else 0.0
     logging.info("[photo] %s: total photo coverage %s / %s verts (%.1f%%)",
                  room_id, f"{int(coverage_mask.sum()):,}", f"{N:,}", pct)
 
-    return blended_colors, coverage_mask
+    return best_colors, coverage_mask
