@@ -1149,6 +1149,33 @@ def gallery_upload_snapshot(room_id, snap_idx):
     return jsonify({"ok": True, "index": int(snap_idx)})
 
 
+@app.get("/api/rooms/<room_id>/snapshots")
+@require_owner
+def gallery_get_snapshots(room_id):
+    """Return snapshot metadata (URL + camera matrices) for projective texturing."""
+    snap_dir  = UPLOADS_DIR / "walls"
+    meta_path = snap_dir / f"{room_id}_snaps.json"
+    if not meta_path.exists():
+        return jsonify({"snapshots": [], "count": 0})
+    try:
+        snaps = json.loads(meta_path.read_text())
+    except Exception:
+        return jsonify({"snapshots": [], "count": 0})
+    out = []
+    for s in snaps:
+        fname = s.get("file", "")
+        if not fname or not (snap_dir / fname).exists():
+            continue
+        out.append({
+            "url": f"/uploads/walls/{fname}",
+            "c2w": s.get("c2w", []),
+            "K":   s.get("K", []),
+            "fw":  s.get("fw", 0),
+            "fh":  s.get("fh", 0),
+        })
+    return jsonify({"snapshots": out, "count": len(out)})
+
+
 # ─── Poisson mesh reconstruction ─────────────────────────────────────────────
 # Runs as a subprocess (mesh_worker.py) so Flask never shares a GIL with
 # Open3D.  Status + progress are communicated via small sentinel files:
