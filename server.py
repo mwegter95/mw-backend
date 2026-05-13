@@ -1061,12 +1061,20 @@ def gallery_upload_snapshots(room_id):
     """
     data  = request.get_json(silent=True) or {}
     snaps = data.get("snapshots") or []
+
+    # Fallback: older iOS builds sent a flat body {index, jpeg, c2w, K, fw, fh}
+    # rather than the batch format {snapshots: [{...}]}.
+    if not snaps and data.get("jpeg"):
+        snaps = [data]
+
     if not snaps:
         return jsonify({"error": "no snapshots provided"}), 400
 
     stored = 0
     for i, s in enumerate(snaps):
-        if _store_single_snapshot(room_id, i, s):
+        # Use s["index"] when present (flat iOS format), else use loop position
+        idx = int(s.get("index", i))
+        if _store_single_snapshot(room_id, idx, s):
             stored += 1
     log.info("[snapshots] %s: stored %d snapshots (batch)", room_id, stored)
 
