@@ -43,12 +43,13 @@ def project_photos(
     source_points: np.ndarray,  # (M, 3) float64 — raw/depth cloud used to build a visibility z-buffer
     snap_dir:     Path,         # directory containing <room_id>_snaps.json + JPEG files
     room_id:      str,
-) -> tuple[np.ndarray, np.ndarray] | None:
+) -> tuple[np.ndarray, np.ndarray, dict] | None:
     """
     Returns:
-        (colors, coverage) where
+        (colors, coverage, stats) where
             colors:   (N, 3) float64  RGB in [0, 1]
             coverage: (N,)   bool     True for vertices colored from a photo
+            stats:    dict    projection diagnostics
         Returns None if no snapshot metadata file exists for this room.
     """
     meta_path = snap_dir / f"{room_id}_snaps.json"
@@ -90,6 +91,8 @@ def project_photos(
     nlen = np.linalg.norm(mesh_normals, axis=1, keepdims=True)
     nlen = np.where(nlen > 1e-6, nlen, 1.0)
     normals_n = mesh_normals / nlen
+    projected_per_snap = []
+    won_per_snap = []
 
     def _map_uv_orientation(u: np.ndarray, v: np.ndarray, ori: int,
                             W: int, H: int, fw: float, fh: float) -> tuple[np.ndarray, np.ndarray]:
@@ -230,6 +233,8 @@ def project_photos(
 
         valid  = in_front & in_bounds & visible
         better = valid & (score > best_score)
+        projected_per_snap.append(int(valid.sum()))
+        won_per_snap.append(int(better.sum()))
 
         if not better.any():
             continue
@@ -272,4 +277,12 @@ def project_photos(
     logging.info("[photo] %s: total photo coverage %s / %s verts (%.1f%%)",
                  room_id, f"{int(coverage_mask.sum()):,}", f"{N:,}", pct)
 
-    return best_colors, coverage_mask
+    stats = {
+        "photoSnapshotsTotal": int(len(snaps)),
+        "photoSnapshotsProjected": int(sum(1 for c in projected_per_snap if c > 0)),
+        "photoSnapshotsWinning": int(sum(1 for c in won_per_snap if c > 0)),
+        "photoProjectedVerts": int(coverage_mask.sum()),
+        "photoTotalVerts": int(N),
+        "photoCoveragePct": float(pct),
+    }
+    return best_colors, coverage_mask, stats

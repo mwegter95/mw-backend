@@ -184,8 +184,12 @@ try:
         logging.warning("[mesh] %s: photo_project failed (%s) - using IDW fallback", room_id, _pe)
         result = None
 
+    photo_stats = {}
     if result is not None:
-        photo_colors, coverage = result
+        if isinstance(result, tuple) and len(result) == 3:
+            photo_colors, coverage, photo_stats = result
+        else:
+            photo_colors, coverage = result
         n_photo = int(coverage.sum())
         logging.info("[mesh] %s: photo projection covered %s / %s verts (%.1f%%)",
                      room_id, f"{n_photo:,}", f"{len(mesh_pts):,}", 100 * coverage.mean())
@@ -229,6 +233,8 @@ try:
                    "meshVerts": len(verts), "meshFaces": len(faces),
                    "voxelMm": int(VOXEL * 1000), "poissonDepth": 9,
                    "colorMethod": color_method}
+    if photo_stats:
+        build_stats.update(photo_stats)
     _progress(100, f"Done - {len(verts):,} verts, {len(faces):,} faces, "
                    f"{len(glb_bytes)//1024} KB, {elapsed:.0f}s",
                    extra=build_stats)

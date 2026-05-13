@@ -1393,6 +1393,8 @@ def gallery_get_mesh(room_id):
                 for k in (
                     "rawPts", "poissonPts", "meshVerts", "meshFaces",
                     "voxelMm", "poissonDepth", "colorMethod",
+                    "photoSnapshotsTotal", "photoSnapshotsProjected", "photoSnapshotsWinning",
+                    "photoProjectedVerts", "photoTotalVerts", "photoCoveragePct",
                 ):
                     if k in prog2:
                         resp[k] = prog2[k]
