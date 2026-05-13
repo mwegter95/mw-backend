@@ -11,6 +11,7 @@ Run:
 
 import os
 import sys
+import gzip
 import json
 import logging
 import sqlite3
@@ -139,7 +140,8 @@ app.secret_key = SECRET_KEY   # enables Flask sessions (used by Spotify OAuth bl
 # in an iframe on michaelwegter.com (cross-site context in modern browsers).
 app.config["SESSION_COOKIE_SAMESITE"] = "None"
 app.config["SESSION_COOKIE_SECURE"]   = True
-CORS(app, origins=_CORS_ORIGINS, supports_credentials=True)
+CORS(app, origins=_CORS_ORIGINS, supports_credentials=True,
+     expose_headers=["X-Uncompressed-Length"])
 
 # ─── Morgan-like request / response logging ───────────────────────────────────
 import time as _time
@@ -1388,7 +1390,23 @@ def serve_wall_upload(filename):
     except Exception:
         return jsonify({"error": "Decryption failed"}), 500
     mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-    return Response(data, mimetype=mime)
+    # Gzip-compress point cloud binaries when the client supports it.
+    # Float32 scan data compresses ~40-60% at level 1 (fast), cutting transfer
+    # time roughly in half for typical 100-200 MB scans.
+    accept_enc = request.headers.get("Accept-Encoding", "")
+    if filename.endswith("_pointcloud.bin") and "gzip" in accept_enc:
+        compressed = gzip.compress(data, compresslevel=1)
+        resp = Response(compressed, mimetype="application/octet-stream")
+        resp.headers["Content-Encoding"] = "gzip"
+        # DON'T set Content-Length to compressed size — browser decompresses
+        # transparently so the stream yields the original byte count, not compressed.
+        # Use a custom header so the frontend can size its buffer and show progress.
+        resp.headers["X-Uncompressed-Length"] = str(len(data))
+        resp.headers["Vary"] = "Accept-Encoding"
+        return resp
+    resp = Response(data, mimetype=mime)
+    resp.headers["Content-Length"] = str(len(data))
+    return resp
 
 
 @app.delete("/api/rooms/<room_id>")
