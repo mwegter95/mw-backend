@@ -1025,48 +1025,76 @@ def gallery_upload_pointcloud_stream_finalize(room_id):
 @app.get("/api/rooms/<room_id>/pointcloud/download")
 @require_owner
 def gallery_download_pointcloud(room_id):
-    """Stream the decrypted pre-colored point cloud binary to the web viewer.
+    """Stream the pre-colored point cloud binary to the web viewer.
 
-    Always gzip-compressed (level 1) — do NOT rely on Accept-Encoding because
-    nginx commonly strips that header from requests it proxies to Flask.
+    Serves from a pre-built gzip cache ({room_id}_pointcloud.bin.gz) so there
+    is zero per-request decrypt+compress cost — downloads are pure disk I/O.
 
-    Optional query param: ?maxPoints=N  — subsample to at most N points so
-    the browser gets a manageable file (e.g. 3 000 000 → ~24 MB raw → ~15 MB gz).
+    Supports HTTP Range requests (HTTP 206) for parallel multi-stream downloads.
+    The gzip bytes are served raw (no Content-Encoding: gzip) so the client can
+    fetch ranges in parallel and decompress the reassembled stream manually.
+    Clients detect the encoding via the X-Encoding: gzip response header.
+
+    Optional query param: ?maxPoints=N  — subsample on the fly (bypasses cache).
     """
+    import re as _re
     pc_path = UPLOADS_DIR / "walls" / f"{room_id}_pointcloud.bin"
     if not pc_path.exists():
         return jsonify({"error": "Point cloud not found"}), 404
-    try:
-        data = read_encrypted(pc_path)
-    except Exception as e:
-        log.error("[pointcloud] %s: failed to decrypt for download: %s", room_id, e)
-        return jsonify({"error": "Failed to read point cloud"}), 500
 
-    import struct as _struct
-    floats_per_point = 6
-    bytes_per_point  = floats_per_point * 4
-    total_points = len(data) // bytes_per_point
-
-    # Optional subsampling: ?maxPoints=N
+    # ── Optional subsampling path (bypasses cache; kept for compatibility) ────
     max_pts_param = request.args.get("maxPoints", type=int)
-    if max_pts_param and max_pts_param > 0 and max_pts_param < total_points:
-        stride = max(1, total_points // max_pts_param)
-        kept   = bytearray()
-        for i in range(0, total_points, stride):
-            kept += data[i * bytes_per_point : (i + 1) * bytes_per_point]
-        data = bytes(kept)
-        kept_points = len(data) // bytes_per_point
-        log.info("[pointcloud] %s: subsampled %d → %d pts (stride %d)",
-                 room_id, total_points, kept_points, stride)
+    if max_pts_param and max_pts_param > 0:
+        try:
+            data = read_encrypted(pc_path)
+        except Exception as e:
+            log.error("[pointcloud] %s: decrypt failed: %s", room_id, e)
+            return jsonify({"error": "Failed to read point cloud"}), 500
+        bytes_per_point = 24  # 6 × float32
+        total_points    = len(data) // bytes_per_point
+        if max_pts_param < total_points:
+            stride = max(1, total_points // max_pts_param)
+            kept   = bytearray()
+            for i in range(0, total_points, stride):
+                kept += data[i * bytes_per_point : (i + 1) * bytes_per_point]
+            data = bytes(kept)
+        compressed = gzip.compress(data, compresslevel=1)
+        resp = Response(compressed, mimetype="application/octet-stream")
+        resp.headers["Content-Encoding"]      = "gzip"
+        resp.headers["X-Uncompressed-Length"] = str(len(data))
+        return resp
 
-    compressed = gzip.compress(data, compresslevel=1)
-    resp = Response(compressed, mimetype="application/octet-stream")
-    resp.headers["Content-Encoding"]    = "gzip"
-    resp.headers["X-Uncompressed-Length"] = str(len(data))
-    resp.headers["Content-Disposition"] = f'inline; filename="{room_id}_pointcloud.bin"'
-    resp.headers["Vary"]                = "Accept-Encoding"
-    log.info("[pointcloud] %s: serving gzip %.1f MB → %.1f MB (%.0f%%)",
-             room_id, len(data)/1e6, len(compressed)/1e6, 100*len(compressed)/max(1,len(data)))
+    # ── Normal path: serve from pre-cached gz with HTTP Range support ─────────
+    gz_path = _ensure_gz_cache(room_id, pc_path)
+    if gz_path is None:
+        return jsonify({"error": "Failed to prepare point cloud"}), 500
+
+    file_size    = gz_path.stat().st_size
+    range_header = request.headers.get("Range")
+
+    if range_header:
+        m = _re.match(r"bytes=(\d+)-(\d*)", range_header)
+        if not m:
+            return Response("Invalid Range header", status=416)
+        start  = int(m.group(1))
+        end    = int(m.group(2)) if m.group(2) else file_size - 1
+        end    = min(end, file_size - 1)
+        length = end - start + 1
+        with gz_path.open("rb") as fh:
+            fh.seek(start)
+            chunk = fh.read(length)
+        resp = Response(chunk, status=206, mimetype="application/octet-stream")
+        resp.headers["Content-Range"]  = f"bytes {start}-{end}/{file_size}"
+        resp.headers["Content-Length"] = str(length)
+        log.info("[pointcloud] %s: range %d-%d / %d (%.1f MB)",
+                 room_id, start, end, file_size, length/1e6)
+    else:
+        resp = Response(gz_path.read_bytes(), mimetype="application/octet-stream")
+        resp.headers["Content-Length"] = str(file_size)
+        log.info("[pointcloud] %s: full gz %.1f MB", room_id, file_size/1e6)
+
+    resp.headers["Accept-Ranges"] = "bytes"
+    resp.headers["X-Encoding"]    = "gzip"
     return resp
 
 
@@ -1245,6 +1273,31 @@ def gallery_snapshot_image(room_id, snap_idx):
 _WORKER_SCRIPT = BASE_DIR / "mesh_worker.py"
 
 
+def _ensure_gz_cache(room_id: str, pc_path: Path) -> "Path | None":
+    """Decrypt the encrypted .bin and store a pre-built gzip alongside it.
+
+    Only rebuilt when pc_path is newer than the cached .bin.gz.
+    Returns the gz path on success, None on failure.
+    This eliminates the per-request decrypt+compress cost:
+    downloads become pure disk→network I/O.
+    """
+    gz_path = pc_path.with_suffix('.bin.gz')
+    try:
+        if gz_path.exists() and gz_path.stat().st_mtime >= pc_path.stat().st_mtime:
+            return gz_path
+        log.info("[pointcloud] %s: building gz cache…", room_id)
+        data       = read_encrypted(pc_path)
+        compressed = gzip.compress(data, compresslevel=1)
+        gz_path.write_bytes(compressed)
+        log.info("[pointcloud] %s: gz cache ready %.1f MB → %.1f MB (%.0f%%)",
+                 room_id, len(data)/1e6, len(compressed)/1e6,
+                 100*len(compressed)/max(1, len(data)))
+        return gz_path
+    except Exception as exc:
+        log.warning("[pointcloud] %s: gz cache build failed: %s", room_id, exc)
+        return None
+
+
 def _mark_pointcloud_ready(room_id: str):
     """Mark the point cloud as ready for viewing without running Poisson meshing.
 
@@ -1259,6 +1312,10 @@ def _mark_pointcloud_ready(room_id: str):
         json.dumps({"pct": 100, "phase": "Done — photo projection completed on device"})
     )
     log.info("[pointcloud] %s: marked ready (on-device projection)", room_id)
+    # Pre-build gz cache in a background thread so the first download is instant.
+    pc_path = UPLOADS_DIR / "walls" / f"{room_id}_pointcloud.bin"
+    if pc_path.exists():
+        threading.Thread(target=_ensure_gz_cache, args=(room_id, pc_path), daemon=True).start()
 
 def _start_mesh_subprocess(room_id: str, pc_path: Path):
     """Spawn mesh_worker.py as an isolated subprocess and stream its logs."""
@@ -2781,4 +2838,4 @@ if __name__ == "__main__":
                 pass
     log.info("✓ mw-backend starting on http://0.0.0.0:%s", PORT)
     from waitress import serve
-    serve(app, host="0.0.0.0", port=PORT)
+    serve(app, host="0.0.0.0", port=PORT, threads=16)
