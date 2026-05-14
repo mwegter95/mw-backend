@@ -1493,8 +1493,26 @@ def serve_wall_upload(filename):
         resp.headers["X-Uncompressed-Length"] = str(len(data))
         resp.headers["Vary"] = "Accept-Encoding"
         return resp
+    range_header = request.headers.get('Range', '')
+    if range_header and range_header.startswith('bytes='):
+        # Parse "bytes=start-end"
+        try:
+            rng = range_header[6:]        # strip "bytes="
+            parts = rng.split('-')
+            start = int(parts[0]) if parts[0] else 0
+            end   = int(parts[1]) if parts[1] else len(data) - 1
+            end   = min(end, len(data) - 1)
+            chunk = data[start:end + 1]
+            resp  = Response(chunk, status=206, mimetype=mime)
+            resp.headers['Content-Range']  = f'bytes {start}-{end}/{len(data)}'
+            resp.headers['Content-Length'] = str(len(chunk))
+            resp.headers['Accept-Ranges']  = 'bytes'
+            return resp
+        except (ValueError, IndexError):
+            pass   # malformed Range header — fall through to full response
     resp = Response(data, mimetype=mime)
     resp.headers["Content-Length"] = str(len(data))
+    resp.headers['Accept-Ranges']  = 'bytes'
     return resp
 
 
