@@ -1027,8 +1027,11 @@ def gallery_upload_pointcloud_stream_finalize(room_id):
 def gallery_download_pointcloud(room_id):
     """Stream the decrypted pre-colored point cloud binary to the web viewer.
 
-    Returns raw Float32 interleaved [x,y,z,r,g,b …] bytes, gzip-compressed
-    when the client sends Accept-Encoding: gzip (all modern browsers do).
+    Always gzip-compressed (level 1) — do NOT rely on Accept-Encoding because
+    nginx commonly strips that header from requests it proxies to Flask.
+
+    Optional query param: ?maxPoints=N  — subsample to at most N points so
+    the browser gets a manageable file (e.g. 3 000 000 → ~24 MB raw → ~15 MB gz).
     """
     pc_path = UPLOADS_DIR / "walls" / f"{room_id}_pointcloud.bin"
     if not pc_path.exists():
@@ -1038,25 +1041,33 @@ def gallery_download_pointcloud(room_id):
     except Exception as e:
         log.error("[pointcloud] %s: failed to decrypt for download: %s", room_id, e)
         return jsonify({"error": "Failed to read point cloud"}), 500
-    accept_enc = request.headers.get("Accept-Encoding", "")
-    if "gzip" in accept_enc:
-        compressed = gzip.compress(data, compresslevel=1)
-        resp = Response(compressed, mimetype="application/octet-stream")
-        resp.headers["Content-Encoding"] = "gzip"
-        resp.headers["X-Uncompressed-Length"] = str(len(data))
-        resp.headers["Content-Disposition"] = f'inline; filename="{room_id}_pointcloud.bin"'
-        resp.headers["Vary"] = "Accept-Encoding"
-        log.info("[pointcloud] %s: serving gzip %.1f MB → %.1f MB (%.0f%%)",
-                 room_id, len(data)/1e6, len(compressed)/1e6, 100*len(compressed)/max(1,len(data)))
-        return resp
-    return Response(
-        data,
-        mimetype="application/octet-stream",
-        headers={
-            "Content-Disposition": f'inline; filename="{room_id}_pointcloud.bin"',
-            "Content-Length": str(len(data)),
-        },
-    )
+
+    import struct as _struct
+    floats_per_point = 6
+    bytes_per_point  = floats_per_point * 4
+    total_points = len(data) // bytes_per_point
+
+    # Optional subsampling: ?maxPoints=N
+    max_pts_param = request.args.get("maxPoints", type=int)
+    if max_pts_param and max_pts_param > 0 and max_pts_param < total_points:
+        stride = max(1, total_points // max_pts_param)
+        kept   = bytearray()
+        for i in range(0, total_points, stride):
+            kept += data[i * bytes_per_point : (i + 1) * bytes_per_point]
+        data = bytes(kept)
+        kept_points = len(data) // bytes_per_point
+        log.info("[pointcloud] %s: subsampled %d → %d pts (stride %d)",
+                 room_id, total_points, kept_points, stride)
+
+    compressed = gzip.compress(data, compresslevel=1)
+    resp = Response(compressed, mimetype="application/octet-stream")
+    resp.headers["Content-Encoding"]    = "gzip"
+    resp.headers["X-Uncompressed-Length"] = str(len(data))
+    resp.headers["Content-Disposition"] = f'inline; filename="{room_id}_pointcloud.bin"'
+    resp.headers["Vary"]                = "Accept-Encoding"
+    log.info("[pointcloud] %s: serving gzip %.1f MB → %.1f MB (%.0f%%)",
+             room_id, len(data)/1e6, len(compressed)/1e6, 100*len(compressed)/max(1,len(data)))
+    return resp
 
 
 @app.post("/api/rooms/<room_id>/snapshots")
