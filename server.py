@@ -110,6 +110,24 @@ def write_encrypted(path: Path, data: bytes):
 def read_encrypted(path: Path) -> bytes:
     return decrypt_bytes(path.read_bytes())
 
+# ── Point-cloud decryption cache ──────────────────────────────────────────────
+# AES-GCM decryption of a 200 MB scan takes 15-20 s.  Caching the plaintext
+# lets HEAD and Range requests respond in <1 s on repeat calls without
+# re-decrypting.  The TTL (10 min) is long enough to cover a full load session.
+import time as _cache_time
+
+_pc_cache: dict = {}      # filename → (data: bytes, timestamp: float)
+PC_CACHE_TTL    = 600     # seconds
+
+def _get_decrypted_cached(path, filename: str) -> bytes:
+    """Return decrypted bytes for *filename*, using a 10-minute in-process cache."""
+    cached = _pc_cache.get(filename)
+    if cached and (_cache_time.monotonic() - cached[1]) < PC_CACHE_TTL:
+        return cached[0]
+    data = read_encrypted(path)
+    _pc_cache[filename] = (data, _cache_time.monotonic())
+    return data
+
 # ─── Debug flag ───────────────────────────────────────────────────────────────
 # Pass --debug on the command line (e.g. python server.py --debug) to enable
 # verbose per-request logging, request body dumps, and detailed endpoint traces.
@@ -1474,30 +1492,20 @@ def serve_wall_upload(filename):
         # GLB files are stored plain (large binary, no PII)
         return send_file(path, mimetype="model/gltf-binary")
     # All other uploads are AES-GCM encrypted
+    # Use cache to avoid re-decrypting 200+ MB on every HEAD / Range request.
     try:
-        data = read_encrypted(path)
+        data = _get_decrypted_cached(path, filename)
     except Exception:
         return jsonify({"error": "Decryption failed"}), 500
     mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-    # Gzip-compress point cloud binaries when the client supports it.
-    # Float32 scan data compresses ~40-60% at level 1 (fast), cutting transfer
-    # time roughly in half for typical 100-200 MB scans.
-    accept_enc = request.headers.get("Accept-Encoding", "")
-    if filename.endswith("_pointcloud.bin") and "gzip" in accept_enc:
-        compressed = gzip.compress(data, compresslevel=1)
-        resp = Response(compressed, mimetype="application/octet-stream")
-        resp.headers["Content-Encoding"] = "gzip"
-        # DON'T set Content-Length to compressed size — browser decompresses
-        # transparently so the stream yields the original byte count, not compressed.
-        # Use a custom header so the frontend can size its buffer and show progress.
-        resp.headers["X-Uncompressed-Length"] = str(len(data))
-        resp.headers["Vary"] = "Accept-Encoding"
-        return resp
+
+    # ── Range request — serve plain chunk (skip gzip: can't seek gzip stream) ──
+    # Must be checked BEFORE the gzip branch so that browser-auto-added
+    # "Accept-Encoding: gzip" headers don't swallow Range requests.
     range_header = request.headers.get('Range', '')
     if range_header and range_header.startswith('bytes='):
-        # Parse "bytes=start-end"
         try:
-            rng = range_header[6:]        # strip "bytes="
+            rng   = range_header[6:]
             parts = rng.split('-')
             start = int(parts[0]) if parts[0] else 0
             end   = int(parts[1]) if parts[1] else len(data) - 1
@@ -1510,6 +1518,17 @@ def serve_wall_upload(filename):
             return resp
         except (ValueError, IndexError):
             pass   # malformed Range header — fall through to full response
+
+    # ── Full response with optional gzip compression ────────────────────────
+    accept_enc = request.headers.get("Accept-Encoding", "")
+    if filename.endswith("_pointcloud.bin") and "gzip" in accept_enc:
+        compressed = gzip.compress(data, compresslevel=1)
+        resp = Response(compressed, mimetype="application/octet-stream")
+        resp.headers["Content-Encoding"]     = "gzip"
+        resp.headers["X-Uncompressed-Length"] = str(len(data))
+        resp.headers["Vary"]                 = "Accept-Encoding"
+        return resp
+
     resp = Response(data, mimetype=mime)
     resp.headers["Content-Length"] = str(len(data))
     resp.headers['Accept-Ranges']  = 'bytes'
