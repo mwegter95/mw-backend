@@ -1184,18 +1184,45 @@ def gallery_get_snapshots(room_id):
     except Exception:
         return jsonify({"snapshots": [], "count": 0})
     out = []
-    for s in snaps:
+    for idx, s in enumerate(snaps):
         fname = s.get("file", "")
         if not fname or not (snap_dir / fname).exists():
             continue
         out.append({
-            "url": f"/uploads/walls/{fname}",
+            # Use the Flask API route so nginx always proxies through Flask-CORS.
+            # /uploads/ may be served directly by nginx (no CORS headers); /api/ is not.
+            "url": f"/api/rooms/{room_id}/snapshots/{idx}/image",
             "c2w": s.get("c2w", []),
             "K":   s.get("K", []),
             "fw":  s.get("fw", 0),
             "fh":  s.get("fh", 0),
         })
     return jsonify({"snapshots": out, "count": len(out)})
+
+
+@app.get("/api/rooms/<room_id>/snapshots/<int:snap_idx>/image")
+@require_owner
+def gallery_snapshot_image(room_id, snap_idx):
+    """Serve a single snapshot JPEG for projective texturing.
+
+    Going through /api/ (not /uploads/) ensures Flask-CORS headers are always
+    present — nginx typically serves /uploads/ as static files without CORS.
+    """
+    snap_dir  = UPLOADS_DIR / "walls"
+    meta_path = snap_dir / f"{room_id}_snaps.json"
+    if not meta_path.exists():
+        return jsonify({"error": "No snapshots"}), 404
+    try:
+        snaps = json.loads(meta_path.read_text())
+    except Exception:
+        return jsonify({"error": "Corrupt snapshot metadata"}), 500
+    if snap_idx < 0 or snap_idx >= len(snaps):
+        return jsonify({"error": "Snapshot index out of range"}), 404
+    fname = snaps[snap_idx].get("file", "")
+    path  = snap_dir / fname
+    if not fname or not path.exists():
+        return jsonify({"error": "Snapshot file not found"}), 404
+    return Response(path.read_bytes(), mimetype="image/jpeg")
 
 
 # ─── Poisson mesh reconstruction ─────────────────────────────────────────────
