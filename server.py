@@ -1499,6 +1499,24 @@ def serve_wall_upload(filename):
         return jsonify({"error": "Decryption failed"}), 500
     mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
+    # ── HEAD request — return plaintext size + Accept-Ranges, no body ──────────
+    # This is the critical fix for parallel range downloads.
+    #
+    # Problem: browsers auto-add "Accept-Encoding: gzip" to every fetch().
+    # The old code's gzip branch ran for HEAD too, returning the *compressed*
+    # Content-Length and — crucially — never setting Accept-Ranges: bytes.
+    # The frontend checked Accept-Ranges to decide whether to fire 4 parallel
+    # Range GETs; without it, rangeOk=false → single-stream fallback (4 min).
+    #
+    # Fix: HEAD always reports the *uncompressed* Content-Length and sets
+    # Accept-Ranges: bytes.  Range requests (also GET) bypass gzip and serve raw
+    # bytes, so the size advertised in HEAD must match the plaintext size.
+    if request.method == 'HEAD':
+        resp = Response(b'', status=200, mimetype=mime)
+        resp.headers['Content-Length'] = str(len(data))
+        resp.headers['Accept-Ranges']  = 'bytes'
+        return resp
+
     # ── Range request — serve plain chunk (skip gzip: can't seek gzip stream) ──
     # Must be checked BEFORE the gzip branch so that browser-auto-added
     # "Accept-Encoding: gzip" headers don't swallow Range requests.
