@@ -43,6 +43,7 @@ BASE_DIR     = Path(__file__).parent
 DATA_DIR     = BASE_DIR / "data"
 UPLOADS_DIR  = DATA_DIR / "uploads"
 CHUNK_UPLOADS_DIR = DATA_DIR / "chunk_uploads"
+SPLAT_DIR    = DATA_DIR / "splats"
 
 for d in [DATA_DIR, UPLOADS_DIR / "walls", UPLOADS_DIR / "pieces", UPLOADS_DIR / "library", CHUNK_UPLOADS_DIR]:
     d.mkdir(parents=True, exist_ok=True)
@@ -1086,6 +1087,121 @@ def gallery_download_pointcloud(room_id):
     log.info("[pointcloud] %s: serving gzip %.1f MB → %.1f MB (%.0f%%)",
              room_id, len(data)/1e6, len(compressed)/1e6, 100*len(compressed)/max(1,len(data)))
     return resp
+
+
+# ─── 3D Gaussian Splat training ───────────────────────────────────────────────
+# Runs as a subprocess (splat_worker.py) so Flask never blocks while OpenSplat
+# trains.  Status + progress are communicated via small sentinel files:
+#   data/splats/<room_id>_splat.status   ("processing" | "training" | "ready" | "failed")
+#   data/splats/<room_id>_splat.progress (JSON: {pct, phase})
+
+_SPLAT_WORKER_SCRIPT = BASE_DIR / "splat_worker.py"
+
+
+def _start_splat_subprocess(room_id: str, num_steps: int):
+    """Spawn splat_worker.py as an isolated subprocess and stream its logs."""
+    status_path = SPLAT_DIR / f"{room_id}_splat.status"
+    status_path.write_text("processing")  # sentinel before spawn
+
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    proc = subprocess.Popen(
+        [sys.executable, "-u", str(_SPLAT_WORKER_SCRIPT), room_id, "--steps", str(num_steps)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        creationflags=flags,
+    )
+
+    def _stream_logs():
+        for raw in iter(proc.stdout.readline, b""):
+            try:
+                line = raw.decode("utf-8", errors="replace").rstrip()
+            except Exception:
+                line = repr(raw)
+            if line:
+                logging.info("[splat-proc] %s", line)
+        proc.wait()
+        logging.info("[splat-proc] worker exited with code %d", proc.returncode)
+
+    threading.Thread(target=_stream_logs, daemon=True).start()
+
+
+@app.post("/api/rooms/<room_id>/splat/train")
+@require_owner
+def gallery_splat_train(room_id):
+    """Kick off a Gaussian Splat training job for the room.
+
+    Optional JSON body:
+      { "steps": 7000 }   (default 7000, min 1000, max 30000)
+    """
+    body  = request.get_json(silent=True) or {}
+    steps = int(body.get("steps", 7000))
+    steps = max(1000, min(30000, steps))
+
+    snaps_path = UPLOADS_DIR / "walls" / f"{room_id}_snaps.json"
+    if not snaps_path.exists():
+        return jsonify({"error": "No snapshots found for this room — upload snapshots first"}), 400
+
+    # Guard against duplicate launches
+    status_path = SPLAT_DIR / f"{room_id}_splat.status"
+    if status_path.exists():
+        status = status_path.read_text().strip()
+        if status in ("processing", "training"):
+            return jsonify({"ok": True, "already_running": True, "status": status})
+
+    SPLAT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Write initial sentinel files so the status endpoint never sees a stale state
+    status_path.write_text("processing")
+    (SPLAT_DIR / f"{room_id}_splat.progress").write_text(
+        json.dumps({"pct": 0, "phase": "Queued…"})
+    )
+    log.info("[splat] %s: spawning splat_worker (steps=%d)", room_id, steps)
+    _start_splat_subprocess(room_id, steps)
+    return jsonify({"ok": True, "status": "processing"})
+
+
+@app.get("/api/rooms/<room_id>/splat/status")
+@require_owner
+def gallery_splat_status(room_id):
+    """Return current splat training status and progress."""
+    status_path   = SPLAT_DIR / f"{room_id}_splat.status"
+    progress_path = SPLAT_DIR / f"{room_id}_splat.progress"
+
+    if not status_path.exists():
+        return jsonify({"status": "none"})
+
+    status = status_path.read_text().strip()
+
+    pct, phase = 0, ""
+    if progress_path.exists():
+        try:
+            prog  = json.loads(progress_path.read_text())
+            pct   = prog.get("pct",   0)
+            phase = prog.get("phase", "")
+        except Exception:
+            pass
+
+    splat_url = None
+    if status == "ready":
+        splat_url = f"/api/rooms/{room_id}/splat/download"
+
+    return jsonify({
+        "status":    status,
+        "pct":       pct,
+        "phase":     phase,
+        "splat_url": splat_url,
+    })
+
+
+@app.get("/api/rooms/<room_id>/splat/download")
+@require_owner
+def gallery_splat_download(room_id):
+    """Serve the trained .splat file."""
+    splat_path = SPLAT_DIR / f"{room_id}.splat"
+    if not splat_path.exists():
+        return jsonify({"error": "Splat file not found"}), 404
+    return send_file(splat_path, mimetype="application/octet-stream",
+                     download_name=f"{room_id}.splat", as_attachment=False)
 
 
 @app.post("/api/rooms/<room_id>/snapshots")
