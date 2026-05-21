@@ -274,6 +274,22 @@ def main(room_id: str, num_steps: int):
             cmd += ["--pointcloud", str(ply_path)]
 
         logging.info("[splat] %s: running: %s", room_id, " ".join(cmd))
+
+        # ── Pre-flight: make sure the binary actually exists ───────────────
+        # shutil.which() resolves PATH + .exe extension on Windows.
+        resolved = shutil.which(opensplat_bin)
+        if resolved is None:
+            msg = (
+                f"OpenSplat binary not found: '{opensplat_bin}'. "
+                "Download a Windows build from https://github.com/pierotofy/OpenSplat/releases "
+                "then set OPENSPLAT_BIN=C:\\path\\to\\opensplat.exe in your .env file."
+            )
+            logging.error("[splat] %s: %s", room_id, msg)
+            _write_progress(room_id, 0, f"Setup needed: {msg}")
+            _write_status(room_id, "error")
+            sys.exit(1)
+
+        logging.info("[splat] %s: resolved binary → %s", room_id, resolved)
         _write_status(room_id, "training")
         _write_progress(room_id, 20, "Starting OpenSplat…")
 
