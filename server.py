@@ -1134,7 +1134,10 @@ def gallery_splat_train(room_id):
       { "steps": 7000 }   (default 7000, min 1000, max 30000)
     """
     body  = request.get_json(silent=True) or {}
-    steps = int(body.get("steps", 7000))
+    # SPLAT_TRAIN_STEPS in .env sets the server-side default (handy for CPU-only
+    # machines where fewer steps = faster training, e.g. SPLAT_TRAIN_STEPS=2000).
+    default_steps = int(os.environ.get("SPLAT_TRAIN_STEPS", 7000))
+    steps = int(body.get("steps", default_steps))
     steps = max(1000, min(30000, steps))
 
     snaps_path = UPLOADS_DIR / "walls" / f"{room_id}_snaps.json"
