@@ -1345,6 +1345,7 @@ def gallery_get_snapshots(room_id):
             "fw":  s.get("fw", 0),
             "fh":  s.get("fh", 0),
         })
+    log.info("[snapshots] %s: GET snapshots → %d valid frames", room_id, len(out))
     return jsonify({"snapshots": out, "count": len(out)})
 
 
