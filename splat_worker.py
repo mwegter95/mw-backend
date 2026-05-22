@@ -95,6 +95,95 @@ def _write_progress(room_id: str, pct: int, phase: str):
     except Exception:
         pass
 
+# --- PLY -> .splat converter -------------------------------------------------
+# OpenSplat 1.1.5 removed --output-type and always writes a standard 3DGS PLY.
+# This function converts that to the compact 32-byte antimatter15 .splat format
+# that GaussianSplatViewer.jsx expects.
+#
+# .splat layout (32 bytes / Gaussian, little-endian):
+#   [0..11]  xyz position  float32 × 3
+#   [12..23] log-scale xyz float32 × 3  (stored as-is from PLY scale_*)
+#   [24..27] RGBA colour   uint8  × 4   (sigmoid + SH-DC transform)
+#   [28..31] quat xyzw     uint8  × 4   (encoded: byte = q*127 + 128)
+
+def _ply_to_splat(ply_path: Path, splat_path: Path):
+    import numpy as np
+    import re as _re
+
+    with open(ply_path, "rb") as f:
+        # Parse ASCII header
+        header_lines: list[str] = []
+        while True:
+            line = f.readline().decode("ascii", errors="replace").rstrip()
+            header_lines.append(line)
+            if line == "end_header":
+                break
+        header = "\n".join(header_lines)
+
+        m = _re.search(r"element vertex (\d+)", header)
+        if not m:
+            raise ValueError("PLY missing 'element vertex'")
+        n = int(m.group(1))
+
+        # Collect float properties in declaration order
+        props = _re.findall(r"property float (\w+)", header)
+        if not props:
+            raise ValueError("PLY has no float properties")
+        pidx = {p: i for i, p in enumerate(props)}
+
+        raw = np.frombuffer(f.read(n * len(props) * 4),
+                            dtype="<f4").reshape(n, len(props))
+
+    def _g(name: str) -> np.ndarray:
+        i = pidx.get(name)
+        if i is None:
+            raise KeyError(f"PLY missing property '{name}'")
+        return raw[:, i].copy()
+
+    # Position (pass-through)
+    x, y, z = _g("x"), _g("y"), _g("z")
+
+    # Scale — PLY stores log-scale, viewer expects log-scale: pass-through
+    s0, s1, s2 = _g("scale_0"), _g("scale_1"), _g("scale_2")
+
+    # Colour: colour = clip(0.5 + SH_C0 * f_dc, 0, 1)
+    SH_C0 = 0.28209479177388
+    cr = np.clip(0.5 + SH_C0 * _g("f_dc_0"), 0.0, 1.0)
+    cg = np.clip(0.5 + SH_C0 * _g("f_dc_1"), 0.0, 1.0)
+    cb = np.clip(0.5 + SH_C0 * _g("f_dc_2"), 0.0, 1.0)
+    ca = 1.0 / (1.0 + np.exp(-_g("opacity")))   # sigmoid
+
+    # Quaternion: PLY rot_0=w, rot_1=x, rot_2=y, rot_3=z -> .splat xyzw
+    qw = _g("rot_0"); qx = _g("rot_1"); qy = _g("rot_2"); qz = _g("rot_3")
+    qnorm = np.sqrt(qx**2 + qy**2 + qz**2 + qw**2)
+    qnorm = np.where(qnorm < 1e-8, 1.0, qnorm)
+    qx /= qnorm; qy /= qnorm; qz /= qnorm; qw /= qnorm
+
+    # Pack into structured array (32 bytes per Gaussian, no padding)
+    dtype = np.dtype([
+        ("x", "<f4"), ("y", "<f4"), ("z", "<f4"),
+        ("sx","<f4"), ("sy","<f4"), ("sz","<f4"),
+        ("r", "u1"),  ("g", "u1"),  ("b", "u1"),  ("a", "u1"),
+        ("qx","u1"),  ("qy","u1"),  ("qz","u1"),  ("qw","u1"),
+    ])
+    out = np.empty(n, dtype=dtype)
+    out["x"] = x;  out["y"] = y;  out["z"] = z
+    out["sx"] = s0; out["sy"] = s1; out["sz"] = s2
+    out["r"]  = np.clip(cr * 255, 0, 255).astype(np.uint8)
+    out["g"]  = np.clip(cg * 255, 0, 255).astype(np.uint8)
+    out["b"]  = np.clip(cb * 255, 0, 255).astype(np.uint8)
+    out["a"]  = np.clip(ca * 255, 0, 255).astype(np.uint8)
+    # Quaternion encoding: byte = q * 127 + 128  (decode: q = (b - 128) / 127)
+    out["qx"] = np.clip(qx * 127 + 128, 0, 255).astype(np.uint8)
+    out["qy"] = np.clip(qy * 127 + 128, 0, 255).astype(np.uint8)
+    out["qz"] = np.clip(qz * 127 + 128, 0, 255).astype(np.uint8)
+    out["qw"] = np.clip(qw * 127 + 128, 0, 255).astype(np.uint8)
+
+    splat_path.write_bytes(out.tobytes())
+    logging.info("[splat] PLY->splat: %d gaussians, %.1f MB",
+                 n, splat_path.stat().st_size / 1e6)
+
+
 # --- transforms.json builder -------------------------------------------------
 
 def _col_major_to_row_major_4x4(flat: list) -> list:
@@ -263,23 +352,25 @@ def main(room_id: str, num_steps: int):
             logging.info("[splat] %s: no point cloud found — SfM init will be used", room_id)
 
         # ── 5. Build OpenSplat command ─────────────────────────────────────
+        # OpenSplat 1.1.5 removed --output-type; it always writes a .ply.
+        # We convert PLY -> .splat ourselves after training (see step 7).
         opensplat_bin = os.environ.get("OPENSPLAT_BIN", "opensplat")
-        output_splat  = work_dir / f"{room_id}_output.splat"
+        output_ply    = work_dir / f"{room_id}_output.ply"
+        final_splat   = splat_dir / f"{room_id}.splat"
 
         cmd = [
             opensplat_bin,
-            str(work_dir),
-            "-n", str(num_steps),
-            "-o", str(output_splat),
-            "--output-type", "splat",
+            str(work_dir),          # nerfstudio project dir (contains transforms.json)
+            "--num-iters", str(num_steps),
+            "-o", str(output_ply),
         ]
-        if use_ply:
-            cmd += ["--pointcloud", str(ply_path)]
+        # Optional: force CPU execution (set OPENSPLAT_CPU=1 in .env on GPU-less machines)
+        if os.environ.get("OPENSPLAT_CPU", "").lower() in ("1", "true", "yes"):
+            cmd += ["--cpu"]
 
         logging.info("[splat] %s: running: %s", room_id, " ".join(cmd))
 
         # ── Pre-flight: make sure the binary actually exists ───────────────
-        # shutil.which() resolves PATH + .exe extension on Windows.
         resolved = shutil.which(opensplat_bin)
         if resolved is None:
             msg = (
@@ -317,7 +408,6 @@ def main(room_id: str, num_steps: int):
                 parsed = _parse_progress(line, num_steps)
                 if parsed:
                     cur, tot = parsed
-                    # Map iter progress to 20–95% range
                     frac = cur / max(1, tot)
                     pct  = 20 + int(frac * 75)
                     if pct != last_pct:
@@ -327,26 +417,25 @@ def main(room_id: str, num_steps: int):
 
         proc.wait()
         if proc.returncode != 0:
-            # 0xC0000135 (3221225781 unsigned / -1073741515 signed) =
-            # Windows STATUS_DLL_NOT_FOUND — binary runs but can't locate a
-            # required DLL (LibTorch, OpenCV, etc.) at runtime.
+            # 0xC0000135 = Windows STATUS_DLL_NOT_FOUND: binary runs but
+            # can't find LibTorch / OpenCV DLLs at runtime.
             if proc.returncode in (3221225781, -1073741515):
                 raise RuntimeError(
-                    f"OpenSplat exited with 0xC0000135 (DLL not found). "
-                    f"The binary exists but its runtime DLLs are missing. "
-                    f"Copy all .dll files from C:\\libtorch\\lib\\ and "
-                    f"C:\\opencv\\build\\x64\\vc16\\bin\\ into the same "
-                    f"folder as opensplat.exe, then retry."
+                    "OpenSplat exited with 0xC0000135 (DLL not found). "
+                    "Copy all .dll files from C:\\libtorch\\lib\\ and "
+                    "C:\\opencv\\build\\x64\\vc16\\bin\\ into the same "
+                    "folder as opensplat.exe, then retry."
                 )
             raise RuntimeError(f"OpenSplat exited with code {proc.returncode}")
 
-        # ── 7. Move output splat to final location ─────────────────────────
-        _write_progress(room_id, 97, "Saving splat file")
-        final_splat = splat_dir / f"{room_id}.splat"
-        if not output_splat.exists():
-            raise FileNotFoundError(f"OpenSplat did not produce output: {output_splat}")
-        shutil.move(str(output_splat), str(final_splat))
-        logging.info("[splat] %s: final splat → %s (%.1f MB)",
+        # ── 7. Convert PLY -> .splat ───────────────────────────────────────
+        # OpenSplat outputs a standard 3DGS PLY; our viewer needs the compact
+        # 32-byte-per-Gaussian antimatter15 .splat binary.
+        _write_progress(room_id, 95, "Converting PLY to .splat…")
+        if not output_ply.exists():
+            raise FileNotFoundError(f"OpenSplat did not produce output: {output_ply}")
+        _ply_to_splat(output_ply, final_splat)
+        logging.info("[splat] %s: final splat -> %s (%.1f MB)",
                      room_id, final_splat.name, final_splat.stat().st_size / 1e6)
 
         _write_progress(room_id, 100, "Done")
