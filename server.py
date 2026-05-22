@@ -143,6 +143,10 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     stream=sys.stdout,
+    force=True,   # force=True (Python 3.8+): evicts any handlers that imported
+                  # libraries (Flask-CORS, PyJWT, etc.) may have installed on the
+                  # root logger before this line ran, which would otherwise make
+                  # basicConfig a silent no-op and swallow every log.info() call.
 )
 log = logging.getLogger("mw-backend")
 if DEBUG_MODE:
