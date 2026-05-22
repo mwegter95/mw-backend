@@ -135,27 +135,43 @@ def _get_decrypted_cached(path, filename: str) -> bytes:
 DEBUG_MODE = "--debug" in sys.argv
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
-# Force stdout to be unbuffered so print() shows up immediately in the terminal.
+# Force stdout to be line-buffered so every log.info() appears immediately.
 sys.stdout.reconfigure(line_buffering=True)
 
-logging.basicConfig(
-    level=logging.DEBUG if DEBUG_MODE else logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    stream=sys.stdout,
-    force=True,   # force=True (Python 3.8+): evicts any handlers that imported
-                  # libraries (Flask-CORS, PyJWT, etc.) may have installed on the
-                  # root logger before this line ran, which would otherwise make
-                  # basicConfig a silent no-op and swallow every log.info() call.
-)
+_LOG_LEVEL = logging.DEBUG if DEBUG_MODE else logging.INFO
+_LOG_FMT   = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s",
+                                datefmt="%Y-%m-%d %H:%M:%S")
+
+def _make_stdout_handler() -> logging.StreamHandler:
+    h = logging.StreamHandler(sys.stdout)
+    h.setFormatter(_LOG_FMT)
+    return h
+
+# ── Root logger — covers bare logging.info() / logging.warning() calls ────────
+# We do NOT use logging.basicConfig() because it is silently a no-op when any
+# imported library (Flask-CORS, PyJWT, Werkzeug itself, etc.) has already added
+# a handler to the root logger.  Directly replacing root.handlers is guaranteed.
+_root_log = logging.getLogger()
+_root_log.setLevel(_LOG_LEVEL)
+_root_log.handlers = [_make_stdout_handler()]
+
+# ── App logger — direct handler, propagate=False ──────────────────────────────
+# Gives log.info() / log.warning() their own path to stdout that is completely
+# independent of root.  Even if a third-party library mutates root.handlers
+# later at import time (common with Flask extensions), this logger is unaffected.
 log = logging.getLogger("mw-backend")
+log.setLevel(_LOG_LEVEL)
+log.propagate = False
+log.handlers  = [_make_stdout_handler()]
+
 if DEBUG_MODE:
     log.info("🐛  DEBUG mode enabled — verbose request/response logging active")
 
-# Make Werkzeug (Flask dev server) request logs visible too
-logging.getLogger("werkzeug").setLevel(logging.WARNING)   # suppress its own request lines
-logging.getLogger("werkzeug").handlers = []
-logging.getLogger("werkzeug").addHandler(logging.StreamHandler(sys.stdout))
+# ── Werkzeug — WARNING only, no propagation to avoid double-printing ──────────
+_wk_log = logging.getLogger("werkzeug")
+_wk_log.setLevel(logging.WARNING)
+_wk_log.propagate = False
+_wk_log.handlers  = [_make_stdout_handler()]
 
 app = Flask(__name__)
 app.secret_key = SECRET_KEY   # enables Flask sessions (used by Spotify OAuth blueprint)
@@ -1122,9 +1138,9 @@ def _start_splat_subprocess(room_id: str, num_steps: int):
             except Exception:
                 line = repr(raw)
             if line:
-                logging.info("[splat-proc] %s", line)
+                log.info("[splat-proc] %s", line)
         proc.wait()
-        logging.info("[splat-proc] worker exited with code %d", proc.returncode)
+        log.info("[splat-proc] worker exited with code %d", proc.returncode)
 
     threading.Thread(target=_stream_logs, daemon=True).start()
 
@@ -1424,9 +1440,9 @@ def _start_mesh_subprocess(room_id: str, pc_path: Path):
             except Exception:
                 line = repr(raw)
             if line:
-                logging.info("[mesh-proc] %s", line)
+                log.info("[mesh-proc] %s", line)
         proc.wait()
-        logging.info("[mesh-proc] worker exited with code %d", proc.returncode)
+        log.info("[mesh-proc] worker exited with code %d", proc.returncode)
 
     threading.Thread(target=_stream_logs, daemon=True).start()
 
@@ -1449,7 +1465,7 @@ def _build_poisson_mesh(room_id: str, pc_path: Path):  # kept for reference — 
             progress_path.write_text(_json.dumps({"pct": pct, "phase": phase}))
         except Exception:
             pass
-        logging.info(f"[mesh] {room_id}: {pct:3d}%  {phase}")
+        log.info(f"[mesh] {room_id}: {pct:3d}%  {phase}")
 
     # status_path already written to "processing" by the endpoint before
     # this thread started — no need to write it again here.
@@ -1467,7 +1483,7 @@ def _build_poisson_mesh(room_id: str, pc_path: Path):  # kept for reference — 
         xyz = arr[:, :3].astype(np.float64)
         rgb = np.clip(arr[:, 3:6], 0.0, 1.0).astype(np.float64)
         n_pts = len(xyz)
-        logging.info(f"[mesh] {room_id}: loaded {n_pts:,} points")
+        log.info(f"[mesh] {room_id}: loaded {n_pts:,} points")
 
         pcd_full = o3d.geometry.PointCloud()
         pcd_full.points = o3d.utility.Vector3dVector(xyz)
@@ -1477,7 +1493,7 @@ def _build_poisson_mesh(room_id: str, pc_path: Path):  # kept for reference — 
         _progress(10, f"Resampling {n_pts:,} points (5 mm grid)")
         pcd = pcd_full.voxel_down_sample(voxel_size=0.005)
         n_down = len(pcd.points)
-        logging.info(f"[mesh] {room_id}: downsampled to {n_down:,} points")
+        log.info(f"[mesh] {room_id}: downsampled to {n_down:,} points")
 
         # ── 3. Normal estimation ───────────────────────────────────────────
         _progress(20, f"Estimating normals ({n_down:,} pts)")
@@ -1494,7 +1510,7 @@ def _build_poisson_mesh(room_id: str, pc_path: Path):  # kept for reference — 
         )
         n_verts_raw = len(mesh.vertices)
         n_faces_raw = len(mesh.triangles)
-        logging.info(f"[mesh] {room_id}: Poisson produced {n_verts_raw:,} verts, {n_faces_raw:,} faces")
+        log.info(f"[mesh] {room_id}: Poisson produced {n_verts_raw:,} verts, {n_faces_raw:,} faces")
 
         # ── 5. Trim low-density exterior artifacts ─────────────────────────
         _progress(62, "Trimming low-density exterior")
@@ -1505,7 +1521,7 @@ def _build_poisson_mesh(room_id: str, pc_path: Path):  # kept for reference — 
         mesh.remove_degenerate_triangles()
         mesh.remove_duplicated_vertices()
         mesh.remove_non_manifold_edges()
-        logging.info(
+        log.info(
             f"[mesh] {room_id}: after trim — {len(mesh.vertices):,} verts, {len(mesh.triangles):,} faces"
         )
 
@@ -1520,7 +1536,7 @@ def _build_poisson_mesh(room_id: str, pc_path: Path):  # kept for reference — 
         _, idxs = kd.query(mesh_pts, k=5, workers=1)
         vtx_colors = pcd_rgb[idxs].mean(axis=1)
         mesh.vertex_colors = o3d.utility.Vector3dVector(vtx_colors)
-        logging.info(f"[mesh] {room_id}: color transfer done")
+        log.info(f"[mesh] {room_id}: color transfer done")
 
         # ── 7. Export as GLB ───────────────────────────────────────────────
         _progress(88, "Exporting GLB")
@@ -1538,13 +1554,13 @@ def _build_poisson_mesh(room_id: str, pc_path: Path):  # kept for reference — 
         elapsed = _time.time() - t0
         _progress(100, f"Done — {len(verts):,} verts, {len(faces):,} faces, {len(glb_bytes)//1024} KB, {elapsed:.0f}s")
         status_path.write_text("ready")
-        logging.info(
+        log.info(
             f"[mesh] {room_id}: COMPLETE in {elapsed:.1f}s — "
             f"{len(verts):,} verts, {len(faces):,} faces, {len(glb_bytes)//1024} KB"
         )
 
     except Exception:
-        logging.exception(f"[mesh] {room_id}: Poisson reconstruction FAILED")
+        log.exception(f"[mesh] {room_id}: Poisson reconstruction FAILED")
         _progress(0, "Build failed — check server logs")
         status_path.write_text("failed")
 
@@ -2955,7 +2971,7 @@ if __name__ == "__main__":
             try:
                 if _sf.read_text().strip() == "processing":
                     _sf.write_text("failed")
-                    logging.info("[startup] reset stale processing status: %s", _sf.name)
+                    log.info("[startup] reset stale processing status: %s", _sf.name)
             except Exception:
                 pass
     log.info("✓ mw-backend starting on http://0.0.0.0:%s", PORT)
