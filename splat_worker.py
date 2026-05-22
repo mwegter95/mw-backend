@@ -324,22 +324,14 @@ def main(room_id: str, num_steps: int):
             shutil.rmtree(work_dir, ignore_errors=True)
         images_dir.mkdir(parents=True, exist_ok=True)
 
-        # ── 3. Build transforms.json ───────────────────────────────────────
-        _write_progress(room_id, 10, "Building transforms.json")
-        transforms = _build_transforms(snaps, images_dir)
-        if not transforms["frames"]:
-            raise ValueError("No valid frames produced from snapshot metadata")
-        (work_dir / "transforms.json").write_text(json.dumps(transforms, indent=2))
-        logging.info("[splat] %s: wrote transforms.json (%d frames)",
-                     room_id, len(transforms["frames"]))
-
-        # ── 4. Optional: decrypt LiDAR init cloud ─────────────────────────
-        pc_path   = _uploads_walls() / f"{room_id}_pointcloud.bin"
-        ply_path  = work_dir / "init_cloud.ply"
-        use_ply   = False
+        # ── 3. Decrypt LiDAR init cloud (BEFORE transforms.json so we can ──
+        #       add ply_file_path — OpenSplat requires it for nerfstudio input)
+        pc_path  = _uploads_walls() / f"{room_id}_pointcloud.bin"
+        ply_path = work_dir / "init_cloud.ply"
+        use_ply  = False
 
         if pc_path.exists():
-            _write_progress(room_id, 15, "Decrypting LiDAR point cloud for init")
+            _write_progress(room_id, 10, "Decrypting LiDAR point cloud for init")
             try:
                 raw_encrypted = pc_path.read_bytes()
                 raw_pts = decrypt_bytes(raw_encrypted)
@@ -347,9 +339,23 @@ def main(room_id: str, num_steps: int):
                 use_ply = True
             except Exception as e:
                 logging.warning("[splat] %s: failed to build init PLY (%s) — proceeding without it", room_id, e)
-                use_ply = False
         else:
-            logging.info("[splat] %s: no point cloud found — SfM init will be used", room_id)
+            logging.info("[splat] %s: no LiDAR point cloud found", room_id)
+
+        # ── 4. Build transforms.json (include ply_file_path when available) ─
+        # OpenSplat nerfstudio input REQUIRES ply_file_path to initialise
+        # the Gaussians — if the key is absent/empty it aborts immediately.
+        _write_progress(room_id, 15, "Building transforms.json")
+        transforms = _build_transforms(snaps, images_dir)
+        if not transforms["frames"]:
+            raise ValueError("No valid frames produced from snapshot metadata")
+        if use_ply:
+            # Relative path so OpenSplat resolves it from the work_dir cwd
+            transforms["ply_file_path"] = "init_cloud.ply"
+        (work_dir / "transforms.json").write_text(json.dumps(transforms, indent=2))
+        logging.info("[splat] %s: wrote transforms.json (%d frames, ply_file_path=%s)",
+                     room_id, len(transforms["frames"]),
+                     transforms.get("ply_file_path", "<none>"))
 
         # ── 5. Build OpenSplat command ─────────────────────────────────────
         # OpenSplat 1.1.5 removed --output-type; it always writes a .ply.
