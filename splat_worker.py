@@ -24,7 +24,10 @@ from pathlib import Path
 # MUST reconfigure stdout BEFORE logging.basicConfig — piped stdout is
 # block-buffered by default even with -u; line_buffering=True flushes after
 # every newline so server.py sees each log line in real time.
-sys.stdout = _io.TextIOWrapper(sys.stdout.buffer, line_buffering=True)
+# errors='replace' prevents UnicodeEncodeError on Windows (cp1252 pipe) when
+# log messages contain characters outside the system code page (e.g. arrows).
+sys.stdout = _io.TextIOWrapper(sys.stdout.buffer, line_buffering=True,
+                               encoding="utf-8", errors="replace")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -289,7 +292,7 @@ def main(room_id: str, num_steps: int):
             _write_status(room_id, "error")
             sys.exit(1)
 
-        logging.info("[splat] %s: resolved binary → %s", room_id, resolved)
+        logging.info("[splat] %s: resolved binary -> %s", room_id, resolved)
         _write_status(room_id, "training")
         _write_progress(room_id, 20, "Starting OpenSplat…")
 
@@ -324,6 +327,17 @@ def main(room_id: str, num_steps: int):
 
         proc.wait()
         if proc.returncode != 0:
+            # 0xC0000135 (3221225781 unsigned / -1073741515 signed) =
+            # Windows STATUS_DLL_NOT_FOUND — binary runs but can't locate a
+            # required DLL (LibTorch, OpenCV, etc.) at runtime.
+            if proc.returncode in (3221225781, -1073741515):
+                raise RuntimeError(
+                    f"OpenSplat exited with 0xC0000135 (DLL not found). "
+                    f"The binary exists but its runtime DLLs are missing. "
+                    f"Copy all .dll files from C:\\libtorch\\lib\\ and "
+                    f"C:\\opencv\\build\\x64\\vc16\\bin\\ into the same "
+                    f"folder as opensplat.exe, then retry."
+                )
             raise RuntimeError(f"OpenSplat exited with code {proc.returncode}")
 
         # ── 7. Move output splat to final location ─────────────────────────
