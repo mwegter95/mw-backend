@@ -252,6 +252,8 @@ def is_sqlite_storage_full_error(err):
 from spotify_blueprint import spotify_bp
 app.register_blueprint(spotify_bp)
 
+from yard_seed import seed_for_owner as _yard_seed_for_owner
+
 from werkzeug.exceptions import HTTPException
 
 @app.errorhandler(Exception)
@@ -341,6 +343,38 @@ CREATE TABLE IF NOT EXISTS gallery_rooms (
     owner_id    TEXT NOT NULL,
     data        TEXT NOT NULL,   -- JSON (id, name, roomWidth, roomHeight, roomDepth, surfaces, createdAt)
     updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Growyard: per-user plant records (seeded from yard_seed.PLANTS on register)
+CREATE TABLE IF NOT EXISTS yard_plants (
+    id          TEXT NOT NULL,
+    owner_type  TEXT NOT NULL,
+    owner_id    TEXT NOT NULL,
+    data        TEXT NOT NULL,   -- JSON
+    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id, owner_type, owner_id)
+);
+
+-- Growyard: per-user maintenance tasks (seeded from yard_seed.TASKS on register)
+CREATE TABLE IF NOT EXISTS yard_tasks (
+    id          TEXT NOT NULL,
+    owner_type  TEXT NOT NULL,
+    owner_id    TEXT NOT NULL,
+    data        TEXT NOT NULL,   -- JSON (id, month, plantId, category, title, what, why, how, when, duration)
+    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id, owner_type, owner_id)
+);
+
+-- Growyard: per-task per-year completion + free-form note
+CREATE TABLE IF NOT EXISTS yard_progress (
+    owner_type  TEXT NOT NULL,
+    owner_id    TEXT NOT NULL,
+    task_id     TEXT NOT NULL,
+    year        INTEGER NOT NULL,
+    completed   INTEGER NOT NULL DEFAULT 0,
+    note        TEXT NOT NULL DEFAULT '',
+    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (owner_type, owner_id, task_id, year)
 );
 """
 
@@ -456,6 +490,11 @@ def auth_register():
     user = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
     # Migrate any existing device data into this new account
     _claim_device(db, str(user["id"]), d.get("device_token"))
+    # Seed the growyard starter plants + tasks for every new user.
+    try:
+        _yard_seed_for_owner(db, "user", str(user["id"]))
+    except Exception as e:
+        log.warning("[auth/register] yard seed failed for user_id=%s: %s", user["id"], e)
     return jsonify({"token": make_token(user["id"], user=user), "user": _user_dict(user)}), 201
 
 
@@ -474,6 +513,11 @@ def auth_login():
             return jsonify({"error": "Invalid email or password"}), 401
         log.info("[auth/login] success for email=%s user_id=%s", email, user["id"])
         _claim_device(db, str(user["id"]), d.get("device_token"))
+        # Backfill seed for users created before growyard existed (no-op if already seeded).
+        try:
+            _yard_seed_for_owner(db, "user", str(user["id"]))
+        except Exception as e:
+            log.warning("[auth/login] yard seed failed for user_id=%s: %s", user["id"], e)
         return jsonify({"token": make_token(user["id"], user=user), "user": _user_dict(user)})
     except Exception:
         tb = traceback.format_exc()
@@ -2819,6 +2863,85 @@ def serve_upload(filename):
         return send_from_directory(str(UPLOADS_DIR), filename)
     mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
     return Response(data, mimetype=mime)
+
+# ─── Growyard: yard maintenance tracker ──────────────────────────────────────
+
+@app.get("/yard/state")
+@require_auth
+def yard_state():
+    """Returns plants, tasks, and the current-year progress for the caller.
+    On first hit for a user we lazily seed their plants/tasks (no-op if seeded)."""
+    db = get_db()
+    user_id = str(g.current_user["id"])
+    _yard_seed_for_owner(db, "user", user_id)
+
+    plant_rows = db.execute(
+        "SELECT data FROM yard_plants WHERE owner_type='user' AND owner_id=?",
+        (user_id,)
+    ).fetchall()
+    task_rows = db.execute(
+        "SELECT data FROM yard_tasks WHERE owner_type='user' AND owner_id=?",
+        (user_id,)
+    ).fetchall()
+    year = int(request.args.get("year") or datetime.datetime.now().year)
+    progress_rows = db.execute(
+        "SELECT task_id, completed, note FROM yard_progress "
+        "WHERE owner_type='user' AND owner_id=? AND year=?",
+        (user_id, year)
+    ).fetchall()
+
+    completed = {}
+    notes = {}
+    for r in progress_rows:
+        if r["completed"]:
+            completed[f"{r['task_id']}:{year}"] = True
+        if r["note"]:
+            notes[r["task_id"]] = r["note"]
+
+    return jsonify({
+        "plants":   [json.loads(r["data"]) for r in plant_rows],
+        "tasks":    [json.loads(r["data"]) for r in task_rows],
+        "year":     year,
+        "progress": {"completed": completed, "notes": notes},
+    })
+
+
+@app.put("/yard/progress/<task_id>")
+@require_auth
+def yard_put_progress(task_id):
+    """Upsert completion and/or note for one task in a given year.
+    Body: {completed?: bool, note?: str, year?: int (default current year)}"""
+    body = request.get_json(silent=True) or {}
+    db = get_db()
+    user_id = str(g.current_user["id"])
+    year = int(body.get("year") or datetime.datetime.now().year)
+
+    # Make sure the task belongs to this user (and exists).
+    row = db.execute(
+        "SELECT 1 FROM yard_tasks WHERE id=? AND owner_type='user' AND owner_id=?",
+        (task_id, user_id)
+    ).fetchone()
+    if not row:
+        return jsonify({"error": "Task not found"}), 404
+
+    existing = db.execute(
+        "SELECT completed, note FROM yard_progress "
+        "WHERE owner_type='user' AND owner_id=? AND task_id=? AND year=?",
+        (user_id, task_id, year)
+    ).fetchone()
+    completed = int(bool(body["completed"])) if "completed" in body else (existing["completed"] if existing else 0)
+    note = body["note"] if "note" in body else (existing["note"] if existing else "")
+
+    db.execute(
+        "INSERT INTO yard_progress (owner_type, owner_id, task_id, year, completed, note, updated_at) "
+        "VALUES ('user', ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(owner_type, owner_id, task_id, year) DO UPDATE SET "
+        "completed=excluded.completed, note=excluded.note, updated_at=excluded.updated_at",
+        (user_id, task_id, year, completed, note, utc_now_iso_legacy())
+    )
+    db.commit()
+    return jsonify({"ok": True, "completed": bool(completed), "note": note, "year": year})
+
 
 # ─── Health ───────────────────────────────────────────────────────────────────
 
