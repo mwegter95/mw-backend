@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 
-from yard_seed import PLANTS
+from yard_seed import PLANTS, _copy_default_photos
 
 # Convention: image filename derives from plant id. Keeping the mapping
 # explicit here so future v3+ migrations can target specific ids if the
@@ -100,6 +100,8 @@ def seed_v2_for_owner(db, owner_type: str, owner_id: str) -> bool:
         (owner_type, owner_id, SEED_VERSION),
     )
     db.commit()
+    # Also ensure default photos are on disk for this user (no-op if already copied).
+    _copy_default_photos(owner_id)
     return updates > 0 or True
 
 

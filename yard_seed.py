@@ -9,9 +9,27 @@ Usage:
 """
 import argparse
 import json
+import shutil
 import sqlite3
 import sys
 from pathlib import Path
+
+# Paths — resolved relative to this file so they work in both dev and prod.
+DEFAULTS_DIR = Path(__file__).parent / "yard_photos" / "defaults"
+PHOTOS_DIR   = Path(__file__).parent / "data" / "yard_photos"
+
+
+def _copy_default_photos(owner_id: str) -> None:
+    """Copy default plant photos into this owner's photo folder.
+    Skips files that already exist so it's safe to call repeatedly."""
+    dest = PHOTOS_DIR / str(owner_id)
+    dest.mkdir(parents=True, exist_ok=True)
+    if not DEFAULTS_DIR.exists():
+        return
+    for src in DEFAULTS_DIR.iterdir():
+        target = dest / src.name
+        if not target.exists():
+            shutil.copy2(str(src), str(target))
 
 
 PLANTS = [
@@ -620,6 +638,8 @@ def seed_for_owner(db, owner_type: str, owner_id: str) -> bool:
             (task["id"], owner_type, owner_id, json.dumps(task)),
         )
     db.commit()
+    # Copy default photos into the user's own photo folder.
+    _copy_default_photos(owner_id)
     return True
 
 

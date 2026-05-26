@@ -2957,6 +2957,32 @@ def yard_put_progress(task_id):
     return jsonify({"ok": True, "completed": bool(completed), "note": note, "year": year})
 
 
+@app.get("/yard/plants/<plant_id>/image")
+@require_auth
+def yard_plant_image(plant_id):
+    """Serve the hero photo for one of the caller's plants."""
+    user_id = str(g.current_user["id"])
+    from yard_seed import PHOTOS_DIR
+    path = PHOTOS_DIR / user_id / f"{plant_id}.jpg"
+    if not path.exists():
+        return jsonify({"error": "Not found"}), 404
+    return send_file(str(path), mimetype="image/jpeg",
+                     max_age=86400, conditional=True)
+
+
+@app.get("/yard/plants/<plant_id>/thumb")
+@require_auth
+def yard_plant_thumb(plant_id):
+    """Serve the thumbnail photo for one of the caller's plants."""
+    user_id = str(g.current_user["id"])
+    from yard_seed import PHOTOS_DIR
+    path = PHOTOS_DIR / user_id / f"{plant_id}-thumb.jpg"
+    if not path.exists():
+        return jsonify({"error": "Not found"}), 404
+    return send_file(str(path), mimetype="image/jpeg",
+                     max_age=86400, conditional=True)
+
+
 # ─── Health ───────────────────────────────────────────────────────────────────
 
 @app.get("/health")
