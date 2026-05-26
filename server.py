@@ -387,6 +387,41 @@ CREATE TABLE IF NOT EXISTS yard_seed_versions (
     applied_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (owner_type, owner_id, version)
 );
+
+-- Life Dashboard: per-user habits. `data` is the full habit JSON
+-- (name, category, points, freq, notes, created).
+CREATE TABLE IF NOT EXISTS life_habits (
+    id          TEXT NOT NULL,
+    owner_type  TEXT NOT NULL,
+    owner_id    TEXT NOT NULL,
+    data        TEXT NOT NULL,
+    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id, owner_type, owner_id)
+);
+
+-- Life Dashboard: per-habit per-day completion. Streak multiplier and
+-- bonus roll are computed client-side; `scored` is what the user actually
+-- earned for that completion (incl. multiplier + bonus).
+CREATE TABLE IF NOT EXISTS life_completions (
+    owner_type  TEXT NOT NULL,
+    owner_id    TEXT NOT NULL,
+    habit_id    TEXT NOT NULL,
+    date        TEXT NOT NULL,        -- ISO yyyy-mm-dd
+    scored      INTEGER NOT NULL DEFAULT 0,
+    bonus       INTEGER NOT NULL DEFAULT 0,
+    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (owner_type, owner_id, habit_id, date)
+);
+
+-- Life Dashboard: per-day free-form end-of-day reflection.
+CREATE TABLE IF NOT EXISTS life_reflections (
+    owner_type  TEXT NOT NULL,
+    owner_id    TEXT NOT NULL,
+    date        TEXT NOT NULL,
+    text        TEXT NOT NULL DEFAULT '',
+    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (owner_type, owner_id, date)
+);
 """
 
 def get_db():
@@ -558,7 +593,10 @@ def auth_claim():
 def _claim_device(db, user_id, device_token):
     if not device_token:
         return
-    for table in ("gallery_walls", "gallery_layouts", "gallery_library"):
+    for table in (
+        "gallery_walls", "gallery_layouts", "gallery_library",
+        "life_habits", "life_completions", "life_reflections",
+    ):
         db.execute(
             f"UPDATE {table} SET owner_type='user', owner_id=? "
             "WHERE owner_type='device' AND owner_id=?",
@@ -3001,6 +3039,166 @@ def _decode_data_url(data_url):
     buf  = base64.b64decode(m.group(2))
     ext  = mime.split("/")[1].replace("jpeg", "jpg")
     return buf, ext
+
+# ─── Life Dashboard: habits + completions + reflections ─────────────────────
+
+@app.get("/api/life/state")
+@require_owner
+def life_state():
+    """Returns everything the dashboard needs on first paint:
+       habits, completions (keyed by habit id), and reflections (keyed by date)."""
+    db = get_db()
+    ot, oi = g.owner_type, g.owner_id
+
+    habit_rows = db.execute(
+        "SELECT data FROM life_habits WHERE owner_type=? AND owner_id=?",
+        (ot, oi)
+    ).fetchall()
+    habits = [json.loads(r["data"]) for r in habit_rows]
+
+    completion_rows = db.execute(
+        "SELECT habit_id, date, scored, bonus FROM life_completions "
+        "WHERE owner_type=? AND owner_id=? ORDER BY date ASC",
+        (ot, oi)
+    ).fetchall()
+    completions = {}
+    for r in completion_rows:
+        completions.setdefault(r["habit_id"], []).append({
+            "date":   r["date"],
+            "scored": r["scored"],
+            "bonus":  bool(r["bonus"]),
+        })
+
+    reflection_rows = db.execute(
+        "SELECT date, text FROM life_reflections WHERE owner_type=? AND owner_id=?",
+        (ot, oi)
+    ).fetchall()
+    reflections = {r["date"]: r["text"] for r in reflection_rows}
+
+    return jsonify({
+        "habits":      habits,
+        "completions": completions,
+        "reflections": reflections,
+    })
+
+
+@app.put("/api/life/habits/<habit_id>")
+@require_owner
+def life_put_habit(habit_id):
+    """Upsert a habit. The URL `habit_id` and body `id` must match."""
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict) or body.get("id") != habit_id:
+        return jsonify({"error": "habit id mismatch"}), 400
+    if not (body.get("name") or "").strip():
+        return jsonify({"error": "name required"}), 400
+
+    db = get_db()
+    ot, oi = g.owner_type, g.owner_id
+    db.execute(
+        "INSERT INTO life_habits (id, owner_type, owner_id, data, updated_at) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(id, owner_type, owner_id) DO UPDATE SET "
+        "data=excluded.data, updated_at=excluded.updated_at",
+        (habit_id, ot, oi, json.dumps(body), utc_now_iso_legacy())
+    )
+    db.commit()
+    return jsonify({"ok": True, "habit": body})
+
+
+@app.delete("/api/life/habits/<habit_id>")
+@require_owner
+def life_delete_habit(habit_id):
+    """Delete a habit and all of its completions."""
+    db = get_db()
+    ot, oi = g.owner_type, g.owner_id
+    db.execute(
+        "DELETE FROM life_habits WHERE id=? AND owner_type=? AND owner_id=?",
+        (habit_id, ot, oi)
+    )
+    db.execute(
+        "DELETE FROM life_completions WHERE habit_id=? AND owner_type=? AND owner_id=?",
+        (habit_id, ot, oi)
+    )
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.post("/api/life/completions")
+@require_owner
+def life_post_completion():
+    """Upsert a single completion: {habit_id, date (ISO), scored, bonus}.
+    Replaces the prior row for the same (habit, date) if one exists."""
+    body = request.get_json(silent=True) or {}
+    habit_id = (body.get("habit_id") or "").strip()
+    date     = (body.get("date") or "").strip()
+    if not habit_id or not date:
+        return jsonify({"error": "habit_id and date required"}), 400
+    try:
+        scored = int(body.get("scored", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "scored must be an integer"}), 400
+    bonus = 1 if body.get("bonus") else 0
+
+    db = get_db()
+    ot, oi = g.owner_type, g.owner_id
+
+    # Ensure the habit belongs to this owner — prevents writing completions
+    # for habits we don't own.
+    if not db.execute(
+        "SELECT 1 FROM life_habits WHERE id=? AND owner_type=? AND owner_id=?",
+        (habit_id, ot, oi)
+    ).fetchone():
+        return jsonify({"error": "habit not found"}), 404
+
+    db.execute(
+        "INSERT INTO life_completions (owner_type, owner_id, habit_id, date, scored, bonus, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(owner_type, owner_id, habit_id, date) DO UPDATE SET "
+        "scored=excluded.scored, bonus=excluded.bonus, updated_at=excluded.updated_at",
+        (ot, oi, habit_id, date, scored, bonus, utc_now_iso_legacy())
+    )
+    db.commit()
+    return jsonify({"ok": True, "completion": {"date": date, "scored": scored, "bonus": bool(bonus)}})
+
+
+@app.delete("/api/life/completions/<habit_id>/<date>")
+@require_owner
+def life_delete_completion(habit_id, date):
+    db = get_db()
+    ot, oi = g.owner_type, g.owner_id
+    db.execute(
+        "DELETE FROM life_completions "
+        "WHERE habit_id=? AND date=? AND owner_type=? AND owner_id=?",
+        (habit_id, date, ot, oi)
+    )
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.put("/api/life/reflections/<date>")
+@require_owner
+def life_put_reflection(date):
+    body = request.get_json(silent=True) or {}
+    text = (body.get("text") or "")
+    db = get_db()
+    ot, oi = g.owner_type, g.owner_id
+    if not text.strip():
+        # Empty reflection — delete instead of storing a blank row.
+        db.execute(
+            "DELETE FROM life_reflections WHERE owner_type=? AND owner_id=? AND date=?",
+            (ot, oi, date)
+        )
+    else:
+        db.execute(
+            "INSERT INTO life_reflections (owner_type, owner_id, date, text, updated_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(owner_type, owner_id, date) DO UPDATE SET "
+            "text=excluded.text, updated_at=excluded.updated_at",
+            (ot, oi, date, text, utc_now_iso_legacy())
+        )
+    db.commit()
+    return jsonify({"ok": True})
+
 
 # ─── Startup ──────────────────────────────────────────────────────────────────
 
