@@ -253,6 +253,7 @@ from spotify_blueprint import spotify_bp
 app.register_blueprint(spotify_bp)
 
 from yard_seed import seed_for_owner as _yard_seed_for_owner
+from yard_seed_v2 import seed_v2_for_owner as _yard_seed_v2_for_owner
 
 from werkzeug.exceptions import HTTPException
 
@@ -376,6 +377,16 @@ CREATE TABLE IF NOT EXISTS yard_progress (
     updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (owner_type, owner_id, task_id, year)
 );
+
+-- Growyard: one-shot per-user migration log. Stage-2 (and any future) seeds
+-- check this before re-running so backfills land exactly once per user.
+CREATE TABLE IF NOT EXISTS yard_seed_versions (
+    owner_type  TEXT NOT NULL,
+    owner_id    TEXT NOT NULL,
+    version     TEXT NOT NULL,
+    applied_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (owner_type, owner_id, version)
+);
 """
 
 def get_db():
@@ -493,6 +504,7 @@ def auth_register():
     # Seed the growyard starter plants + tasks for every new user.
     try:
         _yard_seed_for_owner(db, "user", str(user["id"]))
+        _yard_seed_v2_for_owner(db, "user", str(user["id"]))
     except Exception as e:
         log.warning("[auth/register] yard seed failed for user_id=%s: %s", user["id"], e)
     return jsonify({"token": make_token(user["id"], user=user), "user": _user_dict(user)}), 201
@@ -516,6 +528,7 @@ def auth_login():
         # Backfill seed for users created before growyard existed (no-op if already seeded).
         try:
             _yard_seed_for_owner(db, "user", str(user["id"]))
+            _yard_seed_v2_for_owner(db, "user", str(user["id"]))
         except Exception as e:
             log.warning("[auth/login] yard seed failed for user_id=%s: %s", user["id"], e)
         return jsonify({"token": make_token(user["id"], user=user), "user": _user_dict(user)})
@@ -2874,6 +2887,7 @@ def yard_state():
     db = get_db()
     user_id = str(g.current_user["id"])
     _yard_seed_for_owner(db, "user", user_id)
+    _yard_seed_v2_for_owner(db, "user", user_id)
 
     plant_rows = db.execute(
         "SELECT data FROM yard_plants WHERE owner_type='user' AND owner_id=?",

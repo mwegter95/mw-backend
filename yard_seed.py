@@ -226,6 +226,16 @@ PLANTS = [
 ]
 
 
+# Photo filenames are derived by convention from each plant's id so the
+# frontend can build `${BASE_URL}plants/${plant.image}` URLs against the
+# files committed under growyard/public/plants/. Patched onto each PLANTS
+# dict at module-load time so every code path (initial seed, v2 backfill,
+# and the dev CLI) sees the same shape.
+for _p in PLANTS:
+    _p["image"] = f"{_p['id']}.jpg"
+    _p["thumb"] = f"{_p['id']}-thumb.jpg"
+
+
 TASKS = [
     {
         "id": "mar-inspect",
