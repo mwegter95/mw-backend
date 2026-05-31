@@ -320,6 +320,57 @@ def extract():
         return jsonify({"success": False, "error": str(e)})
 
 
+@spotify_bp.route("/tracks", methods=["POST"])
+def tracks():
+    """Rich track listing for a playlist: title, artist, ISRC, duration, album.
+
+    Used by the djay-playlist-helper tool to match a Spotify playlist against an
+    already-imported djay library (ISRC-first, then artist+title). Uses client
+    credentials, so no user OAuth is required.
+    """
+    data = request.get_json(silent=True) or {}
+    playlist_url = data.get("playlist_url", "").strip()
+    if not playlist_url:
+        return jsonify({"success": False, "error": "Please provide a playlist URL"})
+    client_id, client_secret = _creds()
+    if not client_id or not client_secret:
+        return jsonify({
+            "success": False,
+            "error": "Spotify API credentials are not configured on the server.",
+        })
+    try:
+        sp = get_client_credentials_spotify()
+        playlist_id = extract_playlist_id(playlist_url)
+        playlist_info = sp.playlist(playlist_id)
+        out = []
+        # Only request the fields we need, to keep paging fast.
+        fields = ("items(track(id,name,duration_ms,external_ids(isrc),"
+                  "artists(name),album(name))),next")
+        results = sp.playlist_items(playlist_id, fields=fields, additional_types=("track",))
+        while results:
+            for item in results["items"]:
+                track = item.get("track")
+                if not track:
+                    continue
+                out.append({
+                    "id": track.get("id"),
+                    "title": track.get("name", ""),
+                    "artist": ", ".join(a["name"] for a in track.get("artists", [])),
+                    "isrc": (track.get("external_ids") or {}).get("isrc"),
+                    "duration_ms": track.get("duration_ms"),
+                    "album": (track.get("album") or {}).get("name", ""),
+                })
+            results = sp.next(results) if results.get("next") else None
+        return jsonify({
+            "success": True,
+            "playlist_name": playlist_info["name"],
+            "tracks": out,
+            "count": len(out),
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
 def _search_one(entry):
     """Search Spotify for a single song entry. Each call gets its own client
     so concurrent threads don't share a requests.Session."""
