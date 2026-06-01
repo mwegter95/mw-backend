@@ -46,11 +46,16 @@ from flask import (
 
 # ─── Blueprint setup ──────────────────────────────────────────────────────────
 
+# NOTE: templates are referenced with an "apple/" prefix (apple/extractor.html,
+# etc.) and live in the app's default templates/ folder. We deliberately do NOT
+# set a blueprint template_folder: Flask merges all blueprint template folders
+# into one un-namespaced search path, so bare names like "extractor.html" would
+# collide with the Spotify blueprint's identically-named templates (first one
+# registered wins). Prefixed names keep the two tools fully separate.
 apple_bp = Blueprint(
     "apple",
     __name__,
     url_prefix="/apple",
-    template_folder="templates/apple",
 )
 
 # Apple Music API base + the JS user-agent so share pages serve full HTML.
@@ -284,7 +289,7 @@ def index():
     @after_this_request
     def add_headers(resp):
         return _add_frame_headers(resp)
-    return render_template("extractor.html", configured=apple_music_configured())
+    return render_template("apple/extractor.html", configured=apple_music_configured())
 
 
 @apple_bp.route("/extractor")
@@ -292,7 +297,7 @@ def extractor():
     @after_this_request
     def add_headers(resp):
         return _add_frame_headers(resp)
-    return render_template("extractor.html", configured=apple_music_configured())
+    return render_template("apple/extractor.html", configured=apple_music_configured())
 
 
 @apple_bp.route("/builder")
@@ -305,7 +310,7 @@ def builder():
     @after_this_request
     def add_headers(resp):
         return _add_frame_headers(resp)
-    return render_template("builder.html", configured=True)
+    return render_template("apple/builder.html", configured=True)
 
 
 # ─── API routes ───────────────────────────────────────────────────────────────
