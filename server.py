@@ -48,7 +48,7 @@ for d in [DATA_DIR, UPLOADS_DIR / "walls", UPLOADS_DIR / "pieces", UPLOADS_DIR /
 
 DB_PATH           = DATA_DIR / "mw.db"
 PORT              = int(os.environ.get("PORT", 5050))
-ACCESS_TTL        = datetime.timedelta(hours=24)
+ACCESS_TTL        = datetime.timedelta(days=7)   # login token stays valid for a week on the device
 RESET_TOKEN_TTL_H = int(os.environ.get("RESET_TOKEN_TTL_HOURS", 1))
 GAS_WEBHOOK_URL   = os.environ.get("GAS_WEBHOOK_URL", "")  # Google Apps Script email sender
 FRONTEND_BASE     = os.environ.get("FRONTEND_URL", "https://mwegter95.github.io")
@@ -425,6 +425,16 @@ CREATE TABLE IF NOT EXISTS life_reflections (
     text        TEXT NOT NULL DEFAULT '',
     updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (owner_type, owner_id, date)
+);
+
+-- Life Dashboard: per-user single-row settings (currently just the mantra
+-- shown atop the dashboard). One row per owner.
+CREATE TABLE IF NOT EXISTS life_settings (
+    owner_type  TEXT NOT NULL,
+    owner_id    TEXT NOT NULL,
+    mantra      TEXT NOT NULL DEFAULT '',
+    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (owner_type, owner_id)
 );
 """
 
@@ -3079,10 +3089,17 @@ def life_state():
     ).fetchall()
     reflections = {r["date"]: r["text"] for r in reflection_rows}
 
+    settings_row = db.execute(
+        "SELECT mantra FROM life_settings WHERE owner_type=? AND owner_id=?",
+        (ot, oi)
+    ).fetchone()
+    mantra = settings_row["mantra"] if settings_row else ""
+
     return jsonify({
         "habits":      habits,
         "completions": completions,
         "reflections": reflections,
+        "mantra":      mantra,
     })
 
 
@@ -3202,6 +3219,25 @@ def life_put_reflection(date):
         )
     db.commit()
     return jsonify({"ok": True})
+
+
+@app.put("/api/life/mantra")
+@require_owner
+def life_put_mantra():
+    """Upsert this owner's mantra (a short phrase shown atop the dashboard)."""
+    body = request.get_json(silent=True) or {}
+    mantra = (body.get("mantra") or "").strip()[:280]
+    db = get_db()
+    ot, oi = g.owner_type, g.owner_id
+    db.execute(
+        "INSERT INTO life_settings (owner_type, owner_id, mantra, updated_at) "
+        "VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(owner_type, owner_id) DO UPDATE SET "
+        "mantra=excluded.mantra, updated_at=excluded.updated_at",
+        (ot, oi, mantra, utc_now_iso_legacy())
+    )
+    db.commit()
+    return jsonify({"ok": True, "mantra": mantra})
 
 
 # ─── Startup ──────────────────────────────────────────────────────────────────
