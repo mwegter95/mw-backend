@@ -252,6 +252,10 @@ def is_sqlite_storage_full_error(err):
 from spotify_blueprint import spotify_bp
 app.register_blueprint(spotify_bp)
 
+# ─── Apple Music Tools blueprint ─────────────────────────────────────────────
+from apple_music_blueprint import apple_bp
+app.register_blueprint(apple_bp)
+
 from yard_seed import seed_for_owner as _yard_seed_for_owner
 from yard_seed_v2 import seed_v2_for_owner as _yard_seed_v2_for_owner
 

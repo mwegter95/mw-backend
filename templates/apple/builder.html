@@ -1,0 +1,324 @@
+{% extends "base.html" %}
+{% set active_page = "builder" %}
+
+{% block title %}Playlist Builder — Apple Music Tools{% endblock %}
+
+{% block extra_styles %}
+.auth-bar { display:flex; align-items:center; justify-content:space-between;
+  background:#f5f5f5; padding:12px 18px; border-radius:10px; margin-bottom:25px; gap:12px; flex-wrap:wrap; }
+.auth-bar .auth-status { display:flex; align-items:center; gap:8px; font-size:0.95em; }
+.auth-bar .dot { width:10px; height:10px; border-radius:50%; display:inline-block; }
+.dot.green { background:#FA243C; }
+.dot.gray  { background:#ccc; }
+.config-notice { background:#fff3cd; border:1px solid #ffeeba; color:#856404;
+  padding:14px 18px; border-radius:10px; margin-bottom:25px; font-size:0.92em; line-height:1.5; }
+textarea#songList { min-height:220px; font-family:'Monaco','Courier New',monospace;
+  font-size:0.9em; line-height:1.7; }
+.results-section { margin-top:30px; }
+.song-result { border:2px solid #e0e0e0; border-radius:12px; padding:16px;
+  margin-bottom:12px; transition:border-color 0.2s; }
+.song-result:hover { border-color:#FA243C; }
+.song-query { font-weight:600; color:#333; margin-bottom:10px; font-size:1em; }
+.song-query .note { font-weight:400; color:#999; font-size:0.85em; }
+.match-options { display:flex; flex-direction:column; gap:6px; }
+.match-option { display:flex; align-items:center; gap:12px; padding:8px 12px;
+  border-radius:8px; cursor:pointer; transition:background 0.15s; }
+.match-option:hover { background:#f5f5f5; }
+.match-option input[type="radio"] { accent-color:#FA243C; width:18px; height:18px; flex-shrink:0; }
+.match-option img { width:40px; height:40px; border-radius:4px; flex-shrink:0; }
+.match-info { flex:1; min-width:0; }
+.match-name { font-weight:600; font-size:0.95em; color:#1d1d1f; }
+.match-detail { font-size:0.82em; color:#888; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.match-score { font-size:0.78em; color:#FA243C; font-weight:600; flex-shrink:0; }
+.no-match { color:#e74c3c; font-style:italic; font-size:0.9em; padding:8px 0; }
+.playlist-name-section { margin-top:20px; display:flex; align-items:center; gap:12px; }
+.playlist-name-section input { flex:1; }
+.build-bar { display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+  background:#f9f9f9; border:2px solid #e0e0e0; border-radius:12px; padding:14px 16px; }
+.build-bar input[type="text"] { flex:1; min-width:160px; }
+.build-bar-label { font-weight:600; color:#333; white-space:nowrap; font-size:0.95em; }
+.success-box { background:#d4edda; border:1px solid #c3e6cb; border-radius:10px;
+  padding:20px; margin-top:20px; text-align:center; }
+.success-box a { color:#FA243C; font-weight:600; }
+{% endblock %}
+
+{% block content %}
+<h1>🔨 Playlist Builder</h1>
+<p class="subtitle">Paste a list of songs and artists to search Apple Music and build a playlist</p>
+
+{% if not configured %}
+<div class="config-notice">
+  ⚙️ The Apple Music API isn't configured on the server yet, so search and
+  playlist creation are disabled. The <a href="/apple/extractor" style="color:#FA243C;font-weight:600">Extractor</a>
+  still works without any setup. Add a MusicKit key to enable this tool.
+</div>
+{% endif %}
+
+<div class="auth-bar">
+  <div class="auth-status">
+    <span class="dot gray" id="authDot"></span>
+    <span id="authText">Not connected — required to create playlists</span>
+  </div>
+  <button class="btn btn-primary btn-sm" id="connectBtn" onclick="toggleConnect()"
+    {{ 'disabled title="Apple Music API not configured"' if not configured else '' }}>
+    Connect Apple Music
+  </button>
+</div>
+
+<div class="input-section">
+  <label for="songList">Song List
+    <span style="font-weight:400;color:#999">(one per line: Song — Artist)</span>
+  </label>
+  <textarea id="songList"
+    placeholder="Can't Help Falling in Love — Tommy Emmanuel
+Thinking Out Loud — The Piano Guys
+All of Me — Simply Three
+A Thousand Years — 2CELLOS
+Perfect — Paul Cardall"></textarea>
+  <p class="example">
+    Supports <strong>—</strong> (em-dash), <strong>–</strong> (en-dash), or
+    <strong>-</strong> (hyphen) as separators.
+    <a href="#" onclick="loadExample(); return false;">Load example list</a>
+  </p>
+  <div class="button-group">
+    <button class="btn-primary" id="searchBtn" onclick="searchSongs()"
+      {{ 'disabled title="Apple Music API not configured"' if not configured else '' }}>
+      🔍 Search Songs
+    </button>
+  </div>
+</div>
+
+<div id="status" class="status"></div>
+
+<div id="resultsSection" class="results-section" style="display:none">
+  <h2 style="margin-bottom:15px">Search Results</h2>
+  <p style="color:#666;margin-bottom:15px;font-size:0.9em">
+    Review matches below. The best match is pre-selected — change if needed.
+  </p>
+
+  <!-- Build bar at top -->
+  <div class="build-bar" style="margin-bottom:20px">
+    <span class="build-bar-label">Playlist Name:</span>
+    <input type="text" id="playlistNameTop" value="My Custom Playlist"
+      oninput="syncPlaylistName('top')" />
+    <button class="btn-primary" id="createBtnTop" onclick="createPlaylist()">
+      🚀 Build Playlist
+    </button>
+  </div>
+
+  <div id="resultsContainer"></div>
+
+  <!-- Build bar at bottom -->
+  <div class="playlist-name-section">
+    <label for="playlistNameBottom" style="margin:0;white-space:nowrap">Playlist Name:</label>
+    <input type="text" id="playlistNameBottom" value="My Custom Playlist"
+      oninput="syncPlaylistName('bottom')" style="flex:1" />
+  </div>
+
+  <div class="button-group" style="margin-top:15px">
+    <button class="btn-primary" id="createBtnBottom" onclick="createPlaylist()">
+      🚀 Create Playlist on Apple Music
+    </button>
+  </div>
+
+  <div id="successBox" class="success-box" style="display:none"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{% if configured %}
+<script src="https://js-cdn.music.apple.com/musickit/v3/musickit.js" data-web-components async></script>
+{% endif %}
+<script>
+  let searchResults = [];
+  let musicKit = null;       // MusicKit instance once configured
+  const CONFIGURED = {{ 'true' if configured else 'false' }};
+
+  /* ── MusicKit setup ─────────────────────────────────────────── */
+  document.addEventListener('musickitloaded', async function () {
+    try {
+      const res = await fetch('/apple/dev-token');
+      const data = await res.json();
+      if (!data.configured || !data.token) return;
+      await MusicKit.configure({
+        developerToken: data.token,
+        app: { name: 'Apple Music Tools', build: '1.0.0' },
+      });
+      musicKit = MusicKit.getInstance();
+      reflectAuthState();
+    } catch (e) {
+      console.error('MusicKit configure failed', e);
+    }
+  });
+
+  function reflectAuthState() {
+    const connected = !!(musicKit && musicKit.isAuthorized);
+    document.getElementById('authDot').className = 'dot ' + (connected ? 'green' : 'gray');
+    document.getElementById('authText').textContent =
+      connected ? 'Connected to Apple Music' : 'Not connected — required to create playlists';
+    const btn = document.getElementById('connectBtn');
+    btn.textContent = connected ? 'Disconnect' : 'Connect Apple Music';
+    btn.className = 'btn btn-sm ' + (connected ? 'btn-danger' : 'btn-primary');
+  }
+
+  async function toggleConnect() {
+    if (!musicKit) { showStatus('Apple Music is still loading — try again in a moment.', 'error'); return; }
+    try {
+      if (musicKit.isAuthorized) {
+        await musicKit.unauthorize();
+      } else {
+        await musicKit.authorize();   // opens Apple ID sign-in popup
+      }
+      reflectAuthState();
+    } catch (e) {
+      showStatus(`Apple Music connection failed: ${e.message || e}`, 'error');
+    }
+  }
+
+  /* ── Helpers ────────────────────────────────────────────────── */
+  function loadExample() {
+    document.getElementById('songList').value =
+      `Can't Help Falling in Love — Tommy Emmanuel (fingerstyle guitar)
+Thinking Out Loud — The Piano Guys
+All of Me — Simply Three (string trio)
+A Thousand Years — 2CELLOS
+Perfect — Paul Cardall (solo piano)`;
+  }
+
+  function showStatus(msg, type) {
+    const el = document.getElementById('status');
+    el.className = `status show ${type}`;
+    el.innerHTML = type === 'loading' ? `<span class="spinner"></span>${msg}` : msg;
+  }
+
+  function syncPlaylistName(source) {
+    const top    = document.getElementById('playlistNameTop');
+    const bottom = document.getElementById('playlistNameBottom');
+    if (!top || !bottom) return;
+    if (source === 'top')    bottom.value = top.value;
+    if (source === 'bottom') top.value    = bottom.value;
+  }
+
+  function setCreateBtnsDisabled(disabled) {
+    const top    = document.getElementById('createBtnTop');
+    const bottom = document.getElementById('createBtnBottom');
+    if (top)    top.disabled    = disabled;
+    if (bottom) bottom.disabled = disabled;
+  }
+
+  /* ── Search ─────────────────────────────────────────────────── */
+  async function searchSongs() {
+    const text = document.getElementById('songList').value.trim();
+    if (!text) { showStatus('Please enter a song list', 'error'); return; }
+
+    document.getElementById('searchBtn').disabled = true;
+    showStatus('Searching Apple Music for each song…', 'loading');
+    document.getElementById('resultsSection').style.display = 'none';
+
+    try {
+      const res = await fetch('/apple/search-songs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ song_list: text }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        searchResults = data.results;
+        renderResults(data.results);
+        document.getElementById('resultsSection').style.display = 'block';
+        showStatus(`✓ Found matches for ${data.results.length} songs`, 'success');
+        document.getElementById('resultsSection').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      } else {
+        showStatus(`Error: ${data.error}`, 'error');
+      }
+    } catch (e) {
+      showStatus(`Error: ${e.message}`, 'error');
+    } finally {
+      document.getElementById('searchBtn').disabled = false;
+    }
+  }
+
+  function renderResults(results) {
+    const container = document.getElementById('resultsContainer');
+    container.innerHTML = '';
+    results.forEach((result, i) => {
+      const q = result.query;
+      const div = document.createElement('div');
+      div.className = 'song-result';
+      let noteHtml = q.note ? ` <span class="note">(${q.note})</span>` : '';
+      let matchesHtml = '';
+      if (result.matches.length === 0) {
+        matchesHtml = '<div class="no-match">No matches found on Apple Music</div>';
+      } else {
+        result.matches.forEach((match, j) => {
+          const checked = j === 0 ? 'checked' : '';
+          matchesHtml += `
+            <label class="match-option">
+              <input type="radio" name="track_${i}" value="${match.id}" ${checked} />
+              <img src="${match.album_art || ''}" alt="" onerror="this.style.display='none'" />
+              <div class="match-info">
+                <div class="match-name">${match.name}</div>
+                <div class="match-detail">${match.artists} · ${match.album}</div>
+              </div>
+              <span class="match-score">${(match.score * 100).toFixed(0)}%</span>
+            </label>`;
+        });
+      }
+      div.innerHTML = `
+        <div class="song-query">${q.song}${noteHtml}
+          <span style="color:#999;font-weight:400"> — ${q.artist}</span>
+        </div>
+        <div class="match-options">${matchesHtml}</div>`;
+      container.appendChild(div);
+    });
+  }
+
+  /* ── Create ─────────────────────────────────────────────────── */
+  async function createPlaylist() {
+    if (!musicKit || !musicKit.isAuthorized) {
+      showStatus('Please connect to Apple Music first.', 'error');
+      return;
+    }
+    const topVal    = (document.getElementById('playlistNameTop')    || {}).value || '';
+    const bottomVal = (document.getElementById('playlistNameBottom') || {}).value || '';
+    const name = (topVal.trim() || bottomVal.trim()) || 'My Custom Playlist';
+
+    const trackIds = [];
+    searchResults.forEach((_, i) => {
+      const selected = document.querySelector(`input[name="track_${i}"]:checked`);
+      if (selected) trackIds.push(selected.value);
+    });
+    if (!trackIds.length) { showStatus('No tracks selected', 'error'); return; }
+
+    setCreateBtnsDisabled(true);
+    showStatus('Creating playlist on Apple Music…', 'loading');
+
+    try {
+      const res = await fetch('/apple/create-playlist', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Music-User-Token': musicKit.musicUserToken,
+        },
+        body: JSON.stringify({ playlist_name: name, track_ids: trackIds }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        showStatus(`✓ Playlist "${data.playlist_name}" created with ${data.track_count} tracks!`, 'success');
+        const box = document.getElementById('successBox');
+        box.style.display = 'block';
+        box.innerHTML = data.playlist_url
+          ? `🎉 <strong>${data.playlist_name}</strong> created!<br>
+             <a href="${data.playlist_url}" target="_blank" rel="noopener">Open in Apple Music →</a>`
+          : `🎉 <strong>${data.playlist_name}</strong> created in your Apple Music library!`;
+      } else {
+        showStatus(`Error: ${data.error}`, 'error');
+      }
+    } catch (e) {
+      showStatus(`Error: ${e.message}`, 'error');
+    } finally {
+      setCreateBtnsDisabled(false);
+    }
+  }
+</script>
+{% endblock %}
