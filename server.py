@@ -16,6 +16,7 @@ import json
 import logging
 import sqlite3
 import secrets
+import hashlib
 import datetime
 import mimetypes
 import subprocess
