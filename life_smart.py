@@ -23,11 +23,21 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 import re
 import time
 from pathlib import Path
 
 import gh_models
+
+log = logging.getLogger("mw-backend")
+
+# Output budget. gpt-5-mini is a REASONING model: reasoning tokens count against
+# max_completion_tokens, so a small value can be fully consumed by reasoning,
+# leaving empty content. Give it real headroom (this is the OUTPUT cap and is
+# independent of the ~4000-token INPUT/request cap).
+GEN_MAX_TOKENS = 4000
+GEN_TIMEOUT = 90
 
 # ── Taxonomy (authoritative). Model picks (category, kind); code owns the rest.
 #    kind -> (days_before_event, points)
@@ -217,9 +227,11 @@ def _generate_chunk(events_chunk, today_iso, model):
         for sid, e in idx.items()
     ]
     messages = build_messages(compact, today_iso)
-    content = gh_models.chat_completion(messages, model=model, json_object=True, max_tokens=1200)
+    content = gh_models.chat_completion(
+        messages, model=model, json_object=True, max_tokens=GEN_MAX_TOKENS, timeout=GEN_TIMEOUT)
     data = _parse_json(content)
     if not (isinstance(data, dict) and isinstance(data.get("items"), list)):
+        log.info("[life] batch output not valid JSON (content len=%d); retrying", len(content or ""))
         repair = messages + [
             {"role": "assistant", "content": (content or "")[:600]},
             {"role": "user", "content":
@@ -227,9 +239,20 @@ def _generate_chunk(events_chunk, today_iso, model):
                 '{"items":[{"eventId":"...","category":"...","tasks":[{"kind":"...","title":"..."}]}]}. '
                 'No prose, no markdown.'},
         ]
-        content = gh_models.chat_completion(repair, model=model, json_object=True, max_tokens=1200)
+        content = gh_models.chat_completion(
+            repair, model=model, json_object=True, max_tokens=GEN_MAX_TOKENS, timeout=GEN_TIMEOUT)
         data = _parse_json(content)
-    return resolve_items(data, idx, today_iso)
+
+    items = data.get("items") if isinstance(data, dict) else None
+    n_items = len(items) if isinstance(items, list) else 0
+    resolved = resolve_items(data, idx, today_iso)
+    if n_items and not resolved:
+        log.warning("[life] batch: %d model items but 0 resolved (enum/id mismatch?); sample=%s",
+                    n_items, json.dumps(items[:2])[:400])
+    else:
+        log.info("[life] batch: %d events -> %d model items -> %d reminders (content len=%d)",
+                 len(events_chunk), n_items, len(resolved), len(content or ""))
+    return resolved
 
 
 def generate_tasks(events, today_iso, model=None):
