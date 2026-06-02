@@ -55,7 +55,14 @@ def _client_config():
 # ── OAuth ──────────────────────────────────────────────────────────────────────
 
 def build_auth_url(state):
-    flow = Flow.from_client_config(_client_config(), scopes=SCOPES, redirect_uri=GOOGLE_REDIRECT_URI)
+    # autogenerate_code_verifier=False disables PKCE. We're a confidential web
+    # client (client_secret), and connect/callback are separate stateless
+    # requests, so there's no verifier to carry between them — without this,
+    # Google rejects the exchange with "Missing code verifier".
+    flow = Flow.from_client_config(
+        _client_config(), scopes=SCOPES, redirect_uri=GOOGLE_REDIRECT_URI,
+        autogenerate_code_verifier=False,
+    )
     auth_url, _ = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
@@ -67,7 +74,14 @@ def build_auth_url(state):
 
 def exchange_code(code):
     """Exchange an auth code for credentials. Returns {refresh_token, scope, email}."""
-    flow = Flow.from_client_config(_client_config(), scopes=SCOPES, redirect_uri=GOOGLE_REDIRECT_URI)
+    # autogenerate_code_verifier=False disables PKCE. We're a confidential web
+    # client (client_secret), and connect/callback are separate stateless
+    # requests, so there's no verifier to carry between them — without this,
+    # Google rejects the exchange with "Missing code verifier".
+    flow = Flow.from_client_config(
+        _client_config(), scopes=SCOPES, redirect_uri=GOOGLE_REDIRECT_URI,
+        autogenerate_code_verifier=False,
+    )
     flow.fetch_token(code=code)
     creds = flow.credentials
     email = ""
