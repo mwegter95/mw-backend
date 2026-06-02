@@ -29,7 +29,9 @@ from pathlib import Path
 GITHUB_MODELS_API = os.environ.get(
     "GITHUB_MODELS_API", "https://models.inference.ai.azure.com"
 ).rstrip("/")
-DEFAULT_MODEL = os.environ.get("LIFE_AI_MODEL", "gpt-4o-mini")
+# GPT-5.4 mini is the default/only model. Override with LIFE_AI_MODEL if the
+# GitHub Models catalog id differs (e.g. a publisher prefix).
+DEFAULT_MODEL = os.environ.get("LIFE_AI_MODEL", "gpt-5.4-mini")
 
 _TOKEN_CACHE = {"token": None, "ts": 0.0}
 _TOKEN_TTL = 300  # re-resolve at most every 5 minutes
@@ -100,6 +102,38 @@ def resolve_token(force=False):
 
 # ── Chat completion (non-streaming; the generator just needs the final text) ──
 
+def _uses_completion_tokens(model):
+    """GPT-5 family + o-series reasoning models use `max_completion_tokens` and
+    reject custom `temperature`/`top_p`."""
+    m = (model or "").lower()
+    return m.startswith("gpt-5") or "gpt-5" in m or m.startswith(("o1", "o3", "o4"))
+
+
+def _post_chat(body, timeout):
+    token = resolve_token()
+    if not token:
+        raise GitHubModelsError(
+            "No GitHub token available for the Models API. Set GITHUB_MODELS_TOKEN "
+            "(or GITHUB_TOKEN) on the server, or authenticate the GitHub CLI."
+        )
+    req = urllib.request.Request(
+        f"{GITHUB_MODELS_API}/chat/completions",
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "ignore")[:600]
+        raise GitHubModelsError(f"GitHub Models API {e.code}: {detail}")
+    except urllib.error.URLError as e:
+        raise GitHubModelsError(f"GitHub Models API unreachable: {e}")
+    choices = payload.get("choices") or [{}]
+    return ((choices[0].get("message") or {}).get("content") or "")
+
+
 def chat_completion(
     messages,
     model=None,
@@ -109,45 +143,35 @@ def chat_completion(
     timeout=60,
 ):
     """POST to the OpenAI-compatible chat/completions endpoint and return the
-    assistant message text. Set json_object=True to ask for a JSON response."""
-    token = resolve_token()
-    if not token:
-        raise GitHubModelsError(
-            "No GitHub token available for the Models API. Set GITHUB_MODELS_TOKEN "
-            "(or GITHUB_TOKEN) on the server, or authenticate the GitHub CLI."
-        )
-
-    body = {
-        "model": model or DEFAULT_MODEL,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "top_p": 1,
-        "stream": False,
-    }
+    assistant message text. Adapts params to the model family and falls back to
+    a minimal body if the endpoint rejects an optional parameter."""
+    model = model or DEFAULT_MODEL
+    body = {"model": model, "messages": messages, "stream": False}
     if json_object:
         body["response_format"] = {"type": "json_object"}
+    if _uses_completion_tokens(model):
+        body["max_completion_tokens"] = max_tokens   # GPT-5 / reasoning family
+    else:
+        body["max_tokens"] = max_tokens
+        body["temperature"] = temperature
+        body["top_p"] = 1
 
-    req = urllib.request.Request(
-        f"{GITHUB_MODELS_API}/chat/completions",
-        data=json.dumps(body).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {token}",
-        },
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "ignore")[:500]
-        raise GitHubModelsError(f"GitHub Models API {e.code}: {detail}")
-    except urllib.error.URLError as e:
-        raise GitHubModelsError(f"GitHub Models API unreachable: {e}")
-
-    choices = payload.get("choices") or [{}]
-    return ((choices[0].get("message") or {}).get("content") or "")
+        return _post_chat(body, timeout)
+    except GitHubModelsError as e:
+        msg = str(e).lower()
+        # Some deployments reject specific params — retry once, stripped down.
+        param_err = "400" in msg and any(
+            k in msg for k in (
+                "temperature", "top_p", "max_tokens", "max_completion_tokens",
+                "response_format", "unsupported", "unknown", "not supported",
+            )
+        )
+        if not param_err:
+            raise
+        minimal = {"model": model, "messages": messages, "stream": False}
+        minimal["max_completion_tokens" if _uses_completion_tokens(model) else "max_tokens"] = max_tokens
+        return _post_chat(minimal, timeout)
 
 
 def health():

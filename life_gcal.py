@@ -156,91 +156,11 @@ def list_upcoming_events(refresh_token, days=90, max_events=400):
 
 
 # ── AI generation ─────────────────────────────────────────────────────────────
+# The smart-tasking prompt/engine lives in life_smart.py + the life_skills/
+# skill library (a core contract + a router/triage skill + per-category skills,
+# orchestrated by the model). The model only classifies + phrases; life_smart
+# deterministically computes dates/points and validates everything.
 
-SYSTEM_PROMPT = """You turn a person's upcoming calendar events into a SHORT list of proactive, actionable prep reminders for their personal habit dashboard.
-
-Rules:
-- Only create reminders for events that genuinely benefit from advance prep: birthdays, anniversaries, weddings, trips/flights, personal milestones, appointments needing prep, holidays that need planning.
-- IGNORE routine noise: regular work meetings, standups, recurring focus blocks, lunches, generic busy/free blocks.
-- Give each reminder a sensible LEAD-TIME date BEFORE the event (e.g. "buy a gift" ~7 days before a birthday; "plan something" ~10 days before; "pack / check in" ~1 day before a trip). The lead-time date must be today or later, and on or before the event date.
-- Be specific and warm: "Buy Mom a birthday gift", not "Birthday reminder". For a birthday you may create up to 2 reminders (e.g. get a gift, make plans).
-- points: 1 (small), 2 (medium), 3 (meaningful effort).
-
-Return STRICT JSON only, no prose:
-{"tasks":[{"title":"...","date":"YYYY-MM-DD","points":1,"category":"Calendar","sourceEventId":"<id of the source event>"}]}
-If nothing warrants a reminder, return {"tasks":[]}."""
-
-
-def build_messages(events, today_iso):
-    compact = [
-        {"id": e["id"], "title": e["title"], "date": e["date"], "allDay": e["allDay"]}
-        for e in events
-    ]
-    user = (
-        f"Today is {today_iso}. Here are the upcoming events as JSON:\n\n"
-        f"{json.dumps(compact, ensure_ascii=False)}\n\n"
-        "Produce the smart reminders now."
-    )
-    return [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user},
-    ]
-
-
-def _parse_tasks_json(content):
-    content = (content or "").strip()
-    if content.startswith("```"):
-        content = content.strip("`")
-        nl = content.find("\n")
-        if nl != -1:
-            content = content[nl + 1:]
-    try:
-        return json.loads(content)
-    except Exception:
-        a, b = content.find("{"), content.rfind("}")
-        if a == -1 or b == -1:
-            return {}
-        try:
-            return json.loads(content[a:b + 1])
-        except Exception:
-            return {}
-
-
-def generate_tasks(events, today_iso, max_events_for_ai=120):
-    """Call GitHub Models and return a list of validated task dicts."""
-    if not events:
-        return []
-    events = events[:max_events_for_ai]
-    messages = build_messages(events, today_iso)
-    try:
-        content = gh_models.chat_completion(messages, json_object=True, max_tokens=1500)
-    except gh_models.GitHubModelsError:
-        # Some models/endpoints reject response_format; retry as plain text.
-        content = gh_models.chat_completion(messages, json_object=False, max_tokens=1500)
-
-    data = _parse_tasks_json(content)
-    valid_ids = {e["id"] for e in events}
-    tasks = []
-    for t in (data.get("tasks") or []):
-        title = (t.get("title") or "").strip()
-        date = (t.get("date") or "").strip()[:10]
-        if not title or len(date) != 10:
-            continue
-        if date < today_iso:
-            date = today_iso
-        try:
-            pts = int(t.get("points", 1))
-        except Exception:
-            pts = 1
-        pts = max(1, min(3, pts))
-        src = (t.get("sourceEventId") or "").strip()
-        if src and src not in valid_ids:
-            src = ""  # model hallucinated an id; fall back to title/date keying
-        tasks.append({
-            "title": title[:120],
-            "date": date,
-            "points": pts,
-            "category": (t.get("category") or "Calendar").strip()[:30] or "Calendar",
-            "sourceEventId": src,
-        })
-    return tasks
+def generate_tasks(events, today_iso, max_events_for_ai=None):
+    import life_smart
+    return life_smart.generate_tasks(events, today_iso)

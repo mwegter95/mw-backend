@@ -7,9 +7,19 @@ birthday → "buy a gift" a week before). Generation runs on connect and then
 daily via an in-process scheduler.
 
 ## Files
-- `gh_models.py` — GitHub Models client (token resolution + chat). Port of code-genius `llm.ts`.
-- `life_gcal.py` — Google OAuth, event listing, and AI task generation.
+- `gh_models.py` — GitHub Models client (token resolution + chat, GPT-5-family aware). Port of code-genius `llm.ts`.
+- `life_gcal.py` — Google OAuth + event listing (delegates task generation to `life_smart`).
+- `life_smart.py` — the smart-tasking engine: composes the skill library, calls the model, and deterministically resolves dates/points/validation.
+- `life_skills/` — the skill library (core contract + router/triage + one skill per category + examples). See `life_skills/README.md`.
 - `server.py` — routes, encrypted token storage, reminder upsert/prune, scheduler.
+
+## Smart-tasking engine (tuned for GPT-5.4 mini)
+The model only **classifies** each event (`category`) and **phrases** ≤2 short
+task titles from a closed set of `kind`s. The code owns everything mechanical —
+the reminder **date** (lead-time table in `life_smart.LEAD`), **points**, enum
+validation, dedup, and caps — so the model literally can't emit a broken date or
+runaway output. To tweak behavior, edit the markdown skills in `life_skills/`
+and/or the `LEAD` table; see `life_skills/README.md` to add a category.
 
 ## Routes (all under the existing Life auth: JWT or device token)
 - `GET  /api/life/ai/health` — verify the GitHub Models token works (use on the Surface).
@@ -29,8 +39,8 @@ GOOGLE_CLIENT_ID=xxxxxxxx.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=xxxxxxxx
 GOOGLE_REDIRECT_URI=https://api.michaelwegter.com/api/life/gcal/callback
 GITHUB_MODELS_TOKEN=ghp_or_fine_grained_pat_with_models_access
-# optional:
-LIFE_AI_MODEL=gpt-4o-mini
+# optional (defaults to gpt-5.4-mini; set to the exact GitHub Models id if different):
+LIFE_AI_MODEL=gpt-5.4-mini
 LIFE_DASHBOARD_URL=https://mwegter95.github.io/life-dashboard/
 LIFE_SCHEDULER=1            # set 0 to disable the daily auto-generation
 ```
