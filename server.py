@@ -492,6 +492,13 @@ def init_db():
         conn.commit()
     except Exception:
         pass  # column already exists
+    # Migrate: add last_synced_at / last_generated_at to life_gcal_accounts
+    for _col, _type in (("last_synced_at", "DATETIME"), ("last_generated_at", "DATETIME")):
+        try:
+            conn.execute(f"ALTER TABLE life_gcal_accounts ADD COLUMN {_col} {_type}")
+            conn.commit()
+        except Exception:
+            pass  # column already exists
     conn.commit()
     conn.close()
     print(f"✓ Database ready: {DB_PATH}")
@@ -3520,6 +3527,7 @@ def life_smart_generate():
     try:
         result = _smart_generate_for_owner(db, g.owner_type, g.owner_id)
     except Exception as e:
+        log.exception("[life] smart-tasks generate failed for %s:%s", g.owner_type, g.owner_id)
         return jsonify({"error": str(e)}), 400
     return jsonify({"ok": True, **result})
 
