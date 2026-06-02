@@ -27,11 +27,15 @@ import urllib.request
 from pathlib import Path
 
 GITHUB_MODELS_API = os.environ.get(
-    "GITHUB_MODELS_API", "https://models.inference.ai.azure.com"
+    "GITHUB_MODELS_API", "https://models.github.ai/inference"
 ).rstrip("/")
-# GPT-5.4 mini is the default/only model. Override with LIFE_AI_MODEL if the
-# GitHub Models catalog id differs (e.g. a publisher prefix).
-DEFAULT_MODEL = os.environ.get("LIFE_AI_MODEL", "gpt-5.4-mini")
+# GitHub Models inference uses publisher-prefixed ids (e.g. "openai/gpt-5-mini").
+# NOTE: gpt-5.4-mini is a GitHub *Copilot* model and is NOT in this inference
+# catalog — the closest available mini is gpt-5-mini. Confirm the exact id your
+# token can call with:
+#   curl -H "Authorization: Bearer <token>" https://models.github.ai/catalog/models
+# and override via LIFE_AI_MODEL if the prefix/version differs.
+DEFAULT_MODEL = os.environ.get("LIFE_AI_MODEL", "openai/gpt-5-mini")
 
 _TOKEN_CACHE = {"token": None, "ts": 0.0}
 _TOKEN_TTL = 300  # re-resolve at most every 5 minutes

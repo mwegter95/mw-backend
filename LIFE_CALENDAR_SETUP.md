@@ -39,8 +39,12 @@ GOOGLE_CLIENT_ID=xxxxxxxx.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=xxxxxxxx
 GOOGLE_REDIRECT_URI=https://api.michaelwegter.com/api/life/gcal/callback
 GITHUB_MODELS_TOKEN=ghp_or_fine_grained_pat_with_models_access
-# optional (defaults to gpt-5.4-mini; set to the exact GitHub Models id if different):
-LIFE_AI_MODEL=gpt-5.4-mini
+# optional — GitHub Models inference catalog id (publisher-prefixed). Default
+# openai/gpt-5-mini. NOTE: gpt-5.4-mini is a Copilot model, NOT in this catalog.
+# Confirm the exact id your token can call (see "Pick the model id" below):
+LIFE_AI_MODEL=openai/gpt-5-mini
+# optional — inference endpoint (default is the current one):
+GITHUB_MODELS_API=https://models.github.ai/inference
 LIFE_DASHBOARD_URL=https://mwegter95.github.io/life-dashboard/
 LIFE_SCHEDULER=1            # set 0 to disable the daily auto-generation
 ```
@@ -71,6 +75,16 @@ The GitHub Models API needs a token with **Models** access. Put it in
 **B. Classic PAT (simplest):** github.com/settings/tokens/new — classic tokens are
 exempt from the models:read requirement and work as-is. No scope needed for Models;
 name it, generate, copy the `ghp_…` token.
+
+## Pick the model id
+GitHub Models inference ids are publisher-prefixed (e.g. `openai/gpt-5-mini`,
+`openai/gpt-4o-mini`) and `gpt-5.4-mini` (a Copilot model) is NOT available here.
+List exactly what your token can call:
+```
+curl -H "Authorization: Bearer <your GITHUB_MODELS_TOKEN>" https://models.github.ai/catalog/models
+```
+Use the `id` of the model you want (a mini is plenty) as `LIFE_AI_MODEL`. Verify
+with `GET /api/life/ai/health` → `{"available": true}`.
 
 ## Deploy on the Surface
 ```
