@@ -31,10 +31,12 @@ from functools import wraps
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent / ".env")
 
-from flask import Flask, request, jsonify, g, send_from_directory, send_file, Response
+from flask import Flask, request, jsonify, g, send_from_directory, send_file, Response, redirect
 from flask_cors import CORS
 import bcrypt
 import jwt
+import time
+import gh_models
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 # ─── Paths & config ──────────────────────────────────────────────────────────
@@ -52,6 +54,10 @@ ACCESS_TTL        = datetime.timedelta(days=7)   # login token stays valid for a
 RESET_TOKEN_TTL_H = int(os.environ.get("RESET_TOKEN_TTL_HOURS", 1))
 GAS_WEBHOOK_URL   = os.environ.get("GAS_WEBHOOK_URL", "")  # Google Apps Script email sender
 FRONTEND_BASE     = os.environ.get("FRONTEND_URL", "https://mwegter95.github.io")
+# Life Dashboard: where the Google Calendar OAuth callback sends the user back,
+# and whether the daily smart-task scheduler thread runs (set LIFE_SCHEDULER=0 to disable).
+LIFE_DASHBOARD_URL     = os.environ.get("LIFE_DASHBOARD_URL", "https://mwegter95.github.io/life-dashboard/")
+LIFE_SCHEDULER_ENABLED = os.environ.get("LIFE_SCHEDULER", "1") != "0"
 
 # Allowed frontend origins (add Netlify URL once deployed)
 _CORS_ORIGINS = list({o for o in [
@@ -259,6 +265,16 @@ app.register_blueprint(apple_bp)
 from yard_seed import seed_for_owner as _yard_seed_for_owner
 from yard_seed_v2 import seed_v2_for_owner as _yard_seed_v2_for_owner
 
+# ─── Life Dashboard: Google Calendar integration ─────────────────────────────
+# Isolated so the server still boots if the Google client libs aren't installed.
+try:
+    import life_gcal
+    _GCAL_AVAILABLE = True
+except Exception as _gcal_import_err:  # pragma: no cover
+    life_gcal = None
+    _GCAL_AVAILABLE = False
+    log.warning("[life] Google Calendar module unavailable: %s", _gcal_import_err)
+
 from werkzeug.exceptions import HTTPException
 
 @app.errorhandler(Exception)
@@ -434,6 +450,21 @@ CREATE TABLE IF NOT EXISTS life_settings (
     owner_id    TEXT NOT NULL,
     mantra      TEXT NOT NULL DEFAULT '',
     updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (owner_type, owner_id)
+);
+
+-- Life Dashboard: a connected Google Calendar account per owner. The OAuth
+-- refresh token is stored encrypted (AES-GCM via the server secret). One row
+-- per owner; read-only calendar scope. last_generated_at gates the scheduler.
+CREATE TABLE IF NOT EXISTS life_gcal_accounts (
+    owner_type        TEXT NOT NULL,
+    owner_id          TEXT NOT NULL,
+    google_email      TEXT NOT NULL DEFAULT '',
+    refresh_token_enc TEXT NOT NULL,
+    scope             TEXT NOT NULL DEFAULT '',
+    connected_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_synced_at    DATETIME,
+    last_generated_at DATETIME,
     PRIMARY KEY (owner_type, owner_id)
 );
 """
@@ -3240,10 +3271,312 @@ def life_put_mantra():
     return jsonify({"ok": True, "mantra": mantra})
 
 
+# ─── Life Dashboard: Google Calendar + AI smart reminders ────────────────────
+
+def _gcal_encrypt(token: str) -> str:
+    return encrypt_bytes(token.encode("utf-8")).hex()
+
+
+def _gcal_decrypt(blob_hex: str) -> str:
+    return decrypt_bytes(bytes.fromhex(blob_hex)).decode("utf-8")
+
+
+def _gcal_state(ot, oi) -> str:
+    """Signed, short-lived state that carries the owner through the OAuth bounce
+    (the callback is a top-level redirect with no auth header)."""
+    return jwt.encode(
+        {"ot": ot, "oi": oi, "p": "gcal", "exp": utc_now() + datetime.timedelta(minutes=15)},
+        SECRET_KEY, algorithm="HS256",
+    )
+
+
+def _gcal_verify_state(tok):
+    try:
+        d = jwt.decode(tok, SECRET_KEY, algorithms=["HS256"])
+        if d.get("p") != "gcal":
+            return None
+        return d.get("ot"), d.get("oi")
+    except jwt.PyJWTError:
+        return None
+
+
+def _gcal_redirect(status):
+    sep = "&" if "?" in LIFE_DASHBOARD_URL else "?"
+    return redirect(f"{LIFE_DASHBOARD_URL}{sep}gcal={status}")
+
+
+def _apply_smart_tasks(db, ot, oi, tasks):
+    """Idempotently upsert AI tasks as dated reminders (life_habits with
+    freq.kind='date', tagged source='gcal-ai'), then prune future-dated AI
+    reminders that are no longer suggested and that the user hasn't touched."""
+    today = utc_now().date().isoformat()
+    new_by_id = {}
+    for t in tasks:
+        seed = t.get("sourceEventId") or (t["title"] + "|" + t["date"])
+        hid = "gcal-" + hashlib.sha1(f"{ot}:{oi}:{seed}".encode("utf-8")).hexdigest()[:16]
+        new_by_id[hid] = {
+            "id": hid,
+            "name": t["title"],
+            "category": t.get("category") or "Calendar",
+            "points": t.get("points", 1),
+            "freq": {"kind": "date", "date": t["date"]},
+            "notes": "",
+            "created": utc_now_iso_legacy(),
+            "source": "gcal-ai",
+            "sourceEventId": t.get("sourceEventId", ""),
+        }
+
+    for hid, habit in new_by_id.items():
+        db.execute(
+            "INSERT INTO life_habits (id, owner_type, owner_id, data, updated_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(id, owner_type, owner_id) DO UPDATE SET "
+            "data=excluded.data, updated_at=excluded.updated_at",
+            (hid, ot, oi, json.dumps(habit), utc_now_iso_legacy()),
+        )
+
+    pruned = 0
+    rows = db.execute(
+        "SELECT id, data FROM life_habits WHERE owner_type=? AND owner_id=?", (ot, oi)
+    ).fetchall()
+    for r in rows:
+        try:
+            h = json.loads(r["data"])
+        except Exception:
+            continue
+        if h.get("source") != "gcal-ai" or r["id"] in new_by_id:
+            continue
+        date = (h.get("freq") or {}).get("date", "")
+        if date and date < today:
+            continue  # keep past reminders for history
+        touched = db.execute(
+            "SELECT 1 FROM life_completions WHERE habit_id=? AND owner_type=? AND owner_id=? LIMIT 1",
+            (r["id"], ot, oi),
+        ).fetchone()
+        if touched:
+            continue
+        db.execute(
+            "DELETE FROM life_habits WHERE id=? AND owner_type=? AND owner_id=?",
+            (r["id"], ot, oi),
+        )
+        pruned += 1
+
+    db.commit()
+    return {"created_or_updated": len(new_by_id), "pruned": pruned}
+
+
+def _smart_generate_for_owner(db, ot, oi):
+    """Fetch ~3 months of events, ask the model for smart reminders, apply them.
+    Used by the manual endpoint, the post-connect kick-off, and the scheduler."""
+    if not (_GCAL_AVAILABLE and life_gcal.is_configured()):
+        raise RuntimeError("Google Calendar integration is not configured")
+    acct = db.execute(
+        "SELECT refresh_token_enc FROM life_gcal_accounts WHERE owner_type=? AND owner_id=?",
+        (ot, oi),
+    ).fetchone()
+    if not acct:
+        raise RuntimeError("No connected Google Calendar")
+    refresh = _gcal_decrypt(acct["refresh_token_enc"])
+    events = life_gcal.list_upcoming_events(refresh, days=90)
+    today = utc_now().date().isoformat()
+    tasks = life_gcal.generate_tasks(events, today)
+    result = _apply_smart_tasks(db, ot, oi, tasks)
+    db.execute(
+        "UPDATE life_gcal_accounts SET last_synced_at=?, last_generated_at=? "
+        "WHERE owner_type=? AND owner_id=?",
+        (utc_now_iso_legacy(), utc_now_iso_legacy(), ot, oi),
+    )
+    db.commit()
+    result["events"] = len(events)
+    return result
+
+
+def _smart_generate_async(ot, oi):
+    """Run a generation on its own DB connection (so the OAuth redirect doesn't
+    block on the model call)."""
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.row_factory = sqlite3.Row
+        try:
+            _smart_generate_for_owner(conn, ot, oi)
+        finally:
+            conn.close()
+    except Exception as e:
+        log.warning("[gcal] async generation failed for %s:%s — %s", ot, oi, e)
+
+
+@app.get("/api/life/ai/health")
+@require_owner
+def life_ai_health():
+    """Verify the GitHub Models token resolves and works (use this on the Surface)."""
+    return jsonify(gh_models.health())
+
+
+@app.get("/api/life/gcal/status")
+@require_owner
+def life_gcal_status():
+    db = get_db()
+    row = db.execute(
+        "SELECT google_email, connected_at, last_synced_at, last_generated_at "
+        "FROM life_gcal_accounts WHERE owner_type=? AND owner_id=?",
+        (g.owner_type, g.owner_id),
+    ).fetchone()
+    return jsonify({
+        "configured": bool(_GCAL_AVAILABLE and life_gcal.is_configured()),
+        "connected": bool(row),
+        "email": row["google_email"] if row else "",
+        "connected_at": row["connected_at"] if row else None,
+        "last_synced_at": row["last_synced_at"] if row else None,
+        "last_generated_at": row["last_generated_at"] if row else None,
+    })
+
+
+@app.get("/api/life/gcal/connect")
+@require_owner
+def life_gcal_connect():
+    if not (_GCAL_AVAILABLE and life_gcal.is_configured()):
+        return jsonify({"error": "Google Calendar integration is not configured on the server."}), 503
+    state = _gcal_state(g.owner_type, g.owner_id)
+    return jsonify({"auth_url": life_gcal.build_auth_url(state)})
+
+
+@app.get("/api/life/gcal/callback")
+def life_gcal_callback():
+    if not (_GCAL_AVAILABLE and life_gcal.is_configured()):
+        return "Google Calendar integration not configured", 503
+    if request.args.get("error"):
+        return _gcal_redirect("error")
+    code = request.args.get("code", "")
+    owner = _gcal_verify_state(request.args.get("state", ""))
+    if not code or not owner:
+        return _gcal_redirect("error")
+    ot, oi = owner
+    try:
+        res = life_gcal.exchange_code(code)
+    except Exception as e:
+        log.warning("[gcal] code exchange failed: %s", e)
+        return _gcal_redirect("error")
+    if not res.get("refresh_token"):
+        # Google only returns a refresh token on first consent; prompt=consent
+        # should force it, but guard anyway.
+        return _gcal_redirect("error")
+    db = get_db()
+    db.execute(
+        "INSERT INTO life_gcal_accounts "
+        "(owner_type, owner_id, google_email, refresh_token_enc, scope, connected_at) "
+        "VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(owner_type, owner_id) DO UPDATE SET "
+        "google_email=excluded.google_email, refresh_token_enc=excluded.refresh_token_enc, "
+        "scope=excluded.scope, connected_at=excluded.connected_at",
+        (ot, oi, res.get("email", ""), _gcal_encrypt(res["refresh_token"]),
+         res.get("scope", ""), utc_now_iso_legacy()),
+    )
+    db.commit()
+    # Kick off a first generation off the request thread so the redirect is snappy.
+    threading.Thread(target=_smart_generate_async, args=(ot, oi), daemon=True).start()
+    return _gcal_redirect("connected")
+
+
+@app.post("/api/life/gcal/disconnect")
+@require_owner
+def life_gcal_disconnect():
+    db = get_db()
+    db.execute(
+        "DELETE FROM life_gcal_accounts WHERE owner_type=? AND owner_id=?",
+        (g.owner_type, g.owner_id),
+    )
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.get("/api/life/gcal/events")
+@require_owner
+def life_gcal_events():
+    if not (_GCAL_AVAILABLE and life_gcal.is_configured()):
+        return jsonify({"error": "Google Calendar integration is not configured."}), 503
+    db = get_db()
+    row = db.execute(
+        "SELECT refresh_token_enc FROM life_gcal_accounts WHERE owner_type=? AND owner_id=?",
+        (g.owner_type, g.owner_id),
+    ).fetchone()
+    if not row:
+        return jsonify({"error": "Google Calendar not connected"}), 404
+    try:
+        days = max(1, min(180, int(request.args.get("days", 90))))
+    except Exception:
+        days = 90
+    try:
+        events = life_gcal.list_upcoming_events(_gcal_decrypt(row["refresh_token_enc"]), days=days)
+    except Exception as e:
+        log.warning("[gcal] events fetch failed: %s", e)
+        return jsonify({"error": "Couldn't fetch events"}), 502
+    return jsonify({"events": events})
+
+
+@app.post("/api/life/smart-tasks/generate")
+@require_owner
+def life_smart_generate():
+    db = get_db()
+    try:
+        result = _smart_generate_for_owner(db, g.owner_type, g.owner_id)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"ok": True, **result})
+
+
+# ─── Life Dashboard: daily smart-task scheduler (Windows-safe, in-process) ───
+
+def _run_due_generations():
+    if not (_GCAL_AVAILABLE and life_gcal.is_configured()):
+        return
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT owner_type, owner_id, last_generated_at FROM life_gcal_accounts"
+        ).fetchall()
+        now = utc_now().replace(tzinfo=None)
+        for r in rows:
+            due = True
+            if r["last_generated_at"]:
+                try:
+                    last_dt = datetime.datetime.fromisoformat(r["last_generated_at"])
+                    due = (now - last_dt) >= datetime.timedelta(hours=20)
+                except Exception:
+                    due = True
+            if not due:
+                continue
+            try:
+                res = _smart_generate_for_owner(conn, r["owner_type"], r["owner_id"])
+                log.info("[life] smart tasks for %s:%s — %s", r["owner_type"], r["owner_id"], res)
+            except Exception as e:
+                log.warning("[life] generation failed for %s:%s — %s", r["owner_type"], r["owner_id"], e)
+    finally:
+        conn.close()
+
+
+def _life_scheduler_loop():
+    log.info("[life] smart-task scheduler started (checks hourly, regenerates ~daily)")
+    while True:
+        try:
+            _run_due_generations()
+        except Exception as e:
+            log.warning("[life] scheduler tick error: %s", e)
+        time.sleep(3600)
+
+
+def start_life_scheduler():
+    if not LIFE_SCHEDULER_ENABLED:
+        log.info("[life] smart-task scheduler disabled (LIFE_SCHEDULER=0)")
+        return
+    threading.Thread(target=_life_scheduler_loop, name="life-smart-scheduler", daemon=True).start()
+
+
 # ─── Startup ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     init_db()
+    start_life_scheduler()
     # Clean up any .status files left in "processing" state from a previous server
     # run whose worker threads/processes were killed when the server restarted.
     _walls_dir = UPLOADS_DIR / "walls"
