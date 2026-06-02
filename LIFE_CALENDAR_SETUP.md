@@ -13,13 +13,18 @@ daily via an in-process scheduler.
 - `life_skills/` — the skill library (core contract + router/triage + one skill per category + examples). See `life_skills/README.md`.
 - `server.py` — routes, encrypted token storage, reminder upsert/prune, scheduler.
 
-## Smart-tasking engine (tuned for GPT-5.4 mini)
+## Smart-tasking engine
 The model only **classifies** each event (`category`) and **phrases** ≤2 short
 task titles from a closed set of `kind`s. The code owns everything mechanical —
 the reminder **date** (lead-time table in `life_smart.LEAD`), **points**, enum
 validation, dedup, and caps — so the model literally can't emit a broken date or
 runaway output. To tweak behavior, edit the markdown skills in `life_skills/`
 and/or the `LEAD` table; see `life_skills/README.md` to add a category.
+
+**Token fit (gpt-5-mini caps requests at ~4000 tokens):** at runtime the engine
+compiles a compact ~350-token prompt from the `LEAD` taxonomy (it does NOT ship
+all the skill `.md` files), collapses recurring series to their next instance,
+and batches events into token-bounded calls. So a packed calendar still fits.
 
 ## Routes (all under the existing Life auth: JWT or device token)
 - `GET  /api/life/ai/health` — verify the GitHub Models token works (use on the Surface).

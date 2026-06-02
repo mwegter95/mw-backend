@@ -163,6 +163,7 @@ def list_upcoming_events(refresh_token, days=90, max_events=400):
                 "date": start[:10],
                 "allDay": all_day,
                 "recurring": bool(ev.get("recurringEventId")),
+                "recurringEventId": ev.get("recurringEventId"),
             })
 
     out.sort(key=lambda e: e["start"])

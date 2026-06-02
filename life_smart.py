@@ -45,66 +45,83 @@ MAX_TASKS_PER_EVENT = 2
 MAX_TASKS_TOTAL = 25
 MAX_EVENTS_FOR_AI = 150
 
+# The life_skills/*.md files are the human-readable spec for each skill. But
+# gpt-5-mini caps requests at ~4000 input tokens, so at RUNTIME we don't ship all
+# of them (~2,100 tokens) — we compile a compact (~400-token) prompt from the
+# LEAD taxonomy above (the authoritative source those files mirror). Edit a skill
+# file and the LEAD table together; robustness comes from the code validation
+# below, not from prompt verbosity.
 SKILLS_DIR = Path(__file__).parent / "life_skills"
-# Order matters: core contract first, router (triage) next, then the category
-# skills the AI orchestrates between, then worked examples.
-SKILL_FILES = [
-    "core.md",
-    "router.md",
-    "skills/birthday.md",
-    "skills/anniversary.md",
-    "skills/wedding.md",
-    "skills/trip.md",
-    "skills/appointment.md",
-    "skills/holiday.md",
-    "skills/social.md",
-    "skills/deadline.md",
-    "skills/generic.md",
-    "examples.md",
-]
 
-_PLAYBOOK = None
+# Events per model call. compact prompt (~400 tok) + one chunk must stay well
+# under the 4000-token request cap, so we batch the events and merge results.
+BATCH_SIZE = 40
+TITLE_INPUT_MAX = 80
+
+_SYSTEM_PROMPT = None
 
 
-def _load_playbook():
-    global _PLAYBOOK
-    if _PLAYBOOK is not None:
-        return _PLAYBOOK
-    parts = []
-    for rel in SKILL_FILES:
-        try:
-            text = (SKILLS_DIR / rel).read_text(encoding="utf-8").strip()
-            if text:
-                parts.append(text)
-        except Exception:
-            continue
-    _PLAYBOOK = "\n\n---\n\n".join(parts) if parts else _FALLBACK_PLAYBOOK
-    return _PLAYBOOK
+def _taxonomy_lines():
+    return "\n".join(f"- {cat}: {', '.join(kinds)}" for cat, kinds in LEAD.items())
 
 
-# Minimal inline fallback so generation still works if the skill files are
-# missing on disk for some reason.
-_FALLBACK_PLAYBOOK = (
-    "You convert calendar events into prep reminders. For each event return "
-    '{"eventId","category","tasks":[{"kind","title"}]}. Categories: '
-    + ", ".join(sorted(LEAD)) + ", ignore. Ignore routine work/noise. "
-    'Output ONLY {"items":[...]}.'
-)
+def _system_prompt():
+    global _SYSTEM_PROMPT
+    if _SYSTEM_PROMPT is None:
+        _SYSTEM_PROMPT = (
+            "You turn calendar events into short prep reminders. For EACH event, pick "
+            "ONE category and 0-2 tasks; OMIT events that don't need prep. Most work/"
+            "routine events are omitted: meetings, standups, syncs, 1:1s, reviews, "
+            "focus/busy/holds, commutes, unnamed lunches or coffees. When unsure, omit.\n\n"
+            "Categories and their ONLY allowed task kinds:\n" + _taxonomy_lines() + "\n\n"
+            "Rules: every task's kind MUST be one of its category's kinds above. "
+            "title <=8 words, specific, warm, imperative, include the person's name if "
+            "present. NO dates, points, emojis, or quotes (the app computes dates+points). "
+            "Max 2 tasks per event, no duplicates.\n\n"
+            "Output ONLY this JSON object, nothing else:\n"
+            '{"items":[{"eventId":"<id>","category":"<category>","tasks":[{"kind":"<kind>","title":"<title>"}]}]}\n'
+            'Include only events that get >=1 task; if none, {"items":[]}.\n\n'
+            'Example input [{"id":"e1","title":"Mom\'s Birthday","date":"2026-06-20"},'
+            '{"id":"e2","title":"Standup","date":"2026-06-03"}] -> '
+            '{"items":[{"eventId":"e1","category":"birthday","tasks":['
+            '{"kind":"gift","title":"Buy Mom a birthday gift"},'
+            '{"kind":"plan","title":"Plan something for Mom\'s birthday"}]}]} '
+            "(e2 omitted as routine work)."
+        )
+    return _SYSTEM_PROMPT
 
 
-def build_messages(events, today_iso):
+def _collapse_recurring(events):
+    """Keep only the soonest instance of each recurring series (events arrive
+    sorted ascending). Collapses e.g. weekly standups to one while keeping the
+    next birthday — a big token saver and cleaner signal."""
+    seen, out = set(), []
+    for e in events:
+        rid = e.get("recurringEventId")
+        if rid:
+            if rid in seen:
+                continue
+            seen.add(rid)
+        out.append(e)
+    return out
+
+
+def _chunks(seq, n):
+    for i in range(0, len(seq), n):
+        yield seq[i:i + n]
+
+
+def build_messages(events_chunk, today_iso):
     compact = [
-        {"id": e["id"], "title": e["title"], "date": e["date"], "allDay": e["allDay"]}
-        for e in events
+        {"id": e["id"], "title": (e.get("title") or "")[:TITLE_INPUT_MAX], "date": e["date"]}
+        for e in events_chunk
     ]
     user = (
-        f"TODAY: {today_iso}\n\n"
-        f"EVENTS (JSON array):\n{json.dumps(compact, ensure_ascii=False)}\n\n"
-        "Classify each event and produce reminders following the skills above. "
-        'Return ONLY the JSON object: {"items":[...]}. No prose, no code fences.'
+        f"TODAY: {today_iso}\nEVENTS:\n{json.dumps(compact, ensure_ascii=False)}\n"
+        'Return ONLY the JSON object {"items":[...]}.'
     )
     return [
-        {"role": "system", "content": _load_playbook()},
+        {"role": "system", "content": _system_prompt()},
         {"role": "user", "content": user},
     ]
 
@@ -190,27 +207,40 @@ def resolve_items(data, events_by_id, today_iso):
     return out
 
 
-def generate_tasks(events, today_iso, model=None):
-    """Full pipeline: classify via the skill playbook, resolve deterministically.
-    One repair retry if the model returns something un-parseable."""
-    if not events:
-        return []
-    events = events[:MAX_EVENTS_FOR_AI]
-    events_by_id = {e["id"]: e for e in events}
-    messages = build_messages(events, today_iso)
-
-    content = gh_models.chat_completion(messages, model=model, json_object=True, max_tokens=2000)
+def _generate_chunk(events_chunk, today_iso, model, events_by_id):
+    messages = build_messages(events_chunk, today_iso)
+    content = gh_models.chat_completion(messages, model=model, json_object=True, max_tokens=1200)
     data = _parse_json(content)
-
     if not (isinstance(data, dict) and isinstance(data.get("items"), list)):
         repair = messages + [
-            {"role": "assistant", "content": (content or "")[:800]},
+            {"role": "assistant", "content": (content or "")[:600]},
             {"role": "user", "content":
                 'That was not valid. Return ONLY a JSON object of the exact form '
                 '{"items":[{"eventId":"...","category":"...","tasks":[{"kind":"...","title":"..."}]}]}. '
                 'No prose, no markdown.'},
         ]
-        content = gh_models.chat_completion(repair, model=model, json_object=True, max_tokens=2000)
+        content = gh_models.chat_completion(repair, model=model, json_object=True, max_tokens=1200)
         data = _parse_json(content)
-
     return resolve_items(data, events_by_id, today_iso)
+
+
+def generate_tasks(events, today_iso, model=None):
+    """Collapse recurring series, classify in token-bounded batches (gpt-5-mini
+    caps requests at ~4000 tokens), and merge the deterministically-resolved
+    reminders. One repair retry per batch on un-parseable output."""
+    if not events:
+        return []
+    events = _collapse_recurring(events)[:MAX_EVENTS_FOR_AI]
+    events_by_id = {e["id"]: e for e in events}
+
+    out = []
+    for i, chunk in enumerate(_chunks(events, BATCH_SIZE)):
+        try:
+            out.extend(_generate_chunk(chunk, today_iso, model, events_by_id))
+        except gh_models.GitHubModelsError:
+            if i == 0:
+                raise          # surface real config errors (401, unknown_model, token cap)
+            break              # a later transient failure — keep what we have
+        if len(out) >= MAX_TASKS_TOTAL:
+            break
+    return out[:MAX_TASKS_TOTAL]

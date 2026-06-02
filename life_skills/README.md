@@ -3,20 +3,23 @@
 A multi-file, model-orchestrated process that turns Google Calendar events into
 dated reminders. Tuned for **GPT-5.4 mini**.
 
-## How it works
-`life_smart.py` composes these files (in order) into one system prompt:
-1. `core.md` — the contract: flow, hard rules, exact JSON output, self-check.
-2. `router.md` — the triage skill: classify each event into one category (or ignore/omit).
-3. `skills/<category>.md` — one skill per category. For each event the model
-   "orchestrates" by routing to the matching skill and using only that skill's
-   allowed `kind`s.
-4. `examples.md` — worked input→output examples.
+## These files are the spec — not the runtime prompt
+`gpt-5-mini` caps requests at ~4,000 input tokens, so shipping all of these
+(~2,100 tokens) plus a real calendar overflows. So at **runtime** `life_smart.py`
+compiles a **compact (~350-token) prompt** from the `LEAD` taxonomy (categories →
+allowed `kind`s) plus terse rules + one example — it does NOT concatenate these
+files. These `.md` files remain the human-readable source of truth for each
+skill; keep them and the `LEAD` table in sync.
 
-The model returns ONLY `{eventId, category, tasks:[{kind, title}]}`. The engine
-then **deterministically** computes the reminder DATE (lead-time table in
-`life_smart.LEAD`) and POINTS, validates enums, drops anything off-contract,
-dedups, and caps (≤2/event, ≤25 total). The model never does date math or sets
-points — that's what makes the output predictable and robust.
+Pipeline:
+1. **Collapse recurring series** to the soonest instance (60 standups → 1; keeps
+   the next birthday).
+2. **Batch** events (`BATCH_SIZE`) into token-bounded calls and merge.
+3. Per batch the model returns ONLY `{eventId, category, tasks:[{kind, title}]}`.
+4. The engine **deterministically** computes the reminder DATE (lead-time table
+   in `life_smart.LEAD`) and POINTS, validates enums, drops anything off-contract,
+   dedups, and caps (≤2/event, ≤25 total). The model never does date math or sets
+   points — that's what makes the output predictable and robust.
 
 ## Robustness layers
 - Closed enums for `category` and `kind`; unknown values are dropped in code.
