@@ -65,11 +65,59 @@ MAX_EVENTS_FOR_AI = 150
 SKILLS_DIR = Path(__file__).parent / "life_skills"
 
 # Events per model call. We send SHORT integer ids (Google ids are long and
-# dominate tokens), so ~80 events + the compact prompt stays well under the
-# 4000-token request cap. Bigger batches = fewer requests = less rate-limit risk.
-BATCH_SIZE = 80
+# dominate tokens), so ~40 events + the compact prompt stays well under the
+# 4000-token request cap.
+BATCH_SIZE = 40
 TITLE_INPUT_MAX = 60
 INTER_BATCH_SLEEP = 2   # seconds between batches, to be gentle on the rate limit
+
+# ── Keyword pre-classifier: high-signal events that MUST get tasks regardless
+#    of what the AI says. These bypass the model entirely so they're never missed.
+_KEYWORD_CATS = [
+    ("birthday",    re.compile(r"\bbirthday\b|\bbday\b", re.IGNORECASE)),
+    ("anniversary", re.compile(r"\banniversary\b", re.IGNORECASE)),
+    ("wedding",     re.compile(r"\bwedding\b|\bbridal\b|\bbachelor(?:ette)?\b", re.IGNORECASE)),
+    ("trip",        re.compile(
+        r"\btrip\b|\btravel\b|\bflight\b|\bvacation\b|\bsafari\b|\bcruise\b"
+        r"|\bhoneymoon\b|\bretreat\b|\bgetaway\b|\brwanda\b|\bafrica\b", re.IGNORECASE)),
+    ("deadline",    re.compile(r"\bdeadline\b|\bdue\b(?:\s|$)", re.IGNORECASE)),
+]
+# Which kinds to auto-generate for each keyword category (max 2)
+_AUTO_KINDS = {
+    "birthday":    ["gift", "plan"],
+    "anniversary": ["gift", "plan"],
+    "wedding":     ["rsvp", "gift"],
+    "trip":        ["arrange", "pack"],
+    "deadline":    ["prep", "complete"],
+}
+# Title templates per kind
+_AUTO_TITLE_TEMPLATES = {
+    "gift":      "Get gift for {}",
+    "plan":      "Plan for {}",
+    "message":   "Send message for {}",
+    "rsvp":      "RSVP for {}",
+    "outfit":    "Plan outfit for {}",
+    "travel":    "Arrange travel for {}",
+    "arrange":   "Arrange for {}",
+    "prep":      "Prep for {}",
+    "pack":      "Pack for {}",
+    "checkin":   "Check in for {}",
+    "documents": "Gather documents for {}",
+    "confirm":   "Confirm {}",
+    "shop":      "Shop for {}",
+    "bring":     "Bring something for {}",
+    "complete":  "Complete {}",
+}
+# Work/routine events to strip BEFORE sending to AI (reduces noise and token cost)
+_WORK_ROUTINE_RE = re.compile(
+    r"^\s*(?:standup|stand[\s\-]up|sync|1:?1|one[\s\-]on[\s\-]one|"
+    r"weekly\s+(?:team\s+)?(?:meeting|sync)|daily\s+(?:standup|sync)|"
+    r"sprint\s+(?:planning|review|retro)|retrospective|"
+    r"all[\s\-]hands|team\s+meeting|focus\s+(?:time|block)|"
+    r"heads[\s\-]down|busy|hold(?:\s+the\s+spot)?|commute|"
+    r"office\s+hours)\s*$",
+    re.IGNORECASE,
+)
 
 _SYSTEM_PROMPT = None
 
@@ -82,24 +130,31 @@ def _system_prompt():
     global _SYSTEM_PROMPT
     if _SYSTEM_PROMPT is None:
         _SYSTEM_PROMPT = (
-            "You turn calendar events into short prep reminders. For EACH event, pick "
-            "ONE category and 0-2 tasks; OMIT events that don't need prep. Most work/"
-            "routine events are omitted: meetings, standups, syncs, 1:1s, reviews, "
-            "focus/busy/holds, commutes, unnamed lunches or coffees. When unsure, omit.\n\n"
-            "Categories and their ONLY allowed task kinds:\n" + _taxonomy_lines() + "\n\n"
+            "You turn calendar events into short prep reminders.\n\n"
+            "ALWAYS generate tasks for: birthdays, anniversaries, weddings, trips (any "
+            "destination name, safari, vacation, flight, retreat), deadlines, appointments, "
+            "holidays, and social events.\n\n"
+            "OMIT ONLY these routine work events: standups, syncs, 1:1s, team meetings, "
+            "sprint reviews/retros, focus blocks, busy/hold blocks, commutes.\n\n"
+            "For each qualifying event, pick ONE category and 1-2 tasks:\n"
+            + _taxonomy_lines() + "\n\n"
             "Rules: every task's kind MUST be one of its category's kinds above. "
             "title <=8 words, specific, warm, imperative, include the person's name if "
-            "present. NO dates, points, emojis, or quotes (the app computes dates+points). "
-            "Max 2 tasks per event, no duplicates.\n\n"
+            "present. NO dates, points, emojis, or quotes (the app computes dates+points).\n\n"
             "Output ONLY this JSON object, nothing else:\n"
             '{"items":[{"eventId":"<id>","category":"<category>","tasks":[{"kind":"<kind>","title":"<title>"}]}]}\n'
             'Include only events that get >=1 task; if none, {"items":[]}.\n\n'
             'Example input [{"id":"e1","title":"Mom\'s Birthday","date":"2026-06-20"},'
-            '{"id":"e2","title":"Standup","date":"2026-06-03"}] -> '
-            '{"items":[{"eventId":"e1","category":"birthday","tasks":['
+            '{"id":"e2","title":"Rwanda Safari Trip","date":"2026-07-10"},'
+            '{"id":"e3","title":"Standup","date":"2026-06-03"}] -> '
+            '{"items":['
+            '{"eventId":"e1","category":"birthday","tasks":['
             '{"kind":"gift","title":"Buy Mom a birthday gift"},'
-            '{"kind":"plan","title":"Plan something for Mom\'s birthday"}]}]} '
-            "(e2 omitted as routine work)."
+            '{"kind":"plan","title":"Plan something for Mom\'s birthday"}]},'
+            '{"eventId":"e2","category":"trip","tasks":['
+            '{"kind":"arrange","title":"Arrange for Rwanda Safari"},'
+            '{"kind":"pack","title":"Pack for Rwanda Safari"}]}'
+            "]} (e3 omitted as routine work)."
         )
     return _SYSTEM_PROMPT
 
@@ -255,24 +310,84 @@ def _generate_chunk(events_chunk, today_iso, model):
     return resolved
 
 
+def _preclassify_keyword_events(events, today_iso):
+    """Guarantee that high-signal events (birthdays, trips, etc.) always get
+    tasks, regardless of what the AI decides. Returns (preclassified_tasks,
+    remaining_events) where remaining_events have work/routine noise stripped."""
+    preclassified, remaining, seen_ids = [], [], set()
+    for e in events:
+        title = e.get("title", "")
+        if _WORK_ROUTINE_RE.match(title):
+            continue  # drop work/routine noise before AI
+        matched_cat = None
+        for cat, pattern in _KEYWORD_CATS:
+            if pattern.search(title):
+                matched_cat = cat
+                break
+        if matched_cat and e.get("date"):
+            real_id = str(e.get("id") or "")
+            try:
+                event_date = datetime.date.fromisoformat(e["date"]).isoformat()
+            except Exception:
+                remaining.append(e)
+                continue
+            kinds_to_use = _AUTO_KINDS.get(matched_cat, list(LEAD[matched_cat].keys())[:2])
+            for kind in kinds_to_use:
+                if kind not in LEAD[matched_cat]:
+                    continue
+                days_before, points = LEAD[matched_cat][kind]
+                lead = _minus_days(event_date, days_before)
+                date = max(today_iso, min(lead, event_date))
+                tmpl = _AUTO_TITLE_TEMPLATES.get(kind, "{}")
+                task_title = tmpl.format(title)[:80]
+                key = (real_id, task_title.lower())
+                if key not in seen_ids:
+                    seen_ids.add(key)
+                    preclassified.append({
+                        "title": task_title,
+                        "date": date,
+                        "points": points,
+                        "category": matched_cat,
+                        "sourceEventId": real_id,
+                    })
+            # Still send to AI so it can produce a nicer/more specific title
+            # (pre-classified tasks act as a safety net, not a replacement)
+            remaining.append(e)
+        else:
+            remaining.append(e)
+    return preclassified, remaining
+
+
 def generate_tasks(events, today_iso, model=None):
-    """Collapse recurring series, classify in token-bounded batches (gpt-5-mini
-    caps requests at ~4000 tokens), and merge the deterministically-resolved
-    reminders. One repair retry per batch on un-parseable output."""
+    """Collapse recurring series, pre-classify high-signal events (birthdays,
+    trips, etc.), classify remaining events in token-bounded batches via AI,
+    and merge the deterministically-resolved reminders."""
     if not events:
         return []
     events = _collapse_recurring(events)[:MAX_EVENTS_FOR_AI]
 
-    out = []
-    for i, chunk in enumerate(_chunks(events, BATCH_SIZE)):
+    # Step 1: Pre-classify keyword events and strip work/routine noise.
+    preclassified, ai_events = _preclassify_keyword_events(events, today_iso)
+    log.info("[life] pre-classified %d tasks from %d keyword events; %d events for AI",
+             len(preclassified), len(events) - len(ai_events), len(ai_events))
+
+    # Step 2: Send remaining events to AI in batches.
+    ai_tasks = []
+    for i, chunk in enumerate(_chunks(ai_events, BATCH_SIZE)):
         if i > 0:
             time.sleep(INTER_BATCH_SLEEP)   # space out calls under the rate limit
         try:
-            out.extend(_generate_chunk(chunk, today_iso, model))
+            ai_tasks.extend(_generate_chunk(chunk, today_iso, model))
         except gh_models.GitHubModelsError:
             if i == 0:
                 raise          # surface real config errors (401, unknown_model, token cap)
             break              # a later transient failure — keep what we have
-        if len(out) >= MAX_TASKS_TOTAL:
+        if len(ai_tasks) >= MAX_TASKS_TOTAL:
             break
+
+    # Step 3: Merge — AI tasks take precedence (richer titles) but pre-classified
+    # tasks fill any gaps for events the AI missed.
+    ai_source_ids = {t["sourceEventId"] for t in ai_tasks}
+    gap_fillers = [t for t in preclassified if t["sourceEventId"] not in ai_source_ids]
+    out = ai_tasks + gap_fillers
     return out[:MAX_TASKS_TOTAL]

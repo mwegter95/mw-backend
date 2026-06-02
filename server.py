@@ -3183,6 +3183,34 @@ def life_delete_habit(habit_id):
     return jsonify({"ok": True})
 
 
+@app.patch("/api/life/smart-tasks/<habit_id>/hidden")
+@require_owner
+def life_patch_smart_hidden(habit_id):
+    """Toggle or set the hidden flag on an AI-generated smart reminder."""
+    db = get_db()
+    ot, oi = g.owner_type, g.owner_id
+    row = db.execute(
+        "SELECT data FROM life_habits WHERE id=? AND owner_type=? AND owner_id=?",
+        (habit_id, ot, oi)
+    ).fetchone()
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+    try:
+        h = json.loads(row["data"])
+    except Exception:
+        return jsonify({"error": "Invalid data"}), 500
+    if h.get("source") != "gcal-ai":
+        return jsonify({"error": "Not a smart task"}), 400
+    body = request.get_json(silent=True) or {}
+    h["hidden"] = bool(body.get("hidden", not h.get("hidden", False)))
+    db.execute(
+        "UPDATE life_habits SET data=?, updated_at=? WHERE id=? AND owner_type=? AND owner_id=?",
+        (json.dumps(h), utc_now_iso_legacy(), habit_id, ot, oi)
+    )
+    db.commit()
+    return jsonify({"ok": True, "hidden": h["hidden"]})
+
+
 @app.post("/api/life/completions")
 @require_owner
 def life_post_completion():
@@ -3335,6 +3363,17 @@ def _apply_smart_tasks(db, ot, oi, tasks):
         }
 
     for hid, habit in new_by_id.items():
+        existing_row = db.execute(
+            "SELECT data FROM life_habits WHERE id=? AND owner_type=? AND owner_id=?",
+            (hid, ot, oi)
+        ).fetchone()
+        if existing_row:
+            try:
+                old_data = json.loads(existing_row["data"])
+                if old_data.get("hidden"):
+                    habit["hidden"] = True
+            except Exception:
+                pass
         db.execute(
             "INSERT INTO life_habits (id, owner_type, owner_id, data, updated_at) "
             "VALUES (?, ?, ?, ?, ?) "
