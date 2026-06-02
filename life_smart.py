@@ -24,6 +24,7 @@ from __future__ import annotations
 import datetime
 import json
 import re
+import time
 from pathlib import Path
 
 import gh_models
@@ -53,10 +54,12 @@ MAX_EVENTS_FOR_AI = 150
 # below, not from prompt verbosity.
 SKILLS_DIR = Path(__file__).parent / "life_skills"
 
-# Events per model call. compact prompt (~400 tok) + one chunk must stay well
-# under the 4000-token request cap, so we batch the events and merge results.
-BATCH_SIZE = 40
-TITLE_INPUT_MAX = 80
+# Events per model call. We send SHORT integer ids (Google ids are long and
+# dominate tokens), so ~80 events + the compact prompt stays well under the
+# 4000-token request cap. Bigger batches = fewer requests = less rate-limit risk.
+BATCH_SIZE = 80
+TITLE_INPUT_MAX = 60
+INTER_BATCH_SLEEP = 2   # seconds between batches, to be gentle on the rate limit
 
 _SYSTEM_PROMPT = None
 
@@ -111,13 +114,9 @@ def _chunks(seq, n):
         yield seq[i:i + n]
 
 
-def build_messages(events_chunk, today_iso):
-    compact = [
-        {"id": e["id"], "title": (e.get("title") or "")[:TITLE_INPUT_MAX], "date": e["date"]}
-        for e in events_chunk
-    ]
+def build_messages(compact_events, today_iso):
     user = (
-        f"TODAY: {today_iso}\nEVENTS:\n{json.dumps(compact, ensure_ascii=False)}\n"
+        f"TODAY: {today_iso}\nEVENTS:\n{json.dumps(compact_events, ensure_ascii=False)}\n"
         'Return ONLY the JSON object {"items":[...]}.'
     )
     return [
@@ -165,6 +164,9 @@ def resolve_items(data, events_by_id, today_iso):
         ev = events_by_id.get(eid)
         if not ev:
             continue
+        # `eid` is the short prompt id; the real Google event id is what we
+        # persist (so re-runs dedup to the same reminder, not a new one).
+        real_id = str(ev.get("id") or eid)
         cat = str(item.get("category") or "").strip().lower()
         if cat not in LEAD:        # "ignore" or anything unknown → no tasks
             continue
@@ -190,7 +192,7 @@ def resolve_items(data, events_by_id, today_iso):
             lead = _minus_days(event_date, days_before)
             # Clamp to [today, event_date]; ISO date strings sort chronologically.
             date = max(today_iso, min(lead, event_date))
-            key = (eid, title.lower())
+            key = (real_id, title.lower())
             if key in seen:
                 continue
             seen.add(key)
@@ -199,7 +201,7 @@ def resolve_items(data, events_by_id, today_iso):
                 "date": date,
                 "points": points,
                 "category": cat,
-                "sourceEventId": eid,
+                "sourceEventId": real_id,
             })
             per_event += 1
             if len(out) >= MAX_TASKS_TOTAL:
@@ -207,8 +209,14 @@ def resolve_items(data, events_by_id, today_iso):
     return out
 
 
-def _generate_chunk(events_chunk, today_iso, model, events_by_id):
-    messages = build_messages(events_chunk, today_iso)
+def _generate_chunk(events_chunk, today_iso, model):
+    # Short integer ids keep the request tiny; map them back to real events.
+    idx = {str(i): e for i, e in enumerate(events_chunk)}
+    compact = [
+        {"id": sid, "title": (e.get("title") or "")[:TITLE_INPUT_MAX], "date": e["date"]}
+        for sid, e in idx.items()
+    ]
+    messages = build_messages(compact, today_iso)
     content = gh_models.chat_completion(messages, model=model, json_object=True, max_tokens=1200)
     data = _parse_json(content)
     if not (isinstance(data, dict) and isinstance(data.get("items"), list)):
@@ -221,7 +229,7 @@ def _generate_chunk(events_chunk, today_iso, model, events_by_id):
         ]
         content = gh_models.chat_completion(repair, model=model, json_object=True, max_tokens=1200)
         data = _parse_json(content)
-    return resolve_items(data, events_by_id, today_iso)
+    return resolve_items(data, idx, today_iso)
 
 
 def generate_tasks(events, today_iso, model=None):
@@ -231,12 +239,13 @@ def generate_tasks(events, today_iso, model=None):
     if not events:
         return []
     events = _collapse_recurring(events)[:MAX_EVENTS_FOR_AI]
-    events_by_id = {e["id"]: e for e in events}
 
     out = []
     for i, chunk in enumerate(_chunks(events, BATCH_SIZE)):
+        if i > 0:
+            time.sleep(INTER_BATCH_SLEEP)   # space out calls under the rate limit
         try:
-            out.extend(_generate_chunk(chunk, today_iso, model, events_by_id))
+            out.extend(_generate_chunk(chunk, today_iso, model))
         except gh_models.GitHubModelsError:
             if i == 0:
                 raise          # surface real config errors (401, unknown_model, token cap)

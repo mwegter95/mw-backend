@@ -42,7 +42,13 @@ _TOKEN_TTL = 300  # re-resolve at most every 5 minutes
 
 
 class GitHubModelsError(RuntimeError):
-    """Raised when the Models API is unreachable, unauthorized, or errors out."""
+    """Raised when the Models API is unreachable, unauthorized, or errors out.
+    Carries the HTTP status and any Retry-After (seconds) for 429 handling."""
+
+    def __init__(self, message, status=None, retry_after=None):
+        super().__init__(message)
+        self.status = status
+        self.retry_after = retry_after
 
 
 # ── Token resolution ──────────────────────────────────────────────────────────
@@ -131,7 +137,15 @@ def _post_chat(body, timeout):
             payload = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "ignore")[:600]
-        raise GitHubModelsError(f"GitHub Models API {e.code}: {detail}")
+        retry_after = None
+        try:
+            ra = e.headers.get("Retry-After") or e.headers.get("retry-after")
+            if ra:
+                retry_after = int(float(ra))
+        except Exception:
+            pass
+        raise GitHubModelsError(f"GitHub Models API {e.code}: {detail}",
+                                status=e.code, retry_after=retry_after)
     except urllib.error.URLError as e:
         raise GitHubModelsError(f"GitHub Models API unreachable: {e}")
     choices = payload.get("choices") or [{}]
@@ -160,22 +174,32 @@ def chat_completion(
         body["temperature"] = temperature
         body["top_p"] = 1
 
-    try:
-        return _post_chat(body, timeout)
-    except GitHubModelsError as e:
-        msg = str(e).lower()
-        # Some deployments reject specific params — retry once, stripped down.
-        param_err = "400" in msg and any(
-            k in msg for k in (
-                "temperature", "top_p", "max_tokens", "max_completion_tokens",
-                "response_format", "unsupported", "unknown", "not supported",
+    # Up to 2 retries on 429 (free-tier rate limit). Respect Retry-After when
+    # it's short; if it's long (a daily quota) don't block — raise so the caller
+    # can surface it.
+    for attempt in range(3):
+        try:
+            return _post_chat(body, timeout)
+        except GitHubModelsError as e:
+            if e.status == 429 and attempt < 2:
+                wait = e.retry_after if e.retry_after is not None else 5 * (attempt + 1)
+                if wait > 60:
+                    raise          # long/daily limit — pointless to sleep on it
+                time.sleep(wait)
+                continue
+            msg = str(e).lower()
+            # Some deployments reject specific params — retry once, stripped down.
+            param_err = "400" in msg and any(
+                k in msg for k in (
+                    "temperature", "top_p", "max_tokens", "max_completion_tokens",
+                    "response_format", "unsupported", "unknown", "not supported",
+                )
             )
-        )
-        if not param_err:
-            raise
-        minimal = {"model": model, "messages": messages, "stream": False}
-        minimal["max_completion_tokens" if _uses_completion_tokens(model) else "max_tokens"] = max_tokens
-        return _post_chat(minimal, timeout)
+            if not param_err:
+                raise
+            minimal = {"model": model, "messages": messages, "stream": False}
+            minimal["max_completion_tokens" if _uses_completion_tokens(model) else "max_tokens"] = max_tokens
+            return _post_chat(minimal, timeout)
 
 
 def health():
