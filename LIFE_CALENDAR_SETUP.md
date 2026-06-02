@@ -56,9 +56,21 @@ The GitHub token is resolved env-var-first, then `gh auth token`, then Copilot's
 5. Copy the Client ID + Secret into `.env`.
 
 ## GitHub token (for the AI)
-Create a PAT at **github.com/settings/personal-access-tokens** (fine-grained, with
-**Models: Read-only** if shown; a classic PAT also works), put it in
-`GITHUB_MODELS_TOKEN`.
+The GitHub Models API needs a token with **Models** access. Put it in
+`GITHUB_MODELS_TOKEN`. Two ways:
+
+**A. Fine-grained PAT (scoped):** github.com/settings/personal-access-tokens/new
+1. **Resource owner = your personal account** (the Models permission only shows
+   when you own the resource — an org won't show it).
+2. Scroll to **Permissions → Account permissions** (BELOW Repository permissions).
+3. **Models → Access: Read-only** (this is the `models:read` permission, required
+   since May 2025 — without it the API returns 401 "The `models` permission is
+   required").
+4. Generate, copy the `github_pat_…` token.
+
+**B. Classic PAT (simplest):** github.com/settings/tokens/new — classic tokens are
+exempt from the models:read requirement and work as-is. No scope needed for Models;
+name it, generate, copy the `ghp_…` token.
 
 ## Deploy on the Surface
 ```
