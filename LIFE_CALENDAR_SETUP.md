@@ -45,9 +45,10 @@ GOOGLE_CLIENT_SECRET=xxxxxxxx
 GOOGLE_REDIRECT_URI=https://api.michaelwegter.com/api/life/gcal/callback
 GITHUB_MODELS_TOKEN=ghp_or_fine_grained_pat_with_models_access
 # optional — GitHub Models inference catalog id (publisher-prefixed). Default
-# openai/gpt-5-mini. NOTE: gpt-5.4-mini is a Copilot model, NOT in this catalog.
-# Confirm the exact id your token can call (see "Pick the model id" below):
-LIFE_AI_MODEL=openai/gpt-5-mini
+# openai/gpt-4o-mini (reliable JSON + higher limits). gpt-5-mini is a reasoning
+# model that returned empty output for this task; gpt-5.4-mini is Copilot-only,
+# not in this catalog. Confirm callable ids (see "Pick the model id" below):
+LIFE_AI_MODEL=openai/gpt-4o-mini
 # optional — inference endpoint (default is the current one):
 GITHUB_MODELS_API=https://models.github.ai/inference
 LIFE_DASHBOARD_URL=https://mwegter95.github.io/life-dashboard/
