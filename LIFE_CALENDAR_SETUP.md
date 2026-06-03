@@ -1,111 +1,120 @@
 # Life Dashboard — Google Calendar + AI smart reminders
 
-Connects a user's Google Calendar (read-only), shows upcoming events in the
-dashboard, and uses the **GitHub Models API** (same approach as `code-genius`)
-to turn the next ~3 months of events into **smart dated reminders** (e.g. a
-birthday → "buy a gift" a week before). Generation runs on connect and then
-daily via an in-process scheduler.
+Connects a user's Google Calendar read-only, shows upcoming events in the
+dashboard, and uses the GitHub Models API to turn upcoming calendar events into
+smart dated reminders such as birthday gifts, travel prep, appointment paperwork,
+holiday planning, and real deadlines. Generation runs on connect and then daily
+via the in-process scheduler.
 
 ## Files
-- `gh_models.py` — GitHub Models client (token resolution + chat, GPT-5-family aware). Port of code-genius `llm.ts`.
-- `life_gcal.py` — Google OAuth + event listing (delegates task generation to `life_smart`).
-- `life_smart.py` — the smart-tasking engine: composes the skill library, calls the model, and deterministically resolves dates/points/validation.
-- `life_skills/` — the skill library (core contract + router/triage + one skill per category + examples). See `life_skills/README.md`.
+- `gh_models.py` — GitHub Models client: token resolution, chat call, model-specific
+  request handling, and JSON/transport fallback behavior.
+- `life_gcal.py` — Google OAuth and event listing; delegates task generation to
+  `life_smart`.
+- `life_smart.py` — smart-tasking engine: composes compact prompt, calls model,
+  validates output, resolves dates/points from `LEAD`, dedups, caps, upserts, and
+  logs drops.
+- `life_skills/` — human-readable skill library: core contract, router, per-category
+  skill files, and examples. See `life_skills/README.md`.
 - `server.py` — routes, encrypted token storage, reminder upsert/prune, scheduler.
 
-## Smart-tasking engine
-The model only **classifies** each event (`category`) and **phrases** ≤2 short
-task titles from a closed set of `kind`s. The code owns everything mechanical —
-the reminder **date** (lead-time table in `life_smart.LEAD`), **points**, enum
-validation, dedup, and caps — so the model literally can't emit a broken date or
-runaway output. To tweak behavior, edit the markdown skills in `life_skills/`
-and/or the `LEAD` table; see `life_skills/README.md` to add a category.
+## Smart-tasking engine contract
+The model only classifies each event and phrases up to 2 short task titles from a
+closed set of `kind`s. The code owns mechanical decisions: reminder date, points,
+enum validation, deduplication, stable idempotency keys, caps, and pruning. The
+model must never emit dates, points, durations, markdown, or commentary.
 
-**Token fit (gpt-5-mini caps requests at ~4000 tokens):** at runtime the engine
-compiles a compact ~350-token prompt from the `LEAD` taxonomy (it does NOT ship
-all the skill `.md` files), collapses recurring series to their next instance,
-and batches events into token-bounded calls. So a packed calendar still fits.
+## Recommended event normalization
+Before calling the model, normalize each Google event into a compact record:
+- `id`
+- `title`
+- `start` and `end`
+- `allDay`
+- `durationDays`
+- `calendar` or calendar summary when available
+- `location` when available
+- short `description` snippet when useful
+- recurrence/series key when available
+
+This improves trip/holiday/social classification without shipping huge event
+payloads.
+
+## Multi-day policy
+Do **not** classify every multi-day event as a trip. Multi-day is a strong signal
+only when paired with destination/away/travel cues such as flights, hotels,
+Airbnb, airport codes, vacation, camping, road trip, conference in another city,
+or "in <place>". Generic multi-day OOO/PTO/busy blocks should usually be ignored.
+Holiday, wedding, anniversary, and deadline cues should beat trip when that is
+the event's primary meaning.
+
+## Runtime prompt fit
+At runtime, compile a compact prompt from:
+- allowed categories and kinds from `LEAD`,
+- router cues,
+- the core hard rules,
+- and 1–2 worked examples.
+
+Do not concatenate every markdown file into every model call if that risks token
+overflow. Keep the markdown skills and compact prompt builder in sync.
 
 ## Routes (all under the existing Life auth: JWT or device token)
-- `GET  /api/life/ai/health` — verify the GitHub Models token works (use on the Surface).
+- `GET  /api/life/ai/health` — verify the GitHub Models token works.
 - `GET  /api/life/gcal/status` — `{configured, connected, email, last_generated_at, …}`.
-- `GET  /api/life/gcal/connect` — returns `{auth_url}` to open (top-level, not in an iframe).
-- `GET  /api/life/gcal/callback` — Google redirect target; stores the refresh token, redirects back to the dashboard.
+- `GET  /api/life/gcal/connect` — returns `{auth_url}` to open top-level.
+- `GET  /api/life/gcal/callback` — Google redirect target; stores the refresh token.
 - `POST /api/life/gcal/disconnect`
 - `GET  /api/life/gcal/events?days=90` — normalized upcoming events.
 - `POST /api/life/smart-tasks/generate` — run generation now.
 
-## Environment variables (set on the Surface Pro 3)
-`start.sh` auto-loads `mw-backend/.env`, so the simplest path is to add these
-to a `.env` file there:
+## Environment variables
+`start.sh` auto-loads `mw-backend/.env`, so add these there:
 
 ```
 GOOGLE_CLIENT_ID=xxxxxxxx.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=xxxxxxxx
 GOOGLE_REDIRECT_URI=https://api.michaelwegter.com/api/life/gcal/callback
 GITHUB_MODELS_TOKEN=ghp_or_fine_grained_pat_with_models_access
-# optional — GitHub Models inference catalog id (publisher-prefixed). Default
-# openai/gpt-4o-mini (reliable JSON + higher limits). gpt-5-mini is a reasoning
-# model that returned empty output for this task; gpt-5.4-mini is Copilot-only,
-# not in this catalog. Confirm callable ids (see "Pick the model id" below):
 LIFE_AI_MODEL=openai/gpt-4o-mini
-# optional — inference endpoint (default is the current one):
 GITHUB_MODELS_API=https://models.github.ai/inference
 LIFE_DASHBOARD_URL=https://mwegter95.github.io/life-dashboard/
-LIFE_SCHEDULER=1            # set 0 to disable the daily auto-generation
+LIFE_SCHEDULER=1
 ```
 
-The GitHub token is resolved env-var-first, then `gh auth token`, then Copilot's
-`apps.json` — env var is the reliable choice on Windows.
+Use whichever model your token can call reliably. Prefer a model that returns
+strict JSON consistently for this small classification task.
 
-## Google Cloud setup (one-time)
-1. **console.cloud.google.com** → new project.
-2. **APIs & Services → Library → Google Calendar API → Enable**.
-3. **OAuth consent screen** → External → add yourself under **Test users**; leave in **Testing** mode (lets the sensitive `calendar.readonly` scope work for test users without full verification).
-4. **Credentials → Create OAuth client ID → Web application** → Authorized redirect URI = `https://api.michaelwegter.com/api/life/gcal/callback`.
-5. Copy the Client ID + Secret into `.env`.
+## Google Cloud setup
+1. Google Cloud Console → create/select project.
+2. APIs & Services → Library → enable Google Calendar API.
+3. OAuth consent screen → External → add yourself as a test user if still in Testing.
+4. Credentials → Create OAuth client ID → Web application.
+5. Authorized redirect URI: `https://api.michaelwegter.com/api/life/gcal/callback`.
+6. Copy Client ID and Secret into `.env`.
 
-## GitHub token (for the AI)
-The GitHub Models API needs a token with **Models** access. Put it in
-`GITHUB_MODELS_TOKEN`. Two ways:
+## GitHub token
+The GitHub Models API needs a token with Models access. Put it in
+`GITHUB_MODELS_TOKEN`. Use a fine-grained PAT with Models read access or a classic
+PAT that works for your account. Verify callable model ids with the GitHub Models
+catalog endpoint, then set `LIFE_AI_MODEL` to a supported id.
 
-**A. Fine-grained PAT (scoped):** github.com/settings/personal-access-tokens/new
-1. **Resource owner = your personal account** (the Models permission only shows
-   when you own the resource — an org won't show it).
-2. Scroll to **Permissions → Account permissions** (BELOW Repository permissions).
-3. **Models → Access: Read-only** (this is the `models:read` permission, required
-   since May 2025 — without it the API returns 401 "The `models` permission is
-   required").
-4. Generate, copy the `github_pat_…` token.
-
-**B. Classic PAT (simplest):** github.com/settings/tokens/new — classic tokens are
-exempt from the models:read requirement and work as-is. No scope needed for Models;
-name it, generate, copy the `ghp_…` token.
-
-## Pick the model id
-GitHub Models inference ids are publisher-prefixed (e.g. `openai/gpt-5-mini`,
-`openai/gpt-4o-mini`) and `gpt-5.4-mini` (a Copilot model) is NOT available here.
-List exactly what your token can call:
-```
-curl -H "Authorization: Bearer <your GITHUB_MODELS_TOKEN>" https://models.github.ai/catalog/models
-```
-Use the `id` of the model you want (a mini is plenty) as `LIFE_AI_MODEL`. Verify
-with `GET /api/life/ai/health` → `{"available": true}`.
-
-## Deploy on the Surface
+## Deploy
 ```
 git pull
-./venv/Scripts/python -m pip install -r requirements.txt   # adds google-* libs
-# (set .env as above)
+./venv/Scripts/python -m pip install -r requirements.txt
+# set .env
 ./start.sh --tunnel
 ```
-Then verify: `curl https://api.michaelwegter.com/api/life/ai/health` with an auth
-header should return `{"available": true, ...}`.
 
-## Notes
-- The OAuth refresh token is stored **encrypted** (AES-GCM via the server secret).
-- Smart reminders are regular dated reminders tagged `source: "gcal-ai"`. Re-runs
-  upsert by a stable key (no duplicates) and prune future suggestions that are no
-  longer relevant **and** that you haven't checked off.
-- Cost at this volume (≤100 Calendar calls/month, ~1 AI run/day) is **$0** — both
-  the Calendar API and GitHub Models are free at this scale.
+Verify the AI health route and then run a manual smart-task generation from the
+dashboard.
+
+## Operational notes
+- Store the OAuth refresh token encrypted.
+- Smart reminders should be tagged `source: "gcal-ai"`.
+- Re-runs should upsert by stable key and avoid duplicates.
+- Preserve completed reminders; only prune future incomplete suggestions that are
+  no longer relevant.
+- Log model output drops and pre-filtered omissions separately so misses can be
+  debugged.
+- Keep volume modest: this workflow should remain free or extremely low-cost for
+  personal use.
