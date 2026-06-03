@@ -53,7 +53,7 @@ LEAD = {
     "generic":     {"prep": (2, 1)},
 }
 MAX_TASKS_PER_EVENT = 2
-MAX_TASKS_TOTAL = 25
+MAX_TASKS_TOTAL = 100   # generous: a busy personal calendar shouldn't be truncated
 MAX_EVENTS_FOR_AI = 150
 
 # The life_skills/*.md files are the human-readable spec for each skill. But
@@ -268,6 +268,7 @@ def resolve_items(data, events_by_id, today_iso):
                 "date": date,
                 "points": points,
                 "category": cat,
+                "kind": kind,            # carried so the upsert key is per-task, not per-event
                 "sourceEventId": real_id,
             })
             per_event += 1
@@ -334,10 +335,9 @@ def _preclassify_keyword_events(events, today_iso):
             if pattern.search(haystack):
                 matched_cat = cat
                 break
-        # A multi-day event with no keyword is almost certainly a trip (catches
-        # bare place-name titles like "Rwanda" / "Kigali").
-        if not matched_cat and e.get("multiDay"):
-            matched_cat = "trip"
+        # NOTE: we intentionally do NOT auto-classify every multi-day event as a
+        # trip (per the multi-day policy in the skill docs). Real trips are caught
+        # by the travel keywords above, and the model also sees multiDay + loc.
         if matched_cat and e.get("date"):
             real_id = str(e.get("id") or "")
             try:
@@ -362,6 +362,7 @@ def _preclassify_keyword_events(events, today_iso):
                         "date": date,
                         "points": points,
                         "category": matched_cat,
+                        "kind": kind,
                         "sourceEventId": real_id,
                     })
             # Still send to AI so it can produce a nicer/more specific title

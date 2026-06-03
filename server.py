@@ -3377,7 +3377,12 @@ def _apply_smart_tasks(db, ot, oi, tasks):
     today = utc_now().date().isoformat()
     new_by_id = {}
     for t in tasks:
-        seed = t.get("sourceEventId") or (t["title"] + "|" + t["date"])
+        # Key per (event, category, kind) — NOT per event — so multiple tasks for
+        # the same event (e.g. a birthday's gift + plan) become distinct rows
+        # instead of overwriting each other. category+kind are deterministic, so
+        # re-runs upsert the same row (idempotent, no duplicates from rephrasing).
+        base = t.get("sourceEventId") or (t["title"] + "|" + t["date"])
+        seed = f"{base}|{t.get('category', '')}|{t.get('kind', '')}"
         hid = "gcal-" + hashlib.sha1(f"{ot}:{oi}:{seed}".encode("utf-8")).hexdigest()[:16]
         new_by_id[hid] = {
             "id": hid,
