@@ -121,6 +121,23 @@ def _event_start(ev):
     return None, False
 
 
+def _event_end(ev):
+    e = ev.get("end", {})
+    return e.get("date") or e.get("dateTime")
+
+
+def _is_multi_day(start, end, all_day):
+    """A multi-day span (esp. all-day) is a strong trip signal even when the
+    title is just a place name."""
+    try:
+        sd = datetime.date.fromisoformat(start[:10])
+        ed = datetime.date.fromisoformat(end[:10])
+        # All-day end.date is exclusive, so a 1-day event has span 1.
+        return (ed - sd).days > 1 if all_day else (ed - sd).days >= 1
+    except Exception:
+        return False
+
+
 def list_upcoming_events(refresh_token, days=90, max_events=400):
     """Upcoming events across all of the user's calendars within `days`."""
     creds = _credentials_from_refresh(refresh_token)
@@ -155,13 +172,17 @@ def list_upcoming_events(refresh_token, days=90, max_events=400):
             start, all_day = _event_start(ev)
             if not start:
                 continue
+            end = _event_end(ev)
             out.append({
                 "id": ev.get("id"),
                 "calendarId": cal_id,
                 "title": ev.get("summary", "(no title)"),
+                "location": (ev.get("location") or "")[:120],
                 "start": start,
                 "date": start[:10],
+                "end": end,
                 "allDay": all_day,
+                "multiDay": _is_multi_day(start, end, all_day) if end else False,
                 "recurring": bool(ev.get("recurringEventId")),
                 "recurringEventId": ev.get("recurringEventId"),
             })

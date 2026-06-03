@@ -131,9 +131,11 @@ def _system_prompt():
     if _SYSTEM_PROMPT is None:
         _SYSTEM_PROMPT = (
             "You turn calendar events into short prep reminders.\n\n"
-            "ALWAYS generate tasks for: birthdays, anniversaries, weddings, trips (any "
-            "destination name, safari, vacation, flight, retreat), deadlines, appointments, "
-            "holidays, and social events.\n\n"
+            "ALWAYS generate tasks for: birthdays, anniversaries, weddings, trips, "
+            "deadlines, appointments, holidays, and social events.\n"
+            "A TRIP is ANY event with a destination/place/city/country/airport in its "
+            'title OR its "loc" (location) field, OR any multi-day event ("multiDay":true) '
+            '— even when the title is just a place or person name (e.g. "Rwanda", "Kigali").\n\n'
             "OMIT ONLY these routine work events: standups, syncs, 1:1s, team meetings, "
             "sprint reviews/retros, focus blocks, busy/hold blocks, commutes.\n\n"
             "For each qualifying event, pick ONE category and 1-2 tasks:\n"
@@ -277,10 +279,15 @@ def resolve_items(data, events_by_id, today_iso):
 def _generate_chunk(events_chunk, today_iso, model):
     # Short integer ids keep the request tiny; map them back to real events.
     idx = {str(i): e for i, e in enumerate(events_chunk)}
-    compact = [
-        {"id": sid, "title": (e.get("title") or "")[:TITLE_INPUT_MAX], "date": e["date"]}
-        for sid, e in idx.items()
-    ]
+    def _compact(sid, e):
+        c = {"id": sid, "title": (e.get("title") or "")[:TITLE_INPUT_MAX], "date": e["date"]}
+        loc = (e.get("location") or "").strip()
+        if loc:
+            c["loc"] = loc[:60]          # destination is a strong trip signal
+        if e.get("multiDay"):
+            c["multiDay"] = True
+        return c
+    compact = [_compact(sid, e) for sid, e in idx.items()]
     messages = build_messages(compact, today_iso)
     content = gh_models.chat_completion(
         messages, model=model, json_object=True, max_tokens=GEN_MAX_TOKENS, timeout=GEN_TIMEOUT)
@@ -319,11 +326,18 @@ def _preclassify_keyword_events(events, today_iso):
         title = e.get("title", "")
         if _WORK_ROUTINE_RE.match(title):
             continue  # drop work/routine noise before AI
+        # Match keywords against the title AND the location — a trip's
+        # destination is often only in the location field, not the title.
+        haystack = (title + " " + (e.get("location") or "")).strip()
         matched_cat = None
         for cat, pattern in _KEYWORD_CATS:
-            if pattern.search(title):
+            if pattern.search(haystack):
                 matched_cat = cat
                 break
+        # A multi-day event with no keyword is almost certainly a trip (catches
+        # bare place-name titles like "Rwanda" / "Kigali").
+        if not matched_cat and e.get("multiDay"):
+            matched_cat = "trip"
         if matched_cat and e.get("date"):
             real_id = str(e.get("id") or "")
             try:

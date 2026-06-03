@@ -3424,7 +3424,7 @@ def _smart_generate_for_owner(db, ot, oi):
     if not acct:
         raise RuntimeError("No connected Google Calendar")
     refresh = _gcal_decrypt(acct["refresh_token_enc"])
-    events = life_gcal.list_upcoming_events(refresh, days=90)
+    events = life_gcal.list_upcoming_events(refresh, days=120)   # ~4 months so trips aren't missed
     today = utc_now().date().isoformat()
     tasks = life_gcal.generate_tasks(events, today)
     result = _apply_smart_tasks(db, ot, oi, tasks)
