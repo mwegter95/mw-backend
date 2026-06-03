@@ -3211,6 +3211,35 @@ def life_patch_smart_hidden(habit_id):
     return jsonify({"ok": True, "hidden": h["hidden"]})
 
 
+@app.patch("/api/life/smart-tasks/<habit_id>/deleted")
+@require_owner
+def life_patch_smart_deleted(habit_id):
+    """Soft-delete (or restore) an AI-generated smart reminder. Soft so it can be
+    restored, and so regeneration knows not to resurrect it."""
+    db = get_db()
+    ot, oi = g.owner_type, g.owner_id
+    row = db.execute(
+        "SELECT data FROM life_habits WHERE id=? AND owner_type=? AND owner_id=?",
+        (habit_id, ot, oi)
+    ).fetchone()
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+    try:
+        h = json.loads(row["data"])
+    except Exception:
+        return jsonify({"error": "Invalid data"}), 500
+    if h.get("source") != "gcal-ai":
+        return jsonify({"error": "Not a smart task"}), 400
+    body = request.get_json(silent=True) or {}
+    h["deleted"] = bool(body.get("deleted", not h.get("deleted", False)))
+    db.execute(
+        "UPDATE life_habits SET data=?, updated_at=? WHERE id=? AND owner_type=? AND owner_id=?",
+        (json.dumps(h), utc_now_iso_legacy(), habit_id, ot, oi)
+    )
+    db.commit()
+    return jsonify({"ok": True, "deleted": h["deleted"]})
+
+
 @app.post("/api/life/completions")
 @require_owner
 def life_post_completion():
@@ -3372,6 +3401,8 @@ def _apply_smart_tasks(db, ot, oi, tasks):
                 old_data = json.loads(existing_row["data"])
                 if old_data.get("hidden"):
                     habit["hidden"] = True
+                if old_data.get("deleted"):
+                    habit["deleted"] = True   # stay deleted across regenerations
             except Exception:
                 pass
         db.execute(
