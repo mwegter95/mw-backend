@@ -3461,6 +3461,20 @@ def _smart_generate_for_owner(db, ot, oi):
         raise RuntimeError("No connected Google Calendar")
     refresh = _gcal_decrypt(acct["refresh_token_enc"])
     events = life_gcal.list_upcoming_events(refresh, days=120)   # ~4 months so trips aren't missed
+    if not events:
+        db.execute(
+            "UPDATE life_gcal_accounts SET last_synced_at=?, last_generated_at=? "
+            "WHERE owner_type=? AND owner_id=?",
+            (utc_now_iso_legacy(), utc_now_iso_legacy(), ot, oi),
+        )
+        db.commit()
+        return {
+            "created_or_updated": 0,
+            "pruned": 0,
+            "events": 0,
+            "skipped": True,
+            "reason": "No upcoming Google Calendar events were returned; existing smart reminders were left unchanged.",
+        }
     today = utc_now().date().isoformat()
     tasks = life_gcal.generate_tasks(events, today)
     result = _apply_smart_tasks(db, ot, oi, tasks)

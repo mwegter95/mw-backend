@@ -36,6 +36,10 @@ AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 
 
+class CalendarFetchError(RuntimeError):
+    """Raised when Google Calendar could not be reached or authorized."""
+
+
 def is_configured():
     return bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
 
@@ -149,14 +153,18 @@ def list_upcoming_events(refresh_token, days=90, max_events=400):
 
     try:
         cal_list = svc.calendarList().list().execute().get("items", [])
-    except Exception:
-        cal_list = [{"id": "primary"}]
+    except Exception as exc:
+        raise CalendarFetchError("Couldn't list Google calendars") from exc
 
     out = []
+    attempted = 0
+    succeeded = 0
+    failures = []
     for cal in cal_list:
         cal_id = cal.get("id")
         if not cal_id:
             continue
+        attempted += 1
         try:
             resp = svc.events().list(
                 calendarId=cal_id,
@@ -166,7 +174,9 @@ def list_upcoming_events(refresh_token, days=90, max_events=400):
                 orderBy="startTime",
                 maxResults=250,
             ).execute()
-        except Exception:
+            succeeded += 1
+        except Exception as exc:
+            failures.append(exc)
             continue
         for ev in resp.get("items", []):
             start, all_day = _event_start(ev)
@@ -186,6 +196,9 @@ def list_upcoming_events(refresh_token, days=90, max_events=400):
                 "recurring": bool(ev.get("recurringEventId")),
                 "recurringEventId": ev.get("recurringEventId"),
             })
+
+    if attempted and succeeded == 0 and failures:
+        raise CalendarFetchError("Couldn't fetch Google Calendar events") from failures[0]
 
     out.sort(key=lambda e: e["start"])
     return out[:max_events]
