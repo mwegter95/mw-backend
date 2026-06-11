@@ -3552,6 +3552,8 @@ def life_gcal_callback():
         res = life_gcal.exchange_code(code)
     except Exception as e:
         log.warning("[gcal] code exchange failed: %s", e)
+        if hasattr(e, "detail") and e.detail:
+            log.warning("[gcal] code exchange detail: %s", e.detail)
         return _gcal_redirect("error")
     if not res.get("refresh_token"):
         # Google only returns a refresh token on first consent; prompt=consent
@@ -3606,7 +3608,12 @@ def life_gcal_events():
         events = life_gcal.list_upcoming_events(_gcal_decrypt(row["refresh_token_enc"]), days=days)
     except Exception as e:
         log.warning("[gcal] events fetch failed: %s", e)
-        return jsonify({"error": "Couldn't fetch events"}), 502
+        if hasattr(e, "detail") and e.detail:
+            log.warning("[gcal] events fetch detail: %s", e.detail)
+        return jsonify({
+            "error": "Couldn't fetch events",
+            "detail": getattr(e, "detail", "") or str(e),
+        }), 502
     return jsonify({"events": events})
 
 

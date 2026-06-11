@@ -15,7 +15,12 @@ except ModuleNotFoundError:
     google = types.ModuleType("google")
     google_oauth2 = types.ModuleType("google.oauth2")
     google_oauth2_credentials = types.ModuleType("google.oauth2.credentials")
+    google_auth = types.ModuleType("google.auth")
+    google_auth_transport = types.ModuleType("google.auth.transport")
+    google_auth_transport_requests = types.ModuleType("google.auth.transport.requests")
+    google_auth_exceptions = types.ModuleType("google.auth.exceptions")
     googleapiclient = types.ModuleType("googleapiclient")
+    googleapiclient_errors = types.ModuleType("googleapiclient.errors")
     googleapiclient_discovery = types.ModuleType("googleapiclient.discovery")
 
     class _DummyFlow:
@@ -27,21 +32,46 @@ except ModuleNotFoundError:
         def __init__(self, *_args, **_kwargs):
             pass
 
+        def refresh(self, *_args, **_kwargs):
+            pass
+
+    class _DummyRequest:
+        pass
+
+    class _DummyRefreshError(Exception):
+        pass
+
+    class _DummyHttpError(Exception):
+        pass
+
     google_auth_oauthlib_flow.Flow = _DummyFlow
     google_oauth2_credentials.Credentials = _DummyCredentials
+    google_auth_transport_requests.Request = _DummyRequest
+    google_auth_exceptions.RefreshError = _DummyRefreshError
+    googleapiclient_errors.HttpError = _DummyHttpError
     googleapiclient_discovery.build = lambda *_args, **_kwargs: None
 
     google_auth_oauthlib.flow = google_auth_oauthlib_flow
+    google.auth = google_auth
+    google_auth.transport = google_auth_transport
+    google_auth_transport.requests = google_auth_transport_requests
+    google_auth.exceptions = google_auth_exceptions
     google.oauth2 = google_oauth2
     google_oauth2.credentials = google_oauth2_credentials
+    googleapiclient.errors = googleapiclient_errors
     googleapiclient.discovery = googleapiclient_discovery
 
     sys.modules["google_auth_oauthlib"] = google_auth_oauthlib
     sys.modules["google_auth_oauthlib.flow"] = google_auth_oauthlib_flow
     sys.modules["google"] = google
+    sys.modules["google.auth"] = google_auth
+    sys.modules["google.auth.transport"] = google_auth_transport
+    sys.modules["google.auth.transport.requests"] = google_auth_transport_requests
+    sys.modules["google.auth.exceptions"] = google_auth_exceptions
     sys.modules["google.oauth2"] = google_oauth2
     sys.modules["google.oauth2.credentials"] = google_oauth2_credentials
     sys.modules["googleapiclient"] = googleapiclient
+    sys.modules["googleapiclient.errors"] = googleapiclient_errors
     sys.modules["googleapiclient.discovery"] = googleapiclient_discovery
 
 import life_gcal

@@ -19,6 +19,9 @@ import os
 
 from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
+from google.auth.exceptions import RefreshError
+from googleapiclient.errors import HttpError
 from googleapiclient.discovery import build
 
 import gh_models
@@ -36,8 +39,31 @@ AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 
 
+def _google_error_detail(exc):
+    if isinstance(exc, HttpError):
+        status = getattr(getattr(exc, "resp", None), "status", None)
+        reason = getattr(getattr(exc, "resp", None), "reason", "")
+        content = getattr(exc, "content", b"")
+        if isinstance(content, bytes):
+            content = content.decode("utf-8", "replace")
+        message = content
+        try:
+            parsed = json.loads(content)
+            err = parsed.get("error", parsed)
+            message = err.get("message") or err.get("error_description") or content
+        except Exception:
+            pass
+        prefix = f"HTTP {status}" if status else "HTTP error"
+        return f"{prefix} {reason}: {message}".strip()
+    return f"{exc.__class__.__name__}: {exc}"
+
+
 class CalendarFetchError(RuntimeError):
     """Raised when Google Calendar could not be reached or authorized."""
+
+    def __init__(self, message, cause=None):
+        self.detail = _google_error_detail(cause) if cause else ""
+        super().__init__(f"{message}: {self.detail}" if self.detail else message)
 
 
 def is_configured():
@@ -88,13 +114,12 @@ def exchange_code(code):
     )
     flow.fetch_token(code=code)
     creds = flow.credentials
-    email = ""
+    svc = build("calendar", "v3", credentials=creds, cache_discovery=False)
     try:
-        svc = build("calendar", "v3", credentials=creds, cache_discovery=False)
         primary = svc.calendarList().get(calendarId="primary").execute()
-        email = primary.get("id", "") or ""
-    except Exception:
-        pass
+    except Exception as exc:
+        raise CalendarFetchError("Google Calendar connected, but calendar access validation failed", exc) from exc
+    email = primary.get("id", "") or ""
     return {
         "refresh_token": creds.refresh_token or "",
         "scope": " ".join(creds.scopes or SCOPES),
@@ -145,6 +170,10 @@ def _is_multi_day(start, end, all_day):
 def list_upcoming_events(refresh_token, days=90, max_events=400):
     """Upcoming events across all of the user's calendars within `days`."""
     creds = _credentials_from_refresh(refresh_token)
+    try:
+        creds.refresh(Request())
+    except RefreshError as exc:
+        raise CalendarFetchError("Couldn't refresh Google Calendar credentials", exc) from exc
     svc = build("calendar", "v3", credentials=creds, cache_discovery=False)
 
     now = datetime.datetime.now(datetime.UTC)
@@ -154,7 +183,7 @@ def list_upcoming_events(refresh_token, days=90, max_events=400):
     try:
         cal_list = svc.calendarList().list().execute().get("items", [])
     except Exception as exc:
-        raise CalendarFetchError("Couldn't list Google calendars") from exc
+        raise CalendarFetchError("Couldn't list Google calendars", exc) from exc
 
     out = []
     attempted = 0
@@ -198,7 +227,7 @@ def list_upcoming_events(refresh_token, days=90, max_events=400):
             })
 
     if attempted and succeeded == 0 and failures:
-        raise CalendarFetchError("Couldn't fetch Google Calendar events") from failures[0]
+        raise CalendarFetchError("Couldn't fetch Google Calendar events", failures[0]) from failures[0]
 
     out.sort(key=lambda e: e["start"])
     return out[:max_events]
