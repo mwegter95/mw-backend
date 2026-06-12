@@ -263,6 +263,10 @@ app.register_blueprint(spotify_bp)
 from apple_music_blueprint import apple_bp
 app.register_blueprint(apple_bp)
 
+# ─── Repsetta Fitness demo blueprint ─────────────────────────────────────────
+from repsetta_blueprint import repsetta_bp
+app.register_blueprint(repsetta_bp)
+
 from yard_seed import seed_for_owner as _yard_seed_for_owner
 from yard_seed_v2 import seed_v2_for_owner as _yard_seed_v2_for_owner
 
