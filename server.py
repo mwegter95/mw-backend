@@ -275,6 +275,10 @@ app.register_blueprint(art_store_bp)
 from healthstack_blueprint import healthstack_bp
 app.register_blueprint(healthstack_bp)
 
+# ─── EdTech School Connect Portal demo blueprint ─────────────────────────────
+from edtech_blueprint import edtech_bp
+app.register_blueprint(edtech_bp)
+
 from yard_seed import seed_for_owner as _yard_seed_for_owner
 from yard_seed_v2 import seed_v2_for_owner as _yard_seed_v2_for_owner
 

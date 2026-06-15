@@ -130,9 +130,43 @@ $script:tunnelProc = Start-Tunnel
 Write-Host ""
 Write-Host "✓ Running. Press Ctrl+C to stop cleanly." -ForegroundColor Green
 Write-Host "  Health: https://api.michaelwegter.com/health" -ForegroundColor DarkGray
+
+# ── Auto-deploy: poll git; on a new commit, pull + restart the server IN THIS ──
+# ── window (the Python child is replaced; this window never closes).          ──
+$script:branch = (git -C $ScriptDir rev-parse --abbrev-ref HEAD 2>$null)
+if (-not $script:branch) { $script:branch = 'main' }
+$pollEvery = if ($env:AUTO_DEPLOY_SECONDS) { [int]$env:AUTO_DEPLOY_SECONDS } else { 30 }
+$lastPoll  = Get-Date
+Write-Host "  Auto-deploy:              ON (every ${pollEvery}s on $script:branch)" -ForegroundColor Green
 Write-Host ""
 
-# ── Monitor loop — restart crashed processes every 10 s ───────────────────────
+function Invoke-AutoDeploy {
+    try {
+        git -C $ScriptDir fetch origin $script:branch --quiet 2>$null
+        $localRev  = (git -C $ScriptDir rev-parse HEAD 2>$null)
+        $remoteRev = (git -C $ScriptDir rev-parse "origin/$script:branch" 2>$null)
+        if ($localRev -and $remoteRev -and $localRev -ne $remoteRev) {
+            Write-Host ""
+            Write-Host "$(Get-Date -f 'HH:mm:ss')  New commit on origin/$script:branch -- pulling..." -ForegroundColor Cyan
+            $changed = (git -C $ScriptDir diff --name-only HEAD "origin/$script:branch" 2>$null)
+            git -C $ScriptDir pull --ff-only 2>&1 | Write-Host
+            if ($changed -match 'requirements\.txt') {
+                Write-Host "  requirements.txt changed -- installing deps..." -ForegroundColor Yellow
+                & $PythonExe -m pip install -r (Join-Path $ScriptDir 'requirements.txt') 2>&1 | Write-Host
+            }
+            Write-Host "  Restarting server in this window (window stays open)..." -ForegroundColor Yellow
+            if ($script:flaskProc -and -not $script:flaskProc.HasExited) { try { $script:flaskProc.Kill() } catch {} }
+            Start-Sleep -Milliseconds 500
+            $script:flaskProc = Start-Flask
+            Write-Host "$(Get-Date -f 'HH:mm:ss')  Deploy complete." -ForegroundColor Green
+            Write-Host ""
+        }
+    } catch {
+        Write-Host "$(Get-Date -f 'HH:mm:ss')  auto-deploy check failed: $_" -ForegroundColor Red
+    }
+}
+
+# ── Monitor loop — restart crashed processes + auto-deploy ────────────────────
 while ($true) {
     Start-Sleep -Seconds 10
 
@@ -144,5 +178,10 @@ while ($true) {
     if ($script:tunnelProc.HasExited) {
         Write-Host "$(Get-Date -f 'HH:mm:ss')  Tunnel exited (code $($script:tunnelProc.ExitCode)) -- restarting..." -ForegroundColor Yellow
         $script:tunnelProc = Start-Tunnel
+    }
+
+    if (((Get-Date) - $lastPoll).TotalSeconds -ge $pollEvery) {
+        Invoke-AutoDeploy
+        $lastPoll = Get-Date
     }
 }
