@@ -271,6 +271,10 @@ app.register_blueprint(repsetta_bp)
 from art_store_blueprint import art_store_bp
 app.register_blueprint(art_store_bp)
 
+# ─── HealthStack Patient Portal demo blueprint ────────────────────────────────
+from healthstack_blueprint import healthstack_bp
+app.register_blueprint(healthstack_bp)
+
 from yard_seed import seed_for_owner as _yard_seed_for_owner
 from yard_seed_v2 import seed_v2_for_owner as _yard_seed_v2_for_owner
 
