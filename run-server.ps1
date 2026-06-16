@@ -89,13 +89,26 @@ function Start-Tunnel {
     return $p
 }
 
+# ── NestJS (Freight Factoring API) ────────────────────────────────────────────
+$NestDir = Join-Path $ScriptDir "..\upwork-agentic-workflow\upwork-runs\trucking-freight-factoring-and-banking\demo-src"
+
+function Start-Node {
+    $psi = [System.Diagnostics.ProcessStartInfo]::new('node', 'apps/api/dist/apps/api/src/main.js')
+    $psi.WorkingDirectory = $NestDir
+    $psi.UseShellExecute  = $false
+    $p = [System.Diagnostics.Process]::Start($psi)
+    Write-Host "$(Get-Date -f 'HH:mm:ss')  NestJS started (PID $($p.Id))" -ForegroundColor Green
+    return $p
+}
+
 # ── Cleanup ────────────────────────────────────────────────────────────────────
 $script:flaskProc  = $null
 $script:tunnelProc = $null
+$script:nodeProc   = $null
 
 function Stop-All {
     Write-Host "`n$(Get-Date -f 'HH:mm:ss')  Stopping services..." -ForegroundColor Yellow
-    foreach ($p in @($script:flaskProc, $script:tunnelProc)) {
+    foreach ($p in @($script:flaskProc, $script:tunnelProc, $script:nodeProc)) {
         if ($p -and -not $p.HasExited) {
             try { $p.Kill() } catch {}
         }
@@ -126,6 +139,9 @@ $script:flaskProc = Start-Flask
 
 Write-Host "-> Cloudflare Tunnel (mw-backend -> api.michaelwegter.com)..."
 $script:tunnelProc = Start-Tunnel
+
+Write-Host "-> NestJS (Freight Factoring API on port 3001)..."
+$script:nodeProc = Start-Node
 
 Write-Host ""
 Write-Host "✓ Running. Press Ctrl+C to stop cleanly." -ForegroundColor Green
@@ -178,6 +194,11 @@ while ($true) {
     if ($script:tunnelProc.HasExited) {
         Write-Host "$(Get-Date -f 'HH:mm:ss')  Tunnel exited (code $($script:tunnelProc.ExitCode)) -- restarting..." -ForegroundColor Yellow
         $script:tunnelProc = Start-Tunnel
+    }
+
+    if ($script:nodeProc -and $script:nodeProc.HasExited) {
+        Write-Host "$(Get-Date -f 'HH:mm:ss')  NestJS exited (code $($script:nodeProc.ExitCode)) -- restarting..." -ForegroundColor Yellow
+        $script:nodeProc = Start-Node
     }
 
     if (((Get-Date) - $lastPoll).TotalSeconds -ge $pollEvery) {
