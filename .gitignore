@@ -70,3 +70,8 @@ htmlcov/
 # Remote runner runtime
 data/runner-audit.log
 data/runner-workspace/
+
+# Vendored service build artifacts
+services/**/node_modules/
+services/**/dist/
+services/**/.turbo/
