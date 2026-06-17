@@ -124,6 +124,8 @@ def execute():
         return jsonify({"ok": False, "error": f"unsupported language: {lang}"}), 400
 
     sha = hashlib.sha256(script.encode()).hexdigest()[:12]
+    label = next((ln.strip() for ln in script.splitlines()
+                  if ln.strip() and not ln.strip().startswith("#")), "")[:60]
     started = time.time()
     timed_out = False
     fd, path = tempfile.mkstemp(suffix=suffix, dir=str(WORKDIR))
@@ -150,7 +152,7 @@ def execute():
             pass
 
     dur = int((time.time() - started) * 1000)
-    _audit(f"RUN ip={_client_ip()} lang={lang} sha={sha} exit={exit_code} timeout={timed_out} dur={dur}ms")
+    _audit(f"RUN ip={_client_ip()} lang={lang} sha={sha} exit={exit_code} timeout={timed_out} dur={dur}ms cmd={label!r}")
     return jsonify({
         "ok": (exit_code == 0 and not timed_out),
         "exit_code": exit_code,
