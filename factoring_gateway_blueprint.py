@@ -13,6 +13,15 @@ NEST_BASE = "http://localhost:3001"
 FORWARD_HEADERS = {"authorization", "content-type", "accept", "cookie", "x-request-id"}
 
 
+def _cors_headers(resp: Response) -> Response:
+    """Ensure CORS headers are present on every proxied response."""
+    origin = request.headers.get("Origin")
+    if origin:
+        resp.headers.setdefault("Access-Control-Allow-Origin", origin)
+        resp.headers.setdefault("Access-Control-Allow-Credentials", "true")
+    return resp
+
+
 def _proxy(path=""):
     url = f"{NEST_BASE}/{path}"
     qs = request.query_string.decode("utf-8")
@@ -24,12 +33,12 @@ def _proxy(path=""):
     try:
         with _req.urlopen(upstream, timeout=30) as resp:
             ct = resp.headers.get("Content-Type", "application/json")
-            return Response(resp.read(), status=resp.status, content_type=ct)
+            return _cors_headers(Response(resp.read(), status=resp.status, content_type=ct))
     except urllib.error.HTTPError as exc:
         ct = exc.headers.get("Content-Type", "application/json")
-        return Response(exc.read(), status=exc.code, content_type=ct)
+        return _cors_headers(Response(exc.read(), status=exc.code, content_type=ct))
     except Exception as exc:
-        return Response(f"Gateway error: {exc}", status=502, content_type="text/plain")
+        return _cors_headers(Response(f"Gateway error: {exc}", status=502, content_type="text/plain"))
 
 
 @factoring_gw_bp.route("/", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
