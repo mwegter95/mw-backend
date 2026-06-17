@@ -61,6 +61,13 @@ copy `bridge_blueprint_template.py` to `<feature>_blueprint.py`, set its `PREFIX
 and `UPSTREAM`, and register it the same way — it reverse-proxies `/<prefix>/*`
 to the local service so it inherits the tunnel and CORS.
 
+Long-running services are listed in `data/services.json` (gitignored), e.g.
+`{ "name", "cmd", "args", "cwd", "port" }`. `run-server.ps1` is their sole
+launcher: each monitor tick it starts any listed service whose port isn't open,
+so they survive crashes and reboots. The workflow registers them via
+`surface_register_service.py`; `cwd` is relative to this folder (or absolute) and
+service stdout/stderr go to `data/<name>.log` / `.err.log`.
+
 ## Remote runner ( /run/exec ) — powerful, handle with care
 
 `runner_blueprint.py` lets an authenticated caller run a python or bash script on

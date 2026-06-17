@@ -89,26 +89,77 @@ function Start-Tunnel {
     return $p
 }
 
-# ── NestJS (Freight Factoring API) ────────────────────────────────────────────
-$NestDir = Join-Path $ScriptDir "..\upwork-agentic-workflow\upwork-runs\trucking-freight-factoring-and-banking\demo-src"
+# ── Managed services (reboot-durable) ─────────────────────────────────────────
+# Demo backends register themselves in data/services.json; this launcher is their
+# SOLE starter, so they come back after a reboot and restart if they crash.
+$DataDir      = Join-Path $ScriptDir 'data'
+$ServicesFile = Join-Path $DataDir 'services.json'
+if (-not (Test-Path $DataDir)) { New-Item -ItemType Directory -Path $DataDir -Force | Out-Null }
 
-function Start-Node {
-    $psi = [System.Diagnostics.ProcessStartInfo]::new('node', 'apps/api/dist/apps/api/src/main.js')
-    $psi.WorkingDirectory = $NestDir
-    $psi.UseShellExecute  = $false
-    $p = [System.Diagnostics.Process]::Start($psi)
-    Write-Host "$(Get-Date -f 'HH:mm:ss')  NestJS started (PID $($p.Id))" -ForegroundColor Green
-    return $p
+# Seed once so the existing Freight Factoring API keeps running after this change.
+if (-not (Test-Path $ServicesFile)) {
+    @(@{ name = 'freight-api'; cmd = 'node'; args = 'apps/api/dist/apps/api/src/main.js';
+         cwd  = '..\upwork-agentic-workflow\upwork-runs\trucking-freight-factoring-and-banking\demo-src';
+         port = 3001 }) | ConvertTo-Json -Depth 5 | Set-Content -Path $ServicesFile -Encoding UTF8
+}
+
+$script:managed      = @{}   # name -> Process (for cleanup)
+$script:svcLastStart = @{}   # name -> last launch time (debounce)
+
+function Read-Services {
+    if (-not (Test-Path $ServicesFile)) { return @() }
+    try { $j = (Get-Content $ServicesFile -Raw) | ConvertFrom-Json }
+    catch { Write-Host "$(Get-Date -f 'HH:mm:ss')  services.json invalid -- ignoring" -ForegroundColor Red; return @() }
+    if ($null -eq $j) { return @() }
+    if ($j -is [System.Array]) { return $j } else { return @($j) }
+}
+
+function Test-Port($p) {
+    try {
+        $c = New-Object System.Net.Sockets.TcpClient
+        $iar = $c.BeginConnect('127.0.0.1', [int]$p, $null, $null)
+        $up = $iar.AsyncWaitHandle.WaitOne(500) -and $c.Connected
+        $c.Close(); return $up
+    } catch { return $false }
+}
+
+function Start-ManagedService($svc) {
+    $name = [string]$svc.name
+    $cwd  = [string]$svc.cwd
+    if ($cwd -and -not [System.IO.Path]::IsPathRooted($cwd)) { $cwd = Join-Path $ScriptDir $cwd }
+    if (-not $cwd) { $cwd = $ScriptDir }
+    $out  = Join-Path $DataDir "$name.log"
+    $errl = Join-Path $DataDir "$name.err.log"
+    try {
+        $p = Start-Process -FilePath ([string]$svc.cmd) -ArgumentList ([string]$svc.args) `
+             -WorkingDirectory $cwd -WindowStyle Hidden -PassThru `
+             -RedirectStandardOutput $out -RedirectStandardError $errl
+        $script:managed[$name]      = $p
+        $script:svcLastStart[$name] = Get-Date
+        Write-Host "$(Get-Date -f 'HH:mm:ss')  service '$name' started (PID $($p.Id)) -> port $($svc.port)" -ForegroundColor Green
+    } catch {
+        Write-Host "$(Get-Date -f 'HH:mm:ss')  service '$name' failed to start: $_" -ForegroundColor Red
+    }
+}
+
+# Start anything in the manifest that is not already listening (debounced 20s).
+function Ensure-Services {
+    foreach ($svc in Read-Services) {
+        if (-not $svc.name -or -not $svc.port) { continue }
+        if (Test-Port $svc.port) { continue }
+        $last = $script:svcLastStart[[string]$svc.name]
+        if ($last -and ((Get-Date) - $last).TotalSeconds -lt 20) { continue }
+        Start-ManagedService $svc
+    }
 }
 
 # ── Cleanup ────────────────────────────────────────────────────────────────────
 $script:flaskProc  = $null
 $script:tunnelProc = $null
-$script:nodeProc   = $null
 
 function Stop-All {
     Write-Host "`n$(Get-Date -f 'HH:mm:ss')  Stopping services..." -ForegroundColor Yellow
-    foreach ($p in @($script:flaskProc, $script:tunnelProc, $script:nodeProc)) {
+    foreach ($p in (@($script:flaskProc, $script:tunnelProc) + @($script:managed.Values))) {
         if ($p -and -not $p.HasExited) {
             try { $p.Kill() } catch {}
         }
@@ -140,8 +191,8 @@ $script:flaskProc = Start-Flask
 Write-Host "-> Cloudflare Tunnel (mw-backend -> api.michaelwegter.com)..."
 $script:tunnelProc = Start-Tunnel
 
-Write-Host "-> NestJS (Freight Factoring API on port 3001)..."
-$script:nodeProc = Start-Node
+Write-Host "-> Managed services from data/services.json..."
+Ensure-Services
 
 Write-Host ""
 Write-Host "✓ Running. Press Ctrl+C to stop cleanly." -ForegroundColor Green
@@ -196,10 +247,7 @@ while ($true) {
         $script:tunnelProc = Start-Tunnel
     }
 
-    if ($script:nodeProc -and $script:nodeProc.HasExited) {
-        Write-Host "$(Get-Date -f 'HH:mm:ss')  NestJS exited (code $($script:nodeProc.ExitCode)) -- restarting..." -ForegroundColor Yellow
-        $script:nodeProc = Start-Node
-    }
+    Ensure-Services
 
     if (((Get-Date) - $lastPoll).TotalSeconds -ge $pollEvery) {
         Invoke-AutoDeploy
