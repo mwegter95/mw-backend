@@ -96,12 +96,9 @@ $DataDir      = Join-Path $ScriptDir 'data'
 $ServicesFile = Join-Path $DataDir 'services.json'
 if (-not (Test-Path $DataDir)) { New-Item -ItemType Directory -Path $DataDir -Force | Out-Null }
 
-# Seed once so the existing Freight Factoring API keeps running after this change.
-if (-not (Test-Path $ServicesFile)) {
-    @(@{ name = 'freight-api'; cmd = 'node'; args = 'apps/api/dist/apps/api/src/main.js';
-         cwd  = '..\upwork-agentic-workflow\upwork-runs\trucking-freight-factoring-and-banking\demo-src';
-         port = 3001 }) | ConvertTo-Json -Depth 5 | Set-Content -Path $ServicesFile -Encoding UTF8
-}
+# No seed: services.json starts empty and the workflow registers real services
+# into it (their files live in the runner workspace, which IS present on the
+# Surface). A missing file is treated as "no services".
 
 $script:managed      = @{}   # name -> Process (for cleanup)
 $script:svcLastStart = @{}   # name -> last launch time (debounce)
