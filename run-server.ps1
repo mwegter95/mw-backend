@@ -126,19 +126,25 @@ function Test-Port($p) {
 function Start-ManagedService($svc) {
     $name = [string]$svc.name
     $cwd  = [string]$svc.cwd
-    if ($cwd -and -not [System.IO.Path]::IsPathRooted($cwd)) { $cwd = Join-Path $ScriptDir $cwd }
     if (-not $cwd) { $cwd = $ScriptDir }
+    elseif (-not [System.IO.Path]::IsPathRooted($cwd)) { $cwd = Join-Path $ScriptDir $cwd }
+    # Normalize away any '..' segments -- Start-Process -WorkingDirectory rejects them.
+    try { $cwd = [System.IO.Path]::GetFullPath($cwd) } catch {}
+    $script:svcLastStart[$name] = Get-Date   # debounce regardless of outcome
+    if (-not (Test-Path -LiteralPath $cwd -PathType Container)) {
+        Write-Host "$(Get-Date -f 'HH:mm:ss')  service '$name' skipped: working dir not found -> $cwd" -ForegroundColor Yellow
+        return
+    }
     $out  = Join-Path $DataDir "$name.log"
     $errl = Join-Path $DataDir "$name.err.log"
     try {
         $p = Start-Process -FilePath ([string]$svc.cmd) -ArgumentList ([string]$svc.args) `
-             -WorkingDirectory $cwd -WindowStyle Hidden -PassThru `
+             -WorkingDirectory $cwd -WindowStyle Hidden -PassThru -ErrorAction Stop `
              -RedirectStandardOutput $out -RedirectStandardError $errl
-        $script:managed[$name]      = $p
-        $script:svcLastStart[$name] = Get-Date
+        $script:managed[$name] = $p
         Write-Host "$(Get-Date -f 'HH:mm:ss')  service '$name' started (PID $($p.Id)) -> port $($svc.port)" -ForegroundColor Green
     } catch {
-        Write-Host "$(Get-Date -f 'HH:mm:ss')  service '$name' failed to start: $_" -ForegroundColor Red
+        Write-Host "$(Get-Date -f 'HH:mm:ss')  service '$name' failed to start: $($_.Exception.Message)" -ForegroundColor Red
     }
 }
 
