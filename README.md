@@ -56,6 +56,11 @@ Create `<feature>_blueprint.py` with a Flask Blueprint, register it in
 `spotify_blueprint.py` / `apple_music_blueprint.py`. Demos on the site call this
 API at `https://api.michaelwegter.com/<prefix>/...`.
 
+To expose a non-Flask service (e.g. a Node app the runner started on loopback),
+copy `bridge_blueprint_template.py` to `<feature>_blueprint.py`, set its `PREFIX`
+and `UPSTREAM`, and register it the same way — it reverse-proxies `/<prefix>/*`
+to the local service so it inherits the tunnel and CORS.
+
 ## Remote runner ( /run/exec ) — powerful, handle with care
 
 `runner_blueprint.py` lets an authenticated caller run a python or bash script on
