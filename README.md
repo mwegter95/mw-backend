@@ -56,6 +56,33 @@ Create `<feature>_blueprint.py` with a Flask Blueprint, register it in
 `spotify_blueprint.py` / `apple_music_blueprint.py`. Demos on the site call this
 API at `https://api.michaelwegter.com/<prefix>/...`.
 
+## Remote runner ( /run/exec ) — powerful, handle with care
+
+`runner_blueprint.py` lets an authenticated caller run a python or bash script on
+the Surface and get back stdout/stderr/exit code. This is what lets the Upwork
+workflow build and deploy REAL backends here (install Node, build a service,
+start it, bridge it through Flask) instead of mocking.
+
+**This is remote code execution on this machine.** It is OFF unless both of these
+are in `.env`:
+
+```env
+RUN_ENDPOINT_ENABLED=1
+RUN_SECRET=<32+ char secret>     # python3 -c "import secrets; print(secrets.token_hex(32))"
+```
+
+Requests are authenticated with an HMAC-SHA256 signature over
+`"<timestamp>.<body>"` using `RUN_SECRET`, with a 60-second timestamp window
+(replay protection); the secret never goes over the wire. Every call is recorded
+in `data/runner-audit.log` (hash of the script, exit code, duration, IP, never
+the secret or script body).
+
+Treat `RUN_SECRET` like an SSH key. Because `/run` is reachable through the public
+tunnel, strongly consider adding **Cloudflare Access** in front of the `/run`
+path as a second factor. Leave `RUN_ENDPOINT_ENABLED` unset when you do not need
+it. The same secret goes in the Upwork workflow's `.env` (`RUN_SECRET`), which
+calls this via `scripts/surface_run.py`.
+
 ## Full deployment guide
 
 See `DEPLOYMENT.md` for first-time setup (venv, `.env`, Cloudflare Tunnel).

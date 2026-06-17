@@ -287,6 +287,10 @@ app.register_blueprint(civicq_bp)
 from factoring_gateway_blueprint import factoring_gw_bp
 app.register_blueprint(factoring_gw_bp)
 
+# ─── Remote runner (secure; OFF unless RUN_ENDPOINT_ENABLED + RUN_SECRET set) ──
+from runner_blueprint import runner_bp
+app.register_blueprint(runner_bp)
+
 from yard_seed import seed_for_owner as _yard_seed_for_owner
 from yard_seed_v2 import seed_v2_for_owner as _yard_seed_v2_for_owner
 

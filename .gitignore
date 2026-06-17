@@ -66,3 +66,7 @@ htmlcov/
 
 # ─── Miscellaneous ─────────────────────────────────────────────────────────────
 
+
+# Remote runner runtime
+data/runner-audit.log
+data/runner-workspace/
