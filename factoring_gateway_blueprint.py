@@ -35,4 +35,14 @@ def _proxy(path=""):
 @factoring_gw_bp.route("/", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
 @factoring_gw_bp.route("/<path:path>", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
 def proxy(path=""):
+    if request.method == "OPTIONS":
+        # Return CORS preflight directly without hitting NestJS (works even when upstream is down)
+        resp = Response("", status=204)
+        origin = request.headers.get("Origin", "*")
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Authorization,Content-Type,Accept,X-Request-Id"
+        resp.headers["Access-Control-Allow-Credentials"] = "true"
+        resp.headers["Access-Control-Max-Age"] = "86400"
+        return resp
     return _proxy(path)
