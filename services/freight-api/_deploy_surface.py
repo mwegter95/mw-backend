@@ -2,25 +2,26 @@
 """
 Visible, idempotent deploy for the freight-api on the Surface (Windows).
 
-Unlike a captured/headless run, this opens a REAL console window on the Surface
-and runs every step with live output (command echoed, stdout/stderr streamed),
-exactly as if a person were typing in a terminal. It also starts the API server
-in its own visible window so you can watch its logs, and records a transcript.
+Opens a REAL console window on the Surface and runs every step with live output
+(command echoed, stdout/stderr streamed), exactly as if a person were typing in a
+terminal. Starts the API server in its own visible window so its logs are visible,
+and writes a transcript. Self-cleans the git tree at the end so auto-deploy stays
+healthy.
 
 Modes:
   python _deploy_surface.py          -> opens the visible deploy window, returns
-  python _deploy_surface.py run      -> (internal) the worker body
+  (the heavy downloads happen here, headless, before the window opens)
 
-What it does (idempotent): ensure portable Node + PostgreSQL, ensure PG running,
-install pnpm@9, strip the bogus packageManager field, pnpm install, apply the
+Steps (idempotent): ensure portable Node + PostgreSQL, ensure PG running,
+install pnpm@9, drop the bogus packageManager field, pnpm install, apply the
 drizzle schema with psql, build, seed, start the API (:3001) in a visible window,
-and register freight-pg + freight-api in services.json for reboot durability.
+register freight-pg + freight-api in services.json for reboot durability, then
+restore the tracked git tree.
 """
 import os
 import sys
 import json
 import time
-import socket
 import secrets
 import zipfile
 import subprocess
@@ -61,7 +62,6 @@ def _download(url, dest):
 
 
 def _ensure_runtimes():
-    """Heavy downloads happen here (no live console needed); idempotent."""
     TOOLS.mkdir(parents=True, exist_ok=True)
     if not (NODE_HOME / "node.exe").exists():
         z = TOOLS / "node.zip"
@@ -74,23 +74,19 @@ def _ensure_runtimes():
         with zipfile.ZipFile(z) as zf:
             zf.extractall(TOOLS)
     if not (PGDATA / "PG_VERSION").exists():
-        env = os.environ.copy()
         subprocess.run([str(PG_BIN / "initdb.exe"), "-D", str(PGDATA), "-U", "postgres",
-                        "--auth=trust", "--encoding=UTF8"], env=env, timeout=180)
+                        "--auth=trust", "--encoding=UTF8"], env=os.environ.copy(), timeout=180)
 
 
 def _ensure_run_js():
-    """Env-injecting launcher with a STABLE JWT secret (reused across deploys)."""
     if RUN_JS.exists():
         return
-    main_candidates = [API_DIR / "dist" / "apps" / "api" / "src" / "main.js"]
-    found = list((API_DIR / "dist").rglob("main.js")) if (API_DIR / "dist").exists() else []
-    main_js = next((p for p in main_candidates if p.exists()), found[0] if found else main_candidates[0])
+    main_js = API_DIR / "dist" / "apps" / "api" / "src" / "main.js"
     RUN_JS.write_text(
         f"process.env.DATABASE_URL={json.dumps(DB_URL)};\n"
         f"process.env.NEST_PORT={json.dumps(API_PORT)};\n"
         f"process.env.JWT_SECRET={json.dumps(secrets.token_hex(24))};\n"
-        f"require({json.dumps(str(API_DIR / 'dist' / 'apps' / 'api' / 'src' / 'main.js'))});\n"
+        f"require({json.dumps(str(main_js))});\n"
     )
 
 
@@ -155,8 +151,13 @@ Step 'register services for reboot durability' {{
   Write-Host 'services.json updated'
 }}
 
-if (PortUp {API_PORT}) {{ Write-Host "`nDONE: freight-api LISTENING on 127.0.0.1:{API_PORT}" -ForegroundColor Green }}
-else {{ Write-Host "`nWARN: API not listening on {API_PORT} -- check the server window" -ForegroundColor Yellow }}
+Step 'restore clean git tree (build touched package.json/lockfile; keeps auto-deploy healthy)' {{
+  & git -C "$MWB" checkout -- . 2>&1 | Write-Host
+  Write-Host 'tracked files restored; build output (dist/node_modules) is gitignored and kept'
+}}
+
+if (PortUp {API_PORT}) {{ Write-Host ("`nDONE: freight-api LISTENING on 127.0.0.1:{API_PORT}") -ForegroundColor Green }}
+else {{ Write-Host ("`nWARN: API not listening on {API_PORT} -- check the server window") -ForegroundColor Yellow }}
 Stop-Transcript | Out-Null
 Write-Host ''
 Read-Host 'Deploy finished. Press Enter to close this window'
@@ -171,7 +172,6 @@ def _write_ps1():
 
 
 def trigger():
-    """Prepare prerequisites, then open the visible deploy console and return."""
     _ensure_runtimes()
     _ensure_run_js()
     _write_ps1()
