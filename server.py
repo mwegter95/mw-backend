@@ -291,6 +291,10 @@ app.register_blueprint(factoring_gw_bp)
 from runner_blueprint import runner_bp
 app.register_blueprint(runner_bp)
 
+# ─── Feel-Good Productivity workbook (reuses shared accounts + JWT) ───────────
+from feelgood_blueprint import feelgood_bp
+app.register_blueprint(feelgood_bp)
+
 from yard_seed import seed_for_owner as _yard_seed_for_owner
 from yard_seed_v2 import seed_v2_for_owner as _yard_seed_v2_for_owner
 
