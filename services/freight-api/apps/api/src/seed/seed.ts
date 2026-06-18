@@ -23,66 +23,7 @@ async function main() {
   const client = postgres(process.env.DATABASE_URL!, { prepare: false });
   const db = drizzle(client);
 
-  // --- Create tables (raw SQL for portability) ---
-  await client`
-    CREATE TYPE IF NOT EXISTS role AS ENUM ('admin','underwriter','carrier','driver');
-    CREATE TYPE IF NOT EXISTS currency AS ENUM ('USD','BRL');
-    CREATE TYPE IF NOT EXISTS invoice_status AS ENUM ('pending','approved','rejected','disbursed','collected');
-    CREATE TYPE IF NOT EXISTS entry_type AS ENUM ('debit','credit');
-    CREATE TYPE IF NOT EXISTS account_type AS ENUM ('asset','liability','revenue','expense');
-
-    CREATE TABLE IF NOT EXISTS users (
-      id SERIAL PRIMARY KEY,
-      email TEXT NOT NULL UNIQUE,
-      password_hash TEXT NOT NULL,
-      name TEXT NOT NULL,
-      role role NOT NULL DEFAULT 'carrier',
-      created_at TIMESTAMP NOT NULL DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS accounts (
-      id SERIAL PRIMARY KEY,
-      name TEXT NOT NULL,
-      code TEXT NOT NULL UNIQUE,
-      type account_type NOT NULL,
-      currency currency NOT NULL DEFAULT 'USD',
-      balance_minor_units INTEGER NOT NULL DEFAULT 0,
-      updated_at TIMESTAMP NOT NULL DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS invoices (
-      id SERIAL PRIMARY KEY,
-      invoice_number TEXT NOT NULL UNIQUE,
-      carrier_id INTEGER NOT NULL REFERENCES users(id),
-      underwriter_id INTEGER REFERENCES users(id),
-      payer_name TEXT NOT NULL,
-      payer_days_to_pay INTEGER NOT NULL DEFAULT 30,
-      face_value_minor_units INTEGER NOT NULL,
-      advance_rate_bps INTEGER NOT NULL,
-      fee_rate_bps INTEGER NOT NULL,
-      advance_minor_units INTEGER,
-      fee_minor_units INTEGER,
-      reserve_minor_units INTEGER,
-      currency currency NOT NULL DEFAULT 'USD',
-      status invoice_status NOT NULL DEFAULT 'pending',
-      notes TEXT,
-      submitted_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      approved_at TIMESTAMP,
-      disbursed_at TIMESTAMP,
-      collected_at TIMESTAMP
-    );
-
-    CREATE TABLE IF NOT EXISTS ledger_entries (
-      id SERIAL PRIMARY KEY,
-      invoice_id INTEGER REFERENCES invoices(id),
-      account_id INTEGER NOT NULL REFERENCES accounts(id),
-      entry_type entry_type NOT NULL,
-      amount_minor_units INTEGER NOT NULL,
-      currency currency NOT NULL DEFAULT 'USD',
-      description TEXT NOT NULL,
-      posted_at TIMESTAMP NOT NULL DEFAULT NOW()
-    );
-  `;
+  // Schema is created by the drizzle migration (drizzle-kit generate + psql).
 
   // --- Users ---
   const [admin, underwriter, carrier] = await db
@@ -122,7 +63,7 @@ async function main() {
     .insert(accounts)
     .values([
       { name: 'Factoring Receivable', code: 'FACTORING_REC', type: 'asset', currency: 'USD', balanceMinorUnits: 0 },
-      { name: 'Cash / Bank', code: 'CASH_BANK', type: 'asset', currency: 'USD', balanceMinorUnits: 5000000000 },
+      { name: 'Cash / Bank', code: 'CASH_BANK', type: 'asset', currency: 'USD', balanceMinorUnits: 500000000 },
       { name: 'Fee Revenue', code: 'FEE_REVENUE', type: 'revenue', currency: 'USD', balanceMinorUnits: 0 },
       { name: 'Carrier Reserve Holdback', code: 'CARRIER_RESERVE', type: 'liability', currency: 'USD', balanceMinorUnits: 0 },
     ])

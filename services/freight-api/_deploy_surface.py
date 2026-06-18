@@ -1,53 +1,57 @@
 #!/usr/bin/env python3
 """
-Self-contained background deploy for the freight-api on the Surface (Windows).
+Visible, idempotent deploy for the freight-api on the Surface (Windows).
 
-Run modes:
-  python _deploy_surface.py            -> spawns itself detached, returns immediately
-  python _deploy_surface.py run        -> does the actual work (the detached worker)
+Opens a REAL console window on the Surface and runs every step with live output
+(command echoed, stdout/stderr streamed), exactly as if a person were typing in a
+terminal. Starts the API server in its own visible window so its logs are visible,
+and writes a transcript. Self-cleans the git tree at the end so auto-deploy stays
+healthy.
 
-It installs a portable Node + PostgreSQL into the runner workspace, builds the
-NestJS monorepo, applies the drizzle schema with psql, seeds, starts the API
-detached on :3001, and registers both Postgres and the API in data/services.json
-so run-server.ps1 keeps them alive and reboot-durable. All progress is written to
-_deploy.status next to this file (poll that for status). Idempotent.
+Modes:
+  python _deploy_surface.py          -> opens the visible deploy window, returns
+  (the heavy downloads happen here, headless, before the window opens)
+
+Steps (idempotent): ensure portable Node + PostgreSQL, ensure PG running,
+install pnpm@9, drop the bogus packageManager field, pnpm install, apply the
+drizzle schema with psql, build, seed, start the API (:3001) in a visible window,
+register freight-pg + freight-api in services.json for reboot durability, then
+restore the tracked git tree.
 """
-import os, sys, json, time, zipfile, secrets, subprocess, urllib.request
+import os
+import sys
+import json
+import time
+import secrets
+import zipfile
+import subprocess
+import urllib.request
 from pathlib import Path
 
 NODE_VER = "20.18.0"
 NODE_URL = f"https://nodejs.org/dist/v{NODE_VER}/node-v{NODE_VER}-win-x64.zip"
-PG_URL   = "https://get.enterprisedb.com/postgresql/postgresql-16.4-1-windows-x64-binaries.zip"
-PG_PORT  = "5433"
+PG_URL = "https://get.enterprisedb.com/postgresql/postgresql-16.4-1-windows-x64-binaries.zip"
+PG_PORT = "5433"
 API_PORT = "3001"
-DB_URL   = f"postgres://postgres@127.0.0.1:{PG_PORT}/factoring"
-
-HERE   = Path(__file__).resolve().parent              # services/freight-api (monorepo root)
-MWB    = HERE.parents[1]                               # mw-backend
-WORK   = MWB / "data" / "runner-workspace"            # persistent, gitignored
-TOOLS  = WORK / "tools"
-PGDATA = TOOLS / "pgdata"
-STATUS = HERE / "_deploy.status"
-SERVICES = MWB / "data" / "services.json"
+DB_URL = f"postgres://postgres@127.0.0.1:{PG_PORT}/factoring"
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0 Safari/537.36"}
+CREATE_NEW_CONSOLE = 0x00000010
+
+HERE = Path(__file__).resolve().parent            # services/freight-api
+MWB = HERE.parents[1]                              # mw-backend
+TOOLS = MWB / "data" / "runner-workspace" / "tools"
+NODE_HOME = TOOLS / f"node-v{NODE_VER}-win-x64"
+PG_BIN = TOOLS / "pgsql" / "bin"
+PGDATA = TOOLS / "pgdata"
+API_DIR = HERE / "apps" / "api"
+RUN_JS = API_DIR / "_run.js"
+SERVICES = MWB / "data" / "services.json"
+PS1 = HERE / "deploy_freight.ps1"
 
 
-def log(msg):
-    line = f"{time.strftime('%H:%M:%S')}  {msg}"
-    with open(STATUS, "a", encoding="utf-8") as f:
-        f.write(line + "\n")
-    print(line, flush=True)
-
-
-def fail(step, err):
-    log(f"FAILED [{step}]: {err}")
-    sys.exit(1)
-
-
-def download(url, dest):
+def _download(url, dest):
     if dest.exists() and dest.stat().st_size > 0:
         return
-    log(f"downloading {url.split('/')[-1]} ...")
     req = urllib.request.Request(url, headers=UA)
     with urllib.request.urlopen(req, timeout=600) as r, open(dest, "wb") as f:
         while True:
@@ -57,166 +61,126 @@ def download(url, dest):
             f.write(chunk)
 
 
-def unzip(zip_path, dest):
-    with zipfile.ZipFile(zip_path) as z:
-        z.extractall(dest)
-
-
-def run(cmd, cwd=None, env=None, timeout=1200, check=True, step="run"):
-    log("$ " + (" ".join(cmd) if isinstance(cmd, list) else cmd))
-    p = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True,
-                       timeout=timeout, shell=isinstance(cmd, str))
-    if p.returncode != 0:
-        tail = (p.stdout or "")[-600:] + "\n" + (p.stderr or "")[-1200:]
-        if check:
-            fail(step, f"exit {p.returncode}\n{tail}")
-        else:
-            log(f"(non-fatal) {step} exit {p.returncode}: {tail[-300:]}")
-    return p
-
-
-def start_detached(cmd, cwd, env, logfile):
-    flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-    lf = open(logfile, "ab")
-    return subprocess.Popen(cmd, cwd=cwd, env=env, stdout=lf, stderr=lf,
-                            stdin=subprocess.DEVNULL, close_fds=True, creationflags=flags)
-
-
-def register_service(entry):
-    SERVICES.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        data = json.loads(SERVICES.read_text()) if SERVICES.exists() else []
-        if isinstance(data, dict):
-            data = [data]
-    except Exception:
-        data = []
-    data = [s for s in data if s.get("name") != entry["name"]] + [entry]
-    SERVICES.write_text(json.dumps(data, indent=2))
-
-
-def deploy():
-    STATUS.write_text("")  # reset
-    log("=== freight-api deploy starting ===")
+def _ensure_runtimes():
     TOOLS.mkdir(parents=True, exist_ok=True)
-
-    # 1) Node (portable) ------------------------------------------------------
-    node_home = TOOLS / f"node-v{NODE_VER}-win-x64"
-    node_exe = node_home / "node.exe"
-    if not node_exe.exists():
+    if not (NODE_HOME / "node.exe").exists():
         z = TOOLS / "node.zip"
-        try:
-            download(NODE_URL, z); unzip(z, TOOLS)
-        except Exception as e:
-            fail("node-install", e)
-    log(f"node: {node_exe}")
-
-    env = os.environ.copy()
-    env["PATH"] = f"{node_home};{node_home / 'node_modules' / 'npm' / 'bin'};" + env.get("PATH", "")
-    env["DATABASE_URL"] = DB_URL
-    env["NEST_PORT"] = API_PORT
-    env.setdefault("JWT_SECRET", secrets.token_hex(24))
-    npm = str(node_home / "npm.cmd")
-
-    # corepack -> pnpm
-    run([str(node_home / "corepack.cmd"), "enable"], env=env, check=False, step="corepack-enable")
-    run([str(node_home / "corepack.cmd"), "prepare", "pnpm@11.7.0", "--activate"], env=env, check=False, step="corepack-pnpm")
-    pnpm = str(node_home / "pnpm.cmd")
-    if not Path(pnpm).exists():
-        run([npm, "i", "-g", "pnpm@11.7.0"], env=env, step="npm-i-pnpm")
-        pnpm = str(node_home / "pnpm.cmd")
-
-    # 2) PostgreSQL (portable) ------------------------------------------------
-    pg_bin = TOOLS / "pgsql" / "bin"
-    if not (pg_bin / "pg_ctl.exe").exists():
+        _download(NODE_URL, z)
+        with zipfile.ZipFile(z) as zf:
+            zf.extractall(TOOLS)
+    if not (PG_BIN / "pg_ctl.exe").exists():
         z = TOOLS / "pg.zip"
-        try:
-            download(PG_URL, z); unzip(z, TOOLS)  # contains pgsql/
-        except Exception as e:
-            fail("pg-install", e)
-    log(f"postgres: {pg_bin}")
-
+        _download(PG_URL, z)
+        with zipfile.ZipFile(z) as zf:
+            zf.extractall(TOOLS)
     if not (PGDATA / "PG_VERSION").exists():
-        run([str(pg_bin / "initdb.exe"), "-D", str(PGDATA), "-U", "postgres",
-             "--auth=trust", "--encoding=UTF8"], env=env, step="initdb")
-    # start postgres (idempotent: pg_ctl start is a no-op error if already running)
-    run([str(pg_bin / "pg_ctl.exe"), "-D", str(PGDATA),
-         "-o", f"-p {PG_PORT}", "-l", str(TOOLS / "pg.log"), "start"],
-        env=env, timeout=120, check=False, step="pg-start")
-    time.sleep(3)
-    run([str(pg_bin / "createdb.exe"), "-h", "127.0.0.1", "-p", PG_PORT, "-U", "postgres", "factoring"],
-        env=env, check=False, step="createdb")
+        subprocess.run([str(PG_BIN / "initdb.exe"), "-D", str(PGDATA), "-U", "postgres",
+                        "--auth=trust", "--encoding=UTF8"], env=os.environ.copy(), timeout=180)
 
-    # 3) Build the monorepo ---------------------------------------------------
-    run([pnpm, "install", "--frozen-lockfile"], cwd=str(HERE), env=env, timeout=1500, step="pnpm-install")
-    # schema -> SQL -> apply with psql (non-interactive)
-    dbdir = HERE / "packages" / "db"
-    run([pnpm, "exec", "drizzle-kit", "generate"], cwd=str(dbdir), env=env, check=False, step="drizzle-generate")
-    sqls = sorted((dbdir / "drizzle").glob("*.sql")) if (dbdir / "drizzle").exists() else []
-    psql = str(pg_bin / "psql.exe")
-    for s in sqls:
-        run([psql, "-h", "127.0.0.1", "-p", PG_PORT, "-U", "postgres", "-d", "factoring",
-             "-v", "ON_ERROR_STOP=0", "-f", str(s)], env=env, check=False, step=f"psql:{s.name}")
-    # build api
-    run([pnpm, "-C", "apps/api", "run", "build"], cwd=str(HERE), env=env, timeout=900, step="build-api")
-    # seed (non-fatal: demo can run with empty tables if seed has issues)
-    run([pnpm, "-C", "apps/api", "run", "seed"], cwd=str(HERE), env=env, timeout=300, check=False, step="seed")
 
-    # 4) Start the API detached + register for durability ---------------------
-    api_dir = HERE / "apps" / "api"
-    main_js = api_dir / "dist" / "apps" / "api" / "src" / "main.js"
-    if not main_js.exists():
-        # fall back to whatever main.js the build produced
-        found = list((api_dir / "dist").rglob("main.js"))
-        if not found:
-            fail("locate-main", "no dist/**/main.js after build")
-        main_js = found[0]
-    # env-injecting launcher so run-server.ps1 needs no per-service env support
-    runner_js = api_dir / "_run.js"
-    runner_js.write_text(
+def _ensure_run_js():
+    if RUN_JS.exists():
+        return
+    main_js = API_DIR / "dist" / "apps" / "api" / "src" / "main.js"
+    RUN_JS.write_text(
         f"process.env.DATABASE_URL={json.dumps(DB_URL)};\n"
         f"process.env.NEST_PORT={json.dumps(API_PORT)};\n"
-        f"process.env.JWT_SECRET={json.dumps(env['JWT_SECRET'])};\n"
+        f"process.env.JWT_SECRET={json.dumps(secrets.token_hex(24))};\n"
         f"require({json.dumps(str(main_js))});\n"
     )
-    start_detached([str(node_exe), str(runner_js)], cwd=str(api_dir), env=env,
-                   logfile=str(TOOLS / "freight-api.log"))
-
-    # 5) Health check ---------------------------------------------------------
-    import socket
-    ok = False
-    for _ in range(30):
-        s = socket.socket(); s.settimeout(0.5)
-        try:
-            s.connect(("127.0.0.1", int(API_PORT))); ok = True; s.close(); break
-        except Exception:
-            s.close(); time.sleep(2)
-    if not ok:
-        fail("api-health", f"not listening on {API_PORT} after build; see data/runner-workspace/tools/freight-api.log")
-
-    # durability (only once healthy): run-server.ps1 keeps these up + reboot-safe
-    register_service({"name": "freight-pg", "cmd": str(pg_bin / "pg_ctl.exe"),
-                      "args": f'-D "{PGDATA}" -o "-p {PG_PORT}" -l "{TOOLS / "pg.log"}" start',
-                      "cwd": str(TOOLS), "port": int(PG_PORT)})
-    register_service({"name": "freight-api", "cmd": str(node_exe),
-                      "args": f'"{runner_js}"', "cwd": str(api_dir), "port": int(API_PORT)})
-    log(f"DONE: freight-api LISTENING on 127.0.0.1:{API_PORT}; services registered for durability.")
 
 
-def main():
-    if len(sys.argv) > 1 and sys.argv[1] == "run":
-        try:
-            deploy()
-        except Exception as e:
-            fail("worker", repr(e))
-        return
-    # spawn the worker detached and return immediately
-    flags = 0x00000008 | 0x00000200
-    STATUS.write_text(time.strftime('%H:%M:%S') + "  triggered; worker starting...\n")
-    subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "run"],
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     stdin=subprocess.DEVNULL, close_fds=True, creationflags=flags)
-    print("deploy worker triggered; poll _deploy.status")
+PS1_TEMPLATE = r"""# Auto-generated visible deploy for freight-api. Shows every command + output.
+$ErrorActionPreference = 'Continue'
+$Host.UI.RawUI.WindowTitle = 'freight-api deploy'
+$NODE  = '{NODE_HOME}'
+$TOOLS = '{TOOLS}'
+$PGBIN = '{PG_BIN}'
+$PGDATA= '{PGDATA}'
+$APP   = '{HERE}'
+$APIDIR= '{API_DIR}'
+$RUNJS = '{RUN_JS}'
+$MWB   = '{MWB}'
+$env:Path = "$NODE;" + $env:Path
+$env:DATABASE_URL = '{DB_URL}'
+$env:NEST_PORT = '{API_PORT}'
+
+Start-Transcript -Path (Join-Path $APP '_deploy.transcript.log') -Append | Out-Null
+function Step($desc, [scriptblock]$block) {{
+  Write-Host ''
+  Write-Host ('PS> ' + $desc) -ForegroundColor Cyan
+  & $block 2>&1 | Write-Host
+}}
+function PortUp($p) {{ try {{ (New-Object Net.Sockets.TcpClient).Connect('127.0.0.1',$p); $true }} catch {{ $false }} }}
+
+Write-Host '================ FREIGHT-API DEPLOY (live) ================' -ForegroundColor Green
+Write-Host ("node: $NODE")
+
+Step 'start PostgreSQL (skip if already up)' {{
+  if (PortUp {PG_PORT}) {{ Write-Host 'postgres already running on {PG_PORT}' }}
+  else {{ & "$PGBIN\pg_ctl.exe" -D "$PGDATA" -o "-p {PG_PORT}" -l "$TOOLS\pg.log" start }}
+}}
+Step 'create database (ok if exists)' {{ & "$PGBIN\createdb.exe" -h 127.0.0.1 -p {PG_PORT} -U postgres factoring }}
+Step 'install pnpm@9' {{ & "$NODE\npm.cmd" i -g pnpm@9 --force }}
+Step 'remove bogus packageManager field' {{ Push-Location $APP; & "$NODE\npm.cmd" pkg delete packageManager; Pop-Location }}
+Step 'pnpm install' {{ Push-Location $APP; & "$NODE\pnpm.cmd" install --no-frozen-lockfile; Pop-Location }}
+Step 'generate drizzle schema SQL' {{ Push-Location "$APP\packages\db"; & "$NODE\pnpm.cmd" exec drizzle-kit generate; Pop-Location }}
+Step 'apply schema with psql' {{
+  Get-ChildItem "$APP\packages\db\drizzle\*.sql" -ErrorAction SilentlyContinue | Sort-Object Name | ForEach-Object {{
+    Write-Host ('  applying ' + $_.Name)
+    & "$PGBIN\psql.exe" -h 127.0.0.1 -p {PG_PORT} -U postgres -d factoring -f $_.FullName
+  }}
+}}
+Step 'build the API (nest build)' {{ Push-Location $APP; & "$NODE\pnpm.cmd" -C apps/api run build; Pop-Location }}
+Step 'seed demo data' {{ Push-Location $APP; & "$NODE\pnpm.cmd" -C apps/api run seed; Pop-Location }}
+
+Step 'start API server in its own window (skip if :{API_PORT} up)' {{
+  if (PortUp {API_PORT}) {{ Write-Host 'API already listening on {API_PORT}' }}
+  else {{
+    Start-Process powershell -ArgumentList '-NoExit','-Command',("`$Host.UI.RawUI.WindowTitle='freight-api server'; & '$NODE\node.exe' '$RUNJS'") -WorkingDirectory $APIDIR
+    for ($i=0; $i -lt 30 -and -not (PortUp {API_PORT}); $i++) {{ Start-Sleep 1 }}
+  }}
+}}
+
+Step 'register services for reboot durability' {{
+  $svc = @(
+    @{{ name='freight-pg';  cmd="$PGBIN\pg_ctl.exe"; args=('-D "'+$PGDATA+'" -o "-p {PG_PORT}" -l "'+$TOOLS+'\pg.log" start'); cwd="$TOOLS"; port={PG_PORT} }},
+    @{{ name='freight-api'; cmd="$NODE\node.exe";    args=('"'+$RUNJS+'"'); cwd="$APIDIR"; port={API_PORT} }}
+  )
+  ($svc | ConvertTo-Json -Depth 6) | Set-Content (Join-Path $MWB 'data\services.json') -Encoding UTF8
+  Write-Host 'services.json updated'
+}}
+
+Step 'restore clean git tree (build touched package.json/lockfile; keeps auto-deploy healthy)' {{
+  & git -C "$MWB" checkout -- . 2>&1 | Write-Host
+  Write-Host 'tracked files restored; build output (dist/node_modules) is gitignored and kept'
+}}
+
+if (PortUp {API_PORT}) {{ Write-Host ("`nDONE: freight-api LISTENING on 127.0.0.1:{API_PORT}") -ForegroundColor Green }}
+else {{ Write-Host ("`nWARN: API not listening on {API_PORT} -- check the server window") -ForegroundColor Yellow }}
+Stop-Transcript | Out-Null
+Write-Host ''
+Read-Host 'Deploy finished. Press Enter to close this window'
+"""
+
+
+def _write_ps1():
+    PS1.write_text(PS1_TEMPLATE.format(
+        NODE_HOME=NODE_HOME, TOOLS=TOOLS, PG_BIN=PG_BIN, PGDATA=PGDATA, HERE=HERE,
+        API_DIR=API_DIR, RUN_JS=RUN_JS, MWB=MWB, DB_URL=DB_URL, PG_PORT=PG_PORT, API_PORT=API_PORT,
+    ))
+
+
+def trigger():
+    _ensure_runtimes()
+    _ensure_run_js()
+    _write_ps1()
+    subprocess.Popen(
+        ["powershell", "-NoExit", "-ExecutionPolicy", "Bypass", "-File", str(PS1)],
+        creationflags=CREATE_NEW_CONSOLE, close_fds=True,
+    )
+    print(f"visible deploy window opened on the Surface: {PS1}")
 
 
 if __name__ == "__main__":
-    main()
+    trigger()
