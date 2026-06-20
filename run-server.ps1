@@ -89,6 +89,44 @@ function Start-Tunnel {
     return $p
 }
 
+# ── Normalize Cloudflare tunnel config ────────────────────────────────────────
+# INVARIANT: api.michaelwegter.com MUST route 100% of traffic to Flask ($port).
+# Managed services are exposed via Flask bridge blueprints, never directly via
+# the tunnel. Deploy scripts MUST NOT modify ~/.cloudflared/config.yml.
+# This function detects and corrects any violation on every monitor tick and at
+# startup; if it finds wrong routing it fixes the config and kills the tunnel so
+# the monitor loop restarts it with the corrected config (~10s recovery).
+function Normalize-TunnelConfig {
+    $cfgPath = Join-Path $env:USERPROFILE '.cloudflared\config.yml'
+    if (-not (Test-Path $cfgPath)) { return }
+    try {
+        $lines = Get-Content $cfgPath
+        # Wrong if any ingress service line points to a non-Flask port, OR if
+        # any path-scoped routing exists (path: means split routing = broken).
+        $wrongRoute = $lines | Where-Object {
+            ($_ -match 'service:\s*http://localhost:' -and
+             $_ -notmatch "localhost:$port" -and
+             $_ -notmatch 'http_status') -or
+            ($_ -match '^\s+path:')
+        }
+        if (-not $wrongRoute) { return }
+        Write-Host "$(Get-Date -f 'HH:mm:ss')  BAD tunnel config detected (non-Flask ingress) -- auto-fixing" -ForegroundColor Red
+        # Preserve only tunnel: and credentials-file: header lines; rewrite ingress.
+        $header = ($lines | Where-Object { $_ -match '^tunnel:|^credentials-file:' }) -join "`n"
+        $corrected = "$header`n`ningress:`n  - hostname: api.michaelwegter.com`n    service: http://localhost:$port`n  - service: http_status:404"
+        Set-Content -Path $cfgPath -Value $corrected -NoNewline
+        Write-Host "$(Get-Date -f 'HH:mm:ss')  Tunnel config fixed -> all traffic to Flask :$port" -ForegroundColor Green
+        # Kill running tunnel; monitor loop will restart it with corrected config.
+        if ($script:tunnelProc -and -not $script:tunnelProc.HasExited) {
+            Write-Host "$(Get-Date -f 'HH:mm:ss')  Restarting tunnel with corrected config..." -ForegroundColor Yellow
+            try { $script:tunnelProc.Kill() } catch {}
+            Start-Sleep -Milliseconds 500
+        }
+    } catch {
+        Write-Host "$(Get-Date -f 'HH:mm:ss')  Normalize-TunnelConfig error: $_" -ForegroundColor Yellow
+    }
+}
+
 # ── Managed services (reboot-durable) ─────────────────────────────────────────
 # Demo backends register themselves in data/services.json; this launcher is their
 # SOLE starter, so they come back after a reboot and restart if they crash.
@@ -192,6 +230,7 @@ Write-Host "-> Waitress server on port $port..."
 $script:flaskProc = Start-Flask
 
 Write-Host "-> Cloudflare Tunnel (mw-backend -> api.michaelwegter.com)..."
+Normalize-TunnelConfig
 $script:tunnelProc = Start-Tunnel
 
 Write-Host "-> Managed services from data/services.json..."
@@ -239,6 +278,8 @@ function Invoke-AutoDeploy {
 # ── Monitor loop — restart crashed processes + auto-deploy ────────────────────
 while ($true) {
     Start-Sleep -Seconds 10
+
+    Normalize-TunnelConfig   # self-heal if a deploy script corrupted the config
 
     if ($script:flaskProc.HasExited) {
         Write-Host "$(Get-Date -f 'HH:mm:ss')  Server exited (code $($script:flaskProc.ExitCode)) -- restarting..." -ForegroundColor Yellow
