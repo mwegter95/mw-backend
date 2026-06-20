@@ -288,8 +288,38 @@ from factoring_gateway_blueprint import factoring_gw_bp
 app.register_blueprint(factoring_gw_bp)
 
 # ─── AdvertEyes OOH Ops Platform demo bridge ─────────────────────────────────
-from adverteyes_blueprint import bridge_bp as adverteyes_bp
-app.register_blueprint(adverteyes_bp)
+import urllib.request as _ureq, urllib.error as _uerr
+from flask import Blueprint as _BP, request as _req, Response as _Resp
+_adv_bp = _BP("adverteyes_bridge", __name__, url_prefix="/adverteyes")
+_ADV_UP = "http://127.0.0.1:3741"
+_ADV_HOP = {"connection","keep-alive","proxy-authenticate","proxy-authorization",
+            "te","trailers","transfer-encoding","upgrade","host",
+            "content-length","content-encoding"}
+_ADV_METHODS = ["GET","POST","PUT","PATCH","DELETE","OPTIONS"]
+
+@_adv_bp.route("/", defaults={"path": ""}, methods=_ADV_METHODS)
+@_adv_bp.route("/<path:path>", methods=_ADV_METHODS)
+def _adv_proxy(path):
+    url = f"{_ADV_UP}/{path}"
+    if _req.query_string:
+        url += "?" + _req.query_string.decode()
+    data = _req.get_data() or None
+    ur = _ureq.Request(url, data=data, method=_req.method)
+    for k, v in _req.headers:
+        if k.lower() not in _ADV_HOP:
+            ur.add_header(k, v)
+    try:
+        with _ureq.urlopen(ur, timeout=60) as r:
+            body, status = r.read(), r.status
+            hdrs = [(k, v) for k, v in r.getheaders() if k.lower() not in _ADV_HOP]
+    except _uerr.HTTPError as e:
+        body, status = e.read(), e.code
+        hdrs = [(k, v) for k, v in (e.headers.items() if e.headers else []) if k.lower() not in _ADV_HOP]
+    except Exception as e:
+        return _Resp(f"bridge error: {e}", status=502, mimetype="text/plain")
+    return _Resp(body, status=status, headers=hdrs)
+
+app.register_blueprint(_adv_bp)
 
 # ─── Remote runner (secure; OFF unless RUN_ENDPOINT_ENABLED + RUN_SECRET set) ──
 from runner_blueprint import runner_bp
