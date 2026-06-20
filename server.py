@@ -287,6 +287,10 @@ app.register_blueprint(civicq_bp)
 from factoring_gateway_blueprint import factoring_gw_bp
 app.register_blueprint(factoring_gw_bp)
 
+# ─── AdvertEyes OOH Ops Platform demo bridge ─────────────────────────────────
+from adverteyes_blueprint import bridge_bp as adverteyes_bp
+app.register_blueprint(adverteyes_bp)
+
 # ─── Remote runner (secure; OFF unless RUN_ENDPOINT_ENABLED + RUN_SECRET set) ──
 from runner_blueprint import runner_bp
 app.register_blueprint(runner_bp)
