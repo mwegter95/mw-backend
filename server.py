@@ -3759,6 +3759,50 @@ if __name__ == "__main__":
                     log.info("[startup] reset stale processing status: %s", _sf.name)
             except Exception:
                 pass
+    # ── Ensure port is free before handing off to waitress ───────────────────
+    # If a managed service (e.g. an Upwork demo backend) grabbed this port while
+    # Flask was down, waitress would fail silently. Kill the occupant so Flask
+    # always wins its own port.
+    import socket as _sock
+    _probe = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+    _probe.setsockopt(_sock.SOL_SOCKET, _sock.SO_REUSEADDR, 1)
+    try:
+        _probe.bind(("", PORT))
+        _probe.close()
+    except OSError:
+        log.warning("[startup] port %s already in use — evicting occupant", PORT)
+        try:
+            if os.name == "nt":
+                _r = subprocess.run(
+                    ["netstat", "-ano"], capture_output=True, text=True, timeout=10
+                )
+                for _ln in _r.stdout.splitlines():
+                    if f":{PORT}" in _ln and "LISTENING" in _ln:
+                        _pid = _ln.strip().split()[-1]
+                        if _pid.isdigit() and int(_pid) != os.getpid():
+                            log.warning("[startup] killing PID %s on port %s", _pid, PORT)
+                            subprocess.run(
+                                ["taskkill", "/F", "/PID", _pid],
+                                capture_output=True, timeout=10,
+                            )
+                            break
+            else:
+                _r = subprocess.run(
+                    ["lsof", "-ti", f"tcp:{PORT}"], capture_output=True, text=True, timeout=10
+                )
+                for _pid in _r.stdout.split():
+                    if _pid.isdigit() and int(_pid) != os.getpid():
+                        log.warning("[startup] killing PID %s on port %s", _pid, PORT)
+                        subprocess.run(["kill", "-9", _pid], capture_output=True, timeout=5)
+        except Exception as _kill_err:
+            log.error("[startup] could not evict port occupant: %s", _kill_err)
+        import time as _t; _t.sleep(1)
+    finally:
+        try:
+            _probe.close()
+        except Exception:
+            pass
+
     log.info("✓ mw-backend starting on http://0.0.0.0:%s", PORT)
     from waitress import serve
     serve(app, host="0.0.0.0", port=PORT)

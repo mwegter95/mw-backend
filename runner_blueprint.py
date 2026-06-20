@@ -132,17 +132,39 @@ def execute():
     try:
         with os.fdopen(fd, "w") as f:
             f.write(script)
+        proc = subprocess.Popen(
+            [argv0, path], cwd=cwd,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True,
+        )
         try:
-            proc = subprocess.run(
-                [argv0, path], cwd=cwd, capture_output=True, text=True,
-                timeout=timeout, start_new_session=True,
-            )
-            exit_code, out, err = proc.returncode, proc.stdout, proc.stderr
-        except subprocess.TimeoutExpired as e:
+            out, err = proc.communicate(timeout=timeout)
+            exit_code = proc.returncode
+        except subprocess.TimeoutExpired:
             timed_out = True
+            # Kill the entire process group so spawned children (Node, postgres, etc.)
+            # don't keep running and squatting ports after timeout.
+            try:
+                if os.name == "nt":
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                        capture_output=True, timeout=10,
+                    )
+                else:
+                    import signal as _sig
+                    os.killpg(os.getpgid(proc.pid), _sig.SIGKILL)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            try:
+                out, err = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                out, err = proc.communicate()
             exit_code = 124
-            out = e.stdout if isinstance(e.stdout, str) else (e.stdout.decode() if e.stdout else "")
-            err = (e.stderr if isinstance(e.stderr, str) else (e.stderr.decode() if e.stderr else "")) + f"\n[timed out after {timeout}s]"
+            err = (err or "") + f"\n[timed out after {timeout}s — process tree killed]"
     except Exception as e:
         return jsonify({"ok": False, "error": f"exec failed: {e}"}), 500
     finally:
