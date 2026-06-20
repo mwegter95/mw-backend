@@ -70,13 +70,29 @@ if (Test-Path $envFile) {
 }
 $port = if ($env:PORT) { $env:PORT } else { '5050' }
 
+# Kill whatever is LISTENING on a port (used to reclaim Flask's port from a
+# squatter — e.g. a managed demo service that bound 5050 by mistake).
+function Free-Port($p) {
+    try {
+        $pids = Get-NetTCPConnection -LocalPort ([int]$p) -State Listen -ErrorAction SilentlyContinue |
+                Select-Object -ExpandProperty OwningProcess -Unique
+        foreach ($procId in $pids) {
+            if ($procId -and $procId -ne 0 -and $procId -ne $PID) {
+                try { Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+                      Write-Host "$(Get-Date -f 'HH:mm:ss')  freed port $p (killed PID $procId that was squatting it)" -ForegroundColor Yellow } catch {}
+            }
+        }
+    } catch {}
+}
+
 # ── Process starters (UseShellExecute=$false -- logs appear in this window) ────
 function Start-Flask {
+    Free-Port $port   # GUARANTEE Flask owns its port; evict any squatter first
     $psi = [System.Diagnostics.ProcessStartInfo]::new($PythonExe, 'server.py')
     $psi.WorkingDirectory = $ScriptDir
     $psi.UseShellExecute  = $false
     $p = [System.Diagnostics.Process]::Start($psi)
-    Write-Host "$(Get-Date -f 'HH:mm:ss')  Server started (PID $($p.Id))" -ForegroundColor Green
+    Write-Host "$(Get-Date -f 'HH:mm:ss')  Server started (PID $($p.Id)) on port $port" -ForegroundColor Green
     return $p
 }
 
@@ -160,26 +176,38 @@ function Test-Port($p) {
 
 function Start-ManagedService($svc) {
     $name = [string]$svc.name
+    $svcPort = 0; [void][int]::TryParse([string]$svc.port, [ref]$svcPort)
+    $script:svcLastStart[$name] = Get-Date   # debounce regardless of outcome
+    # HARD INVARIANT: a managed service may NEVER take Flask's port. (A demo service
+    # that read process.env.PORT once inherited 5050 and hijacked the whole API.)
+    if ($svcPort -eq [int]$port) {
+        Write-Host "$(Get-Date -f 'HH:mm:ss')  service '$name' REFUSED: its port ($svcPort) is Flask's port. Re-register it on a different port." -ForegroundColor Red
+        return
+    }
     $cwd  = [string]$svc.cwd
     if (-not $cwd) { $cwd = $ScriptDir }
     elseif (-not [System.IO.Path]::IsPathRooted($cwd)) { $cwd = Join-Path $ScriptDir $cwd }
     # Normalize away any '..' segments -- Start-Process -WorkingDirectory rejects them.
     try { $cwd = [System.IO.Path]::GetFullPath($cwd) } catch {}
-    $script:svcLastStart[$name] = Get-Date   # debounce regardless of outcome
     if (-not (Test-Path -LiteralPath $cwd -PathType Container)) {
         Write-Host "$(Get-Date -f 'HH:mm:ss')  service '$name' skipped: working dir not found -> $cwd" -ForegroundColor Yellow
         return
     }
     $out  = Join-Path $DataDir "$name.log"
     $errl = Join-Path $DataDir "$name.err.log"
+    # Pin the child to ITS OWN port so it can never inherit Flask's PORT from .env.
+    $savedPort = $env:PORT; $savedNest = $env:NEST_PORT
+    if ($svcPort -gt 0) { $env:PORT = "$svcPort"; $env:NEST_PORT = "$svcPort" }
     try {
         $p = Start-Process -FilePath ([string]$svc.cmd) -ArgumentList ([string]$svc.args) `
              -WorkingDirectory $cwd -WindowStyle Hidden -PassThru -ErrorAction Stop `
              -RedirectStandardOutput $out -RedirectStandardError $errl
         $script:managed[$name] = $p
-        Write-Host "$(Get-Date -f 'HH:mm:ss')  service '$name' started (PID $($p.Id)) -> port $($svc.port)" -ForegroundColor Green
+        Write-Host "$(Get-Date -f 'HH:mm:ss')  service '$name' started (PID $($p.Id)) -> port $svcPort" -ForegroundColor Green
     } catch {
         Write-Host "$(Get-Date -f 'HH:mm:ss')  service '$name' failed to start: $($_.Exception.Message)" -ForegroundColor Red
+    } finally {
+        $env:PORT = $savedPort; $env:NEST_PORT = $savedNest
     }
 }
 
