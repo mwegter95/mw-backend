@@ -101,7 +101,7 @@ init_db()
 # ── Auth helpers ─────────────────────────────────────────────────────────────
 
 def make_token(user_id):
-    payload = {"sub": user_id, "exp": datetime.datetime.utcnow() + TTL}
+    payload = {"sub": str(user_id), "exp": datetime.datetime.utcnow() + TTL}
     return jwt.encode(payload, SECRET_KEY, algorithm=JWT_ALGO)
 
 def require_auth(f):
@@ -112,7 +112,7 @@ def require_auth(f):
             return jsonify({"error": "unauthorized"}), 401
         try:
             payload = jwt.decode(auth[7:], SECRET_KEY, algorithms=[JWT_ALGO])
-            g.user_id = payload["sub"]
+            g.user_id = int(payload["sub"])
         except jwt.ExpiredSignatureError:
             return jsonify({"error": "token expired"}), 401
         except Exception:
