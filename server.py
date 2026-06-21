@@ -329,6 +329,10 @@ app.register_blueprint(runner_bp)
 from feelgood_blueprint import feelgood_bp
 app.register_blueprint(feelgood_bp)
 
+# ─── MN State Park Tracker demo blueprint ────────────────────────────────────
+from mn_parks_blueprint import mn_parks_bp
+app.register_blueprint(mn_parks_bp)
+
 from yard_seed import seed_for_owner as _yard_seed_for_owner
 from yard_seed_v2 import seed_v2_for_owner as _yard_seed_v2_for_owner
 
