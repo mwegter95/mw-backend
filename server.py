@@ -333,6 +333,10 @@ app.register_blueprint(feelgood_bp)
 from mn_parks_blueprint import mn_parks_bp
 app.register_blueprint(mn_parks_bp)
 
+# ─── Solo Law CMS demo blueprint ─────────────────────────────────────────────
+from solo_law_blueprint import solo_law_bp
+app.register_blueprint(solo_law_bp)
+
 from yard_seed import seed_for_owner as _yard_seed_for_owner
 from yard_seed_v2 import seed_v2_for_owner as _yard_seed_v2_for_owner
 
