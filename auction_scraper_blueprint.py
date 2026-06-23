@@ -232,7 +232,7 @@ class LelandLittleScraper(BaseScraper):
             self._log(f"Live scrape failed: {exc}", "warning")
 
         if lots_found == 0:
-            self._log("Live parse returned no lots — serving seeded fallback.")
+            self._log("Live parse returned no lots; serving seeded fallback.")
             for seed in _SEEDS.get("leland_little", []):
                 seed = dict(seed)
                 seed["scraped_at"] = _now_iso()
@@ -417,7 +417,7 @@ class HeritageAuctionsScraper(BaseScraper):
         # flag for API, then serve high-quality seeded data
         self._log("Attempting GET https://www.ha.com/ catalog …")
         self._rate_pause(2.0, 1, "https://www.ha.com/c/search-results.zx")
-        self._log("Received 403 Forbidden — anti-scraping protection detected.", "warning")
+        self._log("Received 403 Forbidden: anti-scraping protection detected.", "warning")
 
         self._emit("flagged_for_api", {
             "source": self.slug,
@@ -474,9 +474,9 @@ class BonhamsScraper(BaseScraper):
 
         if lots_found == 0:
             if not _PLAYWRIGHT_AVAILABLE:
-                self._log("Playwright not available — serving seeded fallback.")
+                self._log("Playwright not available; serving seeded fallback.")
             else:
-                self._log("Playwright extraction returned no lots — serving seeded fallback.")
+                self._log("Playwright extraction returned no lots; serving seeded fallback.")
             for seed in _SEEDS.get("bonhams", []):
                 seed = dict(seed)
                 seed["scraped_at"] = _now_iso()
@@ -530,7 +530,7 @@ class BonhamsScraper(BaseScraper):
             try:
                 page.goto(self._LOTS_URL, wait_until="networkidle", timeout=30000)
             except PWTimeout:
-                self._log("Playwright: page load timeout — partial data.", "warning")
+                self._log("Playwright: page load timeout, partial data.", "warning")
 
             # Try to find links to an active auction
             auction_links = page.eval_on_selector_all(
