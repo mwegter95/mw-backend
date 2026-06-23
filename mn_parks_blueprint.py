@@ -108,10 +108,11 @@ def require_auth(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
         auth = request.headers.get("Authorization", "")
-        if not auth.startswith("Bearer "):
+        token = auth[7:] if auth.startswith("Bearer ") else request.args.get("token", "")
+        if not token:
             return jsonify({"error": "unauthorized"}), 401
         try:
-            payload = jwt.decode(auth[7:], SECRET_KEY, algorithms=[JWT_ALGO])
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[JWT_ALGO])
             g.user_id = int(payload["sub"])
         except jwt.ExpiredSignatureError:
             return jsonify({"error": "token expired"}), 401
@@ -248,6 +249,23 @@ def upload_photo(vid):
     fname = f"{int(time.time()*1000)}{ext}"
     fpath = user_dir / fname
     file.save(str(fpath))
+    # iPhone HEIC/HEIF -> JPEG so any browser can display it (browser-side
+    # conversion is unreliable; do it here as the source of truth).
+    if ext.lower() in (".heic", ".heif") or (file.mimetype or "").lower() in ("image/heic", "image/heif"):
+        try:
+            from PIL import Image
+            try:
+                import pillow_heif
+                pillow_heif.register_heif_opener()
+            except Exception:
+                pass
+            jpg = fpath.with_suffix(".jpg")
+            Image.open(str(fpath)).convert("RGB").save(str(jpg), "JPEG", quality=85)
+            try: fpath.unlink()
+            except Exception: pass
+            fpath = jpg
+        except Exception:
+            pass  # conversion unavailable: keep the original file
     cur = db.execute("INSERT INTO mn_photos (visit_id, file_path) VALUES (?,?)",
                      (vid, str(fpath)))
     db.commit()
