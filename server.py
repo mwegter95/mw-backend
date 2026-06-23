@@ -337,6 +337,10 @@ app.register_blueprint(mn_parks_bp)
 from solo_law_blueprint import solo_law_bp
 app.register_blueprint(solo_law_bp)
 
+# ─── Auction Scraper ETL demo blueprint ──────────────────────────────────────
+from auction_scraper_blueprint import auction_scraper_bp
+app.register_blueprint(auction_scraper_bp)
+
 from yard_seed import seed_for_owner as _yard_seed_for_owner
 from yard_seed_v2 import seed_v2_for_owner as _yard_seed_v2_for_owner
 
