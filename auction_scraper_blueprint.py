@@ -423,7 +423,7 @@ class HeritageAuctionsScraper(BaseScraper):
             "source": self.slug,
             "name": self.name,
             "reason": (
-                "Heritage Auctions returned HTTP 403 — strong anti-scraping "
+                "Heritage Auctions returned HTTP 403: strong anti-scraping "
                 "protection. Per project policy: flag for API arrangement, do NOT "
                 "attempt to circumvent. Serving seeded lot data as demonstration."
             ),
@@ -441,7 +441,7 @@ class HeritageAuctionsScraper(BaseScraper):
             "source": self.slug,
             "name": self.name,
             "lot_count": len(seeds),
-            "note": "seeded fallback — flagged_for_api",
+            "note": "seeded fallback, flagged_for_api",
             "elapsed_s": 0,
             "ts": _now_iso(),
         })

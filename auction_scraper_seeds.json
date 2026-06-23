@@ -4,24 +4,30 @@
       "source": "heritage_auctions",
       "source_url": "https://www.ha.com/itm/american-paintings/winslow-homer-1836-1910-watercolor-coastal-maine/a/1234-69017.s",
       "lot_number": "69017",
-      "title": "Winslow Homer (1836-1910) — Watercolor on Paper, Coastal Maine Scene",
+      "title": "Winslow Homer (1836-1910) : Watercolor on Paper, Coastal Maine Scene",
       "description": "Watercolor on paper laid on board, signed lower right 'Winslow Homer'. A dramatic coastal Maine scene depicting crashing surf against rocky headlands with two figures in the distance. Ex. collection of a prominent New England family, documented provenance to 1924. Condition: excellent, minor toning to margins, unexamined outside of frame.",
       "estimate_low": 45000,
       "estimate_high": 65000,
       "currency": "USD",
-      "raw_estimate_text": "$45,000 – $65,000",
+      "raw_estimate_text": "$45,000 - $65,000",
       "sale_date": "2026-07-15",
       "bidding_deadline": "2026-07-15T18:00:00Z",
-      "images": ["https://picsum.photos/seed/ha-69017-a/600/450", "https://picsum.photos/seed/ha-69017-b/600/450"],
+      "images": [
+        "https://picsum.photos/seed/ha-69017-a/600/450",
+        "https://picsum.photos/seed/ha-69017-b/600/450"
+      ],
       "status": "upcoming",
       "scraped_at": "2026-06-23T14:00:00Z",
-      "scraper_notes": "Served from seeded fallback — Heritage returned 403; flagged for API arrangement.",
+      "scraper_notes": "Served from seeded fallback : Heritage returned 403; flagged for API arrangement.",
       "raw_json_ld": {
         "@context": "https://schema.org",
         "@type": "Product",
-        "name": "Winslow Homer (1836-1910) — Watercolor on Paper, Coastal Maine Scene",
+        "name": "Winslow Homer (1836-1910) : Watercolor on Paper, Coastal Maine Scene",
         "description": "Watercolor on paper, signed lower right 'Winslow Homer'. Coastal Maine scene with crashing surf.",
-        "brand": { "@type": "Brand", "name": "Heritage Auctions" },
+        "brand": {
+          "@type": "Brand",
+          "name": "Heritage Auctions"
+        },
         "offers": {
           "@type": "Offer",
           "priceCurrency": "USD",
@@ -33,7 +39,9 @@
             "priceCurrency": "USD"
           }
         },
-        "image": ["https://picsum.photos/seed/ha-69017-a/600/450"],
+        "image": [
+          "https://picsum.photos/seed/ha-69017-a/600/450"
+        ],
         "url": "https://www.ha.com/itm/american-paintings/winslow-homer-1836-1910-watercolor-coastal-maine/a/1234-69017.s",
         "sku": "69017",
         "category": "American Art > Paintings, Drawings & Sculpture"
@@ -43,24 +51,29 @@
       "source": "heritage_auctions",
       "source_url": "https://www.ha.com/itm/tiffany-studios/favrile-glass-wisteria-table-lamp/a/1234-69021.s",
       "lot_number": "69021",
-      "title": "Tiffany Studios (1893–1933) — Favrile Glass Wisteria Table Lamp",
+      "title": "Tiffany Studios (1893-1933) : Favrile Glass Wisteria Table Lamp",
       "description": "Leaded glass and patinated bronze, shade unsigned. Wisteria design in rich mauves, lavenders and greens with a mottled blue sky ground. Original base with verdigris patina, pad feet. Shade diameter: 18 in. (45.7 cm); height overall: 27 in. (68.6 cm). Provenance: private New York estate.",
       "estimate_low": 28000,
       "estimate_high": 42000,
       "currency": "USD",
-      "raw_estimate_text": "$28,000 – $42,000",
+      "raw_estimate_text": "$28,000 - $42,000",
       "sale_date": "2026-07-15",
       "bidding_deadline": "2026-07-15T18:00:00Z",
-      "images": ["https://picsum.photos/seed/ha-69021-a/600/450"],
+      "images": [
+        "https://picsum.photos/seed/ha-69021-a/600/450"
+      ],
       "status": "upcoming",
       "scraped_at": "2026-06-23T14:00:00Z",
-      "scraper_notes": "Served from seeded fallback — Heritage returned 403; flagged for API arrangement.",
+      "scraper_notes": "Served from seeded fallback : Heritage returned 403; flagged for API arrangement.",
       "raw_json_ld": {
         "@context": "https://schema.org",
         "@type": "Product",
-        "name": "Tiffany Studios — Favrile Glass Wisteria Table Lamp",
+        "name": "Tiffany Studios : Favrile Glass Wisteria Table Lamp",
         "description": "Leaded glass and patinated bronze wisteria table lamp, c.1910.",
-        "brand": { "@type": "Brand", "name": "Heritage Auctions" },
+        "brand": {
+          "@type": "Brand",
+          "name": "Heritage Auctions"
+        },
         "offers": {
           "@type": "Offer",
           "priceCurrency": "USD",
@@ -72,7 +85,9 @@
             "priceCurrency": "USD"
           }
         },
-        "image": ["https://picsum.photos/seed/ha-69021-a/600/450"],
+        "image": [
+          "https://picsum.photos/seed/ha-69021-a/600/450"
+        ],
         "url": "https://www.ha.com/itm/tiffany-studios/favrile-glass-wisteria-table-lamp/a/1234-69021.s",
         "sku": "69021",
         "category": "Decorative Art > Lighting"
@@ -82,24 +97,30 @@
       "source": "heritage_auctions",
       "source_url": "https://www.ha.com/itm/american-furniture/gustav-stickley-oak-library-table/a/1234-69033.s",
       "lot_number": "69033",
-      "title": "Gustav Stickley (1858–1942) — Oak Library Table, Model No. 653",
+      "title": "Gustav Stickley (1858-1942) : Oak Library Table, Model No. 653",
       "description": "Quartersawn white oak, original medium brown finish, lower shelf, through-tenon construction. Red decal signature, paper label intact. 29 × 48 × 30 in. (73.7 × 121.9 × 76.2 cm). Minor surface wear consistent with age; no repairs or refinishing. Provenance: private Illinois collection acquired 1987.",
       "estimate_low": 3500,
       "estimate_high": 5500,
       "currency": "USD",
-      "raw_estimate_text": "$3,500 – $5,500",
+      "raw_estimate_text": "$3,500 - $5,500",
       "sale_date": "2026-07-15",
       "bidding_deadline": "2026-07-15T18:00:00Z",
-      "images": ["https://picsum.photos/seed/ha-69033-a/600/450", "https://picsum.photos/seed/ha-69033-b/600/450"],
+      "images": [
+        "https://picsum.photos/seed/ha-69033-a/600/450",
+        "https://picsum.photos/seed/ha-69033-b/600/450"
+      ],
       "status": "upcoming",
       "scraped_at": "2026-06-23T14:00:00Z",
-      "scraper_notes": "Served from seeded fallback — Heritage returned 403; flagged for API arrangement.",
+      "scraper_notes": "Served from seeded fallback : Heritage returned 403; flagged for API arrangement.",
       "raw_json_ld": {
         "@context": "https://schema.org",
         "@type": "Product",
-        "name": "Gustav Stickley — Oak Library Table, Model No. 653",
+        "name": "Gustav Stickley : Oak Library Table, Model No. 653",
         "description": "Quartersawn white oak Arts & Crafts library table with original finish, red decal signature.",
-        "brand": { "@type": "Brand", "name": "Heritage Auctions" },
+        "brand": {
+          "@type": "Brand",
+          "name": "Heritage Auctions"
+        },
         "offers": {
           "@type": "Offer",
           "priceCurrency": "USD",
@@ -111,7 +132,9 @@
             "priceCurrency": "USD"
           }
         },
-        "image": ["https://picsum.photos/seed/ha-69033-a/600/450"],
+        "image": [
+          "https://picsum.photos/seed/ha-69033-a/600/450"
+        ],
         "url": "https://www.ha.com/itm/american-furniture/gustav-stickley-oak-library-table/a/1234-69033.s",
         "sku": "69033",
         "category": "American Furniture"
@@ -121,24 +144,29 @@
       "source": "heritage_auctions",
       "source_url": "https://www.ha.com/itm/silver/paul-revere-jr-silver-sauce-boat-boston-c1780/a/1234-69047.s",
       "lot_number": "69047",
-      "title": "Paul Revere Jr. (1735–1818) — Sterling Silver Sauce Boat, Boston, c.1780",
+      "title": "Paul Revere Jr. (1735-1818) : Sterling Silver Sauce Boat, Boston, c.1780",
       "description": "Silver sauce boat, engraved armorial crest, shaped rim, flying scroll handle, three pad feet. Maker's mark 'REVERE' in rectangle, clearly struck. Weight: 6.25 troy oz (194.4 g); length: 7.5 in. (19 cm). Fine original condition, light surface patina. Ex. private Boston collection, by descent.",
       "estimate_low": 18000,
       "estimate_high": 25000,
       "currency": "USD",
-      "raw_estimate_text": "$18,000 – $25,000",
+      "raw_estimate_text": "$18,000 - $25,000",
       "sale_date": "2026-07-15",
       "bidding_deadline": "2026-07-15T18:00:00Z",
-      "images": ["https://picsum.photos/seed/ha-69047-a/600/450"],
+      "images": [
+        "https://picsum.photos/seed/ha-69047-a/600/450"
+      ],
       "status": "upcoming",
       "scraped_at": "2026-06-23T14:00:00Z",
-      "scraper_notes": "Served from seeded fallback — Heritage returned 403; flagged for API arrangement.",
+      "scraper_notes": "Served from seeded fallback : Heritage returned 403; flagged for API arrangement.",
       "raw_json_ld": {
         "@context": "https://schema.org",
         "@type": "Product",
-        "name": "Paul Revere Jr. — Sterling Silver Sauce Boat, Boston c.1780",
+        "name": "Paul Revere Jr. : Sterling Silver Sauce Boat, Boston c.1780",
         "description": "Rare Paul Revere Jr. sauce boat with armorial crest, 6.25 troy oz, maker marked 'REVERE'.",
-        "brand": { "@type": "Brand", "name": "Heritage Auctions" },
+        "brand": {
+          "@type": "Brand",
+          "name": "Heritage Auctions"
+        },
         "offers": {
           "@type": "Offer",
           "priceCurrency": "USD",
@@ -150,7 +178,9 @@
             "priceCurrency": "USD"
           }
         },
-        "image": ["https://picsum.photos/seed/ha-69047-a/600/450"],
+        "image": [
+          "https://picsum.photos/seed/ha-69047-a/600/450"
+        ],
         "url": "https://www.ha.com/itm/silver/paul-revere-jr-silver-sauce-boat-boston-c1780/a/1234-69047.s",
         "sku": "69047",
         "category": "Silver > American Silver"
@@ -165,19 +195,25 @@
       "estimate_low": 4500,
       "estimate_high": 7000,
       "currency": "USD",
-      "raw_estimate_text": "$4,500 – $7,000",
+      "raw_estimate_text": "$4,500 - $7,000",
       "sale_date": "2026-07-15",
       "bidding_deadline": "2026-07-15T18:00:00Z",
-      "images": ["https://picsum.photos/seed/ha-69052-a/600/450", "https://picsum.photos/seed/ha-69052-b/600/450"],
+      "images": [
+        "https://picsum.photos/seed/ha-69052-a/600/450",
+        "https://picsum.photos/seed/ha-69052-b/600/450"
+      ],
       "status": "upcoming",
       "scraped_at": "2026-06-23T14:00:00Z",
-      "scraper_notes": "Served from seeded fallback — Heritage returned 403; flagged for API arrangement.",
+      "scraper_notes": "Served from seeded fallback : Heritage returned 403; flagged for API arrangement.",
       "raw_json_ld": {
         "@context": "https://schema.org",
         "@type": "Product",
         "name": "American Carved Carousel Horse, Attributed to Spillman Engineering, c.1920",
         "description": "Polychrome carved wood carousel horse, original paint, glass eyes, horsehair tail, ex-Lakeside Amusement Park.",
-        "brand": { "@type": "Brand", "name": "Heritage Auctions" },
+        "brand": {
+          "@type": "Brand",
+          "name": "Heritage Auctions"
+        },
         "offers": {
           "@type": "Offer",
           "priceCurrency": "USD",
@@ -189,7 +225,9 @@
             "priceCurrency": "USD"
           }
         },
-        "image": ["https://picsum.photos/seed/ha-69052-a/600/450"],
+        "image": [
+          "https://picsum.photos/seed/ha-69052-a/600/450"
+        ],
         "url": "https://www.ha.com/itm/folk-art/american-carved-and-painted-carousel-horse/a/1234-69052.s",
         "sku": "69052",
         "category": "Folk Art > Carousel Art"
@@ -199,24 +237,29 @@
       "source": "heritage_auctions",
       "source_url": "https://www.ha.com/itm/asian-art/chinese-export-porcelain-famille-rose-punch-bowl/a/1234-69063.s",
       "lot_number": "69063",
-      "title": "Chinese Export Porcelain Famille Rose Punch Bowl, Qianlong Period (1736–1796)",
+      "title": "Chinese Export Porcelain Famille Rose Punch Bowl, Qianlong Period (1736-1796)",
       "description": "Large punch bowl with hand-painted floral medallions and butterfly border in famille rose enamels. Interior: central peony spray. Exterior: alternating panels of flowers and landscapes. Diameter: 15.75 in. (40 cm); height: 6.5 in. (16.5 cm). Old hairline crack to interior, professionally stabilized. Ex. English country house collection.",
       "estimate_low": 6000,
       "estimate_high": 9000,
       "currency": "USD",
-      "raw_estimate_text": "$6,000 – $9,000",
+      "raw_estimate_text": "$6,000 - $9,000",
       "sale_date": "2026-07-15",
       "bidding_deadline": "2026-07-15T18:00:00Z",
-      "images": ["https://picsum.photos/seed/ha-69063-a/600/450"],
+      "images": [
+        "https://picsum.photos/seed/ha-69063-a/600/450"
+      ],
       "status": "upcoming",
       "scraped_at": "2026-06-23T14:00:00Z",
-      "scraper_notes": "Served from seeded fallback — Heritage returned 403; flagged for API arrangement.",
+      "scraper_notes": "Served from seeded fallback : Heritage returned 403; flagged for API arrangement.",
       "raw_json_ld": {
         "@context": "https://schema.org",
         "@type": "Product",
         "name": "Chinese Export Famille Rose Punch Bowl, Qianlong Period",
         "description": "Large famille rose punch bowl, hand-painted peony and butterfly décor, Qianlong period, diameter 15.75 in.",
-        "brand": { "@type": "Brand", "name": "Heritage Auctions" },
+        "brand": {
+          "@type": "Brand",
+          "name": "Heritage Auctions"
+        },
         "offers": {
           "@type": "Offer",
           "priceCurrency": "USD",
@@ -228,7 +271,9 @@
             "priceCurrency": "USD"
           }
         },
-        "image": ["https://picsum.photos/seed/ha-69063-a/600/450"],
+        "image": [
+          "https://picsum.photos/seed/ha-69063-a/600/450"
+        ],
         "url": "https://www.ha.com/itm/asian-art/chinese-export-porcelain-famille-rose-punch-bowl/a/1234-69063.s",
         "sku": "69063",
         "category": "Asian Art > Chinese Export Porcelain"
@@ -243,19 +288,24 @@
       "estimate_low": 8500,
       "estimate_high": 12000,
       "currency": "USD",
-      "raw_estimate_text": "$8,500 – $12,000",
+      "raw_estimate_text": "$8,500 - $12,000",
       "sale_date": "2026-07-15",
       "bidding_deadline": "2026-07-15T18:00:00Z",
-      "images": ["https://picsum.photos/seed/ha-69071-a/600/450"],
+      "images": [
+        "https://picsum.photos/seed/ha-69071-a/600/450"
+      ],
       "status": "upcoming",
       "scraped_at": "2026-06-23T14:00:00Z",
-      "scraper_notes": "Served from seeded fallback — Heritage returned 403; flagged for API arrangement.",
+      "scraper_notes": "Served from seeded fallback : Heritage returned 403; flagged for API arrangement.",
       "raw_json_ld": {
         "@context": "https://schema.org",
         "@type": "Product",
         "name": "Art Deco Silvered Bronze Diana the Huntress by A. Bouraine, c.1925",
         "description": "French Art Deco silvered bronze, signed 'A. Bouraine', Diana with hunting dog, onyx and gilt base, 22 in. high.",
-        "brand": { "@type": "Brand", "name": "Heritage Auctions" },
+        "brand": {
+          "@type": "Brand",
+          "name": "Heritage Auctions"
+        },
         "offers": {
           "@type": "Offer",
           "priceCurrency": "USD",
@@ -267,7 +317,9 @@
             "priceCurrency": "USD"
           }
         },
-        "image": ["https://picsum.photos/seed/ha-69071-a/600/450"],
+        "image": [
+          "https://picsum.photos/seed/ha-69071-a/600/450"
+        ],
         "url": "https://www.ha.com/itm/sculptures/art-deco-silvered-bronze-figure-diana-huntress/a/1234-69071.s",
         "sku": "69071",
         "category": "Sculptures > Art Deco Bronzes"
@@ -277,24 +329,30 @@
       "source": "heritage_auctions",
       "source_url": "https://www.ha.com/itm/illustration-art/norman-rockwell-saturday-evening-post-original-study/a/1234-69084.s",
       "lot_number": "69084",
-      "title": "Norman Rockwell (1894–1978) — Original Study for 'The Shiner', c.1953",
+      "title": "Norman Rockwell (1894-1978) : Original Study for 'The Shiner', c.1953",
       "description": "Oil on canvas, pencil underdrawing visible under raking light. Depicts a young girl with a black eye sitting outside the principal's office, grinning proudly. Signed lower right 'Norman Rockwell'. 18 × 14 in. (45.7 × 35.6 cm). Accompanied by a COA from the Norman Rockwell Museum, Stockbridge, MA. Published: Saturday Evening Post, May 23, 1953.",
       "estimate_low": 120000,
       "estimate_high": 180000,
       "currency": "USD",
-      "raw_estimate_text": "$120,000 – $180,000",
+      "raw_estimate_text": "$120,000 - $180,000",
       "sale_date": "2026-07-15",
       "bidding_deadline": "2026-07-15T18:00:00Z",
-      "images": ["https://picsum.photos/seed/ha-69084-a/600/450", "https://picsum.photos/seed/ha-69084-b/600/450"],
+      "images": [
+        "https://picsum.photos/seed/ha-69084-a/600/450",
+        "https://picsum.photos/seed/ha-69084-b/600/450"
+      ],
       "status": "upcoming",
       "scraped_at": "2026-06-23T14:00:00Z",
-      "scraper_notes": "Served from seeded fallback — Heritage returned 403; flagged for API arrangement.",
+      "scraper_notes": "Served from seeded fallback : Heritage returned 403; flagged for API arrangement.",
       "raw_json_ld": {
         "@context": "https://schema.org",
         "@type": "Product",
-        "name": "Norman Rockwell — Original Study for 'The Shiner', Saturday Evening Post c.1953",
+        "name": "Norman Rockwell : Original Study for 'The Shiner', Saturday Evening Post c.1953",
         "description": "Oil on canvas, signed Norman Rockwell, COA from Norman Rockwell Museum, published SEP May 1953, 18x14 in.",
-        "brand": { "@type": "Brand", "name": "Heritage Auctions" },
+        "brand": {
+          "@type": "Brand",
+          "name": "Heritage Auctions"
+        },
         "offers": {
           "@type": "Offer",
           "priceCurrency": "USD",
@@ -306,7 +364,9 @@
             "priceCurrency": "USD"
           }
         },
-        "image": ["https://picsum.photos/seed/ha-69084-a/600/450"],
+        "image": [
+          "https://picsum.photos/seed/ha-69084-a/600/450"
+        ],
         "url": "https://www.ha.com/itm/illustration-art/norman-rockwell-saturday-evening-post-original-study/a/1234-69084.s",
         "sku": "69084",
         "category": "Illustration Art > Original Paintings"
@@ -318,52 +378,58 @@
       "source": "leland_little",
       "source_url": "https://www.lelandlittle.com/e-catalog/lot/LL-2901/",
       "lot_number": "2901",
-      "title": "Thomas Day (attributed) — Mahogany Side Chair, NC, c.1840",
+      "title": "Thomas Day (attributed) : Mahogany Side Chair, NC, c.1840",
       "description": "Carved mahogany side chair attributed to the workshop of Thomas Day, Milton, NC. Scrolled crest rail, slip seat with period needlepoint cover, sabre legs. Height: 33.5 in. Minor age cracks to rear seat rail, consistent with age and use.",
       "estimate_low": 2200,
       "estimate_high": 3400,
       "currency": "USD",
-      "raw_estimate_text": "$2,200 – $3,400",
+      "raw_estimate_text": "$2,200 - $3,400",
       "sale_date": "2026-07-25",
       "bidding_deadline": "2026-07-25T17:00:00Z",
-      "images": ["https://picsum.photos/seed/ll-2901-a/600/450"],
+      "images": [
+        "https://picsum.photos/seed/ll-2901-a/600/450"
+      ],
       "status": "upcoming",
       "scraped_at": "2026-06-23T14:00:00Z",
-      "scraper_notes": "Served from seeded fallback — live parse returned no lots."
+      "scraper_notes": "Served from seeded fallback : live parse returned no lots."
     },
     {
       "source": "leland_little",
       "source_url": "https://www.lelandlittle.com/e-catalog/lot/LL-2905/",
       "lot_number": "2905",
-      "title": "Jugtown Ware — Large Salt-Glaze Stoneware Jar, NC, c.1930",
+      "title": "Jugtown Ware : Large Salt-Glaze Stoneware Jar, NC, c.1930",
       "description": "Large salt-glazed stoneware storage jar, Jugtown Pottery, Moore County, NC. Impressed 'JUGTOWN WARE' mark. Blue-grey glaze with ash deposits and natural running glaze accents. Height: 14 in. (35.6 cm). No chips or cracks.",
       "estimate_low": 800,
       "estimate_high": 1400,
       "currency": "USD",
-      "raw_estimate_text": "$800 – $1,400",
+      "raw_estimate_text": "$800 - $1,400",
       "sale_date": "2026-07-25",
       "bidding_deadline": "2026-07-25T17:00:00Z",
-      "images": ["https://picsum.photos/seed/ll-2905-a/600/450"],
+      "images": [
+        "https://picsum.photos/seed/ll-2905-a/600/450"
+      ],
       "status": "upcoming",
       "scraped_at": "2026-06-23T14:00:00Z",
-      "scraper_notes": "Served from seeded fallback — live parse returned no lots."
+      "scraper_notes": "Served from seeded fallback : live parse returned no lots."
     },
     {
       "source": "leland_little",
       "source_url": "https://www.lelandlittle.com/e-catalog/lot/LL-2911/",
       "lot_number": "2911",
-      "title": "William Posey Silva (1859–1948) — Oil on Canvas, Autumn Pines, NC",
+      "title": "William Posey Silva (1859-1948) : Oil on Canvas, Autumn Pines, NC",
       "description": "Oil on canvas, signed lower right 'W.P. Silva'. Autumn pines along a North Carolina mountain ridge, warm ochre and sienna tones. 20 × 24 in. (50.8 × 61 cm). Original gilt frame, gesso losses to frame only, canvas excellent.",
       "estimate_low": 1800,
       "estimate_high": 2800,
       "currency": "USD",
-      "raw_estimate_text": "$1,800 – $2,800",
+      "raw_estimate_text": "$1,800 - $2,800",
       "sale_date": "2026-07-25",
       "bidding_deadline": "2026-07-25T17:00:00Z",
-      "images": ["https://picsum.photos/seed/ll-2911-a/600/450"],
+      "images": [
+        "https://picsum.photos/seed/ll-2911-a/600/450"
+      ],
       "status": "upcoming",
       "scraped_at": "2026-06-23T14:00:00Z",
-      "scraper_notes": "Served from seeded fallback — live parse returned no lots."
+      "scraper_notes": "Served from seeded fallback : live parse returned no lots."
     },
     {
       "source": "leland_little",
@@ -374,13 +440,15 @@
       "estimate_low": 5500,
       "estimate_high": 8500,
       "currency": "USD",
-      "raw_estimate_text": "$5,500 – $8,500",
+      "raw_estimate_text": "$5,500 - $8,500",
       "sale_date": "2026-07-25",
       "bidding_deadline": "2026-07-25T17:00:00Z",
-      "images": ["https://picsum.photos/seed/ll-2918-a/600/450"],
+      "images": [
+        "https://picsum.photos/seed/ll-2918-a/600/450"
+      ],
       "status": "upcoming",
       "scraped_at": "2026-06-23T14:00:00Z",
-      "scraper_notes": "Served from seeded fallback — live parse returned no lots."
+      "scraper_notes": "Served from seeded fallback : live parse returned no lots."
     },
     {
       "source": "leland_little",
@@ -391,13 +459,16 @@
       "estimate_low": 12000,
       "estimate_high": 18000,
       "currency": "USD",
-      "raw_estimate_text": "$12,000 – $18,000",
+      "raw_estimate_text": "$12,000 - $18,000",
       "sale_date": "2026-07-25",
       "bidding_deadline": "2026-07-25T17:00:00Z",
-      "images": ["https://picsum.photos/seed/ll-2924-a/600/450", "https://picsum.photos/seed/ll-2924-b/600/450"],
+      "images": [
+        "https://picsum.photos/seed/ll-2924-a/600/450",
+        "https://picsum.photos/seed/ll-2924-b/600/450"
+      ],
       "status": "upcoming",
       "scraped_at": "2026-06-23T14:00:00Z",
-      "scraper_notes": "Served from seeded fallback — live parse returned no lots."
+      "scraper_notes": "Served from seeded fallback : live parse returned no lots."
     }
   ],
   "bonhams": [
@@ -410,30 +481,34 @@
       "estimate_low": 8000,
       "estimate_high": 12000,
       "currency": "GBP",
-      "raw_estimate_text": "£8,000 – £12,000",
+      "raw_estimate_text": "£8,000 - £12,000",
       "sale_date": "2026-07-22",
       "bidding_deadline": "2026-07-22T14:00:00Z",
-      "images": ["https://picsum.photos/seed/bn-103-a/600/450"],
+      "images": [
+        "https://picsum.photos/seed/bn-103-a/600/450"
+      ],
       "status": "upcoming",
       "scraped_at": "2026-06-23T14:00:00Z",
-      "scraper_notes": "Served from seeded fallback — Playwright extraction returned no lots from /_next/data."
+      "scraper_notes": "Served from seeded fallback : Playwright extraction returned no lots from /_next/data."
     },
     {
       "source": "bonhams",
       "source_url": "https://www.bonhams.com/auction/29814/lot/211/",
       "lot_number": "211",
-      "title": "Katsushika Hokusai (1760–1849) — Woodblock Print, Kanagawa Okinami Ura (The Great Wave)",
+      "title": "Katsushika Hokusai (1760-1849) : Woodblock Print, Kanagawa Okinami Ura (The Great Wave)",
       "description": "Woodblock print from the series 'Thirty-six Views of Mount Fuji', Nishiki-e colour woodblock, later impression, Edo period printing. Sheet: 25.7 × 37.2 cm (10.1 × 14.6 in). Some toning and minor foxing to margins; colours fresh and unfaded. Previously unrecorded private collection, UK.",
       "estimate_low": 35000,
       "estimate_high": 55000,
       "currency": "GBP",
-      "raw_estimate_text": "£35,000 – £55,000",
+      "raw_estimate_text": "£35,000 - £55,000",
       "sale_date": "2026-07-22",
       "bidding_deadline": "2026-07-22T14:00:00Z",
-      "images": ["https://picsum.photos/seed/bn-211-a/600/450"],
+      "images": [
+        "https://picsum.photos/seed/bn-211-a/600/450"
+      ],
       "status": "upcoming",
       "scraped_at": "2026-06-23T14:00:00Z",
-      "scraper_notes": "Served from seeded fallback — Playwright extraction returned no lots from /_next/data."
+      "scraper_notes": "Served from seeded fallback : Playwright extraction returned no lots from /_next/data."
     },
     {
       "source": "bonhams",
@@ -444,13 +519,16 @@
       "estimate_low": 6000,
       "estimate_high": 9000,
       "currency": "GBP",
-      "raw_estimate_text": "£6,000 – £9,000",
+      "raw_estimate_text": "£6,000 - £9,000",
       "sale_date": "2026-07-22",
       "bidding_deadline": "2026-07-22T14:00:00Z",
-      "images": ["https://picsum.photos/seed/bn-318-a/600/450", "https://picsum.photos/seed/bn-318-b/600/450"],
+      "images": [
+        "https://picsum.photos/seed/bn-318-a/600/450",
+        "https://picsum.photos/seed/bn-318-b/600/450"
+      ],
       "status": "upcoming",
       "scraped_at": "2026-06-23T14:00:00Z",
-      "scraper_notes": "Served from seeded fallback — Playwright extraction returned no lots from /_next/data."
+      "scraper_notes": "Served from seeded fallback : Playwright extraction returned no lots from /_next/data."
     },
     {
       "source": "bonhams",
@@ -461,13 +539,15 @@
       "estimate_low": 4500,
       "estimate_high": 7000,
       "currency": "EUR",
-      "raw_estimate_text": "€4,500 – €7,000",
+      "raw_estimate_text": "€4,500 - €7,000",
       "sale_date": "2026-07-22",
       "bidding_deadline": "2026-07-22T14:00:00Z",
-      "images": ["https://picsum.photos/seed/bn-402-a/600/450"],
+      "images": [
+        "https://picsum.photos/seed/bn-402-a/600/450"
+      ],
       "status": "upcoming",
       "scraped_at": "2026-06-23T14:00:00Z",
-      "scraper_notes": "Served from seeded fallback — Playwright extraction returned no lots from /_next/data."
+      "scraper_notes": "Served from seeded fallback : Playwright extraction returned no lots from /_next/data."
     },
     {
       "source": "bonhams",
@@ -478,13 +558,15 @@
       "estimate_low": 22000,
       "estimate_high": 30000,
       "currency": "GBP",
-      "raw_estimate_text": "£22,000 – £30,000",
+      "raw_estimate_text": "£22,000 - £30,000",
       "sale_date": "2026-07-22",
       "bidding_deadline": "2026-07-22T14:00:00Z",
-      "images": ["https://picsum.photos/seed/bn-507-a/600/450"],
+      "images": [
+        "https://picsum.photos/seed/bn-507-a/600/450"
+      ],
       "status": "upcoming",
       "scraped_at": "2026-06-23T14:00:00Z",
-      "scraper_notes": "Served from seeded fallback — Playwright extraction returned no lots from /_next/data."
+      "scraper_notes": "Served from seeded fallback : Playwright extraction returned no lots from /_next/data."
     }
   ]
 }
