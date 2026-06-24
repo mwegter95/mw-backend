@@ -6,6 +6,7 @@ import io
 import os
 import re
 import uuid
+import random
 import asyncio
 import threading
 import queue
@@ -433,14 +434,14 @@ async def _search_google_maps(ctx, query, city):
             f"https://www.google.com/maps/search/{_urlencode(query)}",
             wait_until="domcontentloaded", timeout=20000,
         )
-        await page.wait_for_timeout(2500)
+        await page.wait_for_timeout(2000)
 
         # Result cards are role=article or .Nv2PK
         cards = await page.query_selector_all('[role="article"]')
         if not cards:
             cards = await page.query_selector_all(".Nv2PK")
 
-        for card in cards[:5]:
+        for card in cards[:4]:
             try:
                 # Grab name from card before clicking
                 heading = await card.query_selector('[role="heading"]')
@@ -449,7 +450,7 @@ async def _search_google_maps(ctx, query, city):
                     continue
 
                 await card.click()
-                await page.wait_for_timeout(1800)
+                await page.wait_for_timeout(1300)
 
                 # Website link in detail panel — try several stable selectors
                 website = ""
@@ -608,17 +609,59 @@ async def _multi_source_search(browser, query, industry, city, want=12):
 
 # ─── Query planning ────────────────────────────────────────────────────────────
 # Concrete, searchable business types per industry — never the literal "local business".
+# Pools are intentionally large so each run can sample a different slice.
 _INDUSTRY_QUERY_TERMS = {
-    "Entertainment":              ["bowling alley", "family entertainment center", "escape room", "arcade", "mini golf"],
-    "Professional Services":      ["law firm", "accounting firm", "marketing agency", "architecture firm", "insurance agency"],
-    "Home & Commercial Services": ["HVAC contractor", "plumbing company", "landscaping company", "electrician", "roofing contractor"],
-    "Healthcare & Wellness":      ["dental clinic", "chiropractor", "physical therapy clinic", "med spa", "family clinic"],
-    "Retail & Hospitality":       ["restaurant", "boutique", "craft brewery", "auto repair shop", "coffee shop"],
-    "Manufacturing & Logistics":  ["machine shop", "metal fabrication", "freight company", "manufacturer", "food producer"],
+    "Entertainment": [
+        "bowling alley", "family entertainment center", "escape room", "arcade",
+        "mini golf", "go kart track", "trampoline park", "laser tag", "axe throwing",
+        "comedy club", "banquet hall", "event venue", "pottery studio", "dance studio"],
+    "Professional Services": [
+        "law firm", "accounting firm", "marketing agency", "architecture firm",
+        "insurance agency", "financial advisor", "consulting firm", "engineering firm",
+        "staffing agency", "tax preparation service", "bookkeeping service",
+        "public relations agency", "title company", "real estate brokerage"],
+    "Home & Commercial Services": [
+        "HVAC contractor", "plumbing company", "landscaping company", "electrician",
+        "roofing contractor", "painting contractor", "pest control company",
+        "garage door company", "fence company", "concrete contractor",
+        "commercial cleaning service", "tree service", "appliance repair", "handyman service"],
+    "Healthcare & Wellness": [
+        "dental clinic", "chiropractor", "physical therapy clinic", "med spa",
+        "family medicine clinic", "optometrist", "dermatology clinic", "pediatric clinic",
+        "orthodontist", "veterinary clinic", "massage therapy clinic", "acupuncture clinic",
+        "audiology clinic", "podiatry clinic"],
+    "Retail & Hospitality": [
+        "restaurant", "boutique", "craft brewery", "auto repair shop", "coffee shop",
+        "bakery", "florist", "jewelry store", "furniture store", "wine bar",
+        "catering company", "bike shop", "pet store", "hardware store"],
+    "Manufacturing & Logistics": [
+        "machine shop", "metal fabrication shop", "freight company", "manufacturer",
+        "food producer", "plastics manufacturer", "packaging company", "tool and die shop",
+        "welding shop", "cabinet maker", "sign company", "printing company",
+        "trucking company", "distribution company"],
 }
 
-_TWIN_CITIES = ["Minneapolis", "St. Paul", "Bloomington", "Edina", "Plymouth", "Eden Prairie", "Maple Grove"]
-_GREATER_MN  = ["Duluth", "Rochester", "St. Cloud", "Mankato", "Moorhead", "Brainerd"]
+_TWIN_CITIES = [
+    "Minneapolis", "St. Paul", "Bloomington", "Edina", "Plymouth", "Eden Prairie",
+    "Maple Grove", "Minnetonka", "Eagan", "Burnsville", "Woodbury", "Maplewood",
+    "Roseville", "St. Louis Park", "Brooklyn Park", "Coon Rapids", "Apple Valley",
+    "Lakeville", "Shakopee", "Blaine"]
+_GREATER_MN = [
+    "Duluth", "Rochester", "St. Cloud", "Mankato", "Moorhead", "Brainerd", "Winona",
+    "Bemidji", "Hibbing", "Faribault", "Owatonna", "Willmar", "Alexandria", "Marshall",
+    "Austin", "Albert Lea", "Fergus Falls", "Hutchinson"]
+
+# Varied phrasings so the same term+city pair doesn't always produce an identical query.
+_QUERY_TEMPLATES = [
+    "{term} {city} MN",
+    "{term} in {city} Minnesota",
+    "best {term} {city} MN",
+    "{term} near {city} MN",
+    "local {term} in {city} Minnesota",
+    "{term} company {city} MN",
+    "family owned {term} {city} MN",
+    "small {term} {city} Minnesota",
+]
 
 # Reverse lookup: term -> industry label, for tagging discovered leads.
 _TERM_INDUSTRY = {}
@@ -626,7 +669,21 @@ for _ind, _terms in _INDUSTRY_QUERY_TERMS.items():
     for _t in _terms:
         _TERM_INDUSTRY[_t] = _ind
 
-_MAX_QUERIES = 8
+_MAX_QUERIES = 6
+
+
+def _next_rotation():
+    """Persisted rotating offset so consecutive runs explore a different slice."""
+    try:
+        conn = _get_conn()
+        row = conn.execute("SELECT value FROM meta WHERE key='discover_rot'").fetchone()
+        rot = int(row[0]) if row and str(row[0]).lstrip('-').isdigit() else 0
+        conn.execute("INSERT OR REPLACE INTO meta VALUES ('discover_rot', ?)", (str(rot + 5),))
+        conn.commit()
+        conn.close()
+        return rot
+    except Exception:
+        return random.randint(0, 9999)
 
 
 def _cities_for_region(region, refinements):
@@ -641,6 +698,7 @@ def _cities_for_region(region, refinements):
     out = []
     for a, b in zip(_TWIN_CITIES, _GREATER_MN):
         out.extend([a, b])
+    out.extend(_TWIN_CITIES[len(_GREATER_MN):])
     return out
 
 
@@ -653,31 +711,48 @@ def _terms_for_industry(industry, refinements, keywords):
     # If the user typed a keyword that reads like a business type, lead with it
     if keywords and len(keywords.split()) <= 4:
         return [keywords.strip()], (target or "")
-    # "All industries" — spread one strong term from each industry for breadth
-    spread = [terms[0] for terms in _INDUSTRY_QUERY_TERMS.values()]
+    # "All industries" — full cross-industry pool for maximum breadth/variety
+    spread = []
+    for terms in _INDUSTRY_QUERY_TERMS.values():
+        spread.extend(terms)
     return spread, ""
 
 
 def _build_query_plan(industry, region, keywords, refinements):
-    """Produce up to _MAX_QUERIES concrete {q, term, city, industry} search tasks."""
+    """Produce up to _MAX_QUERIES varied {q, term, city, industry} search tasks.
+
+    Each run shuffles the term/city/template pools and applies a persisted rotating
+    offset, so the same filters yield different concrete searches on every run.
+    """
     terms, _ = _terms_for_industry(industry, refinements, keywords)
     cities = _cities_for_region(region, refinements)
     kw = keywords.strip() if keywords else ""
-    # Don't duplicate keyword into the query when it's already the term
     kw_suffix = f" {kw}" if (kw and not any(kw.lower() in t.lower() for t in terms)) else ""
 
-    plan = []
-    for i in range(min(_MAX_QUERIES, max(len(terms), len(cities)))):
-        term = terms[i % len(terms)]
-        city = cities[i % len(cities)]
+    rot = _next_rotation()
+    rng = random.Random()  # unseeded -> fresh variety each run
+    terms = terms[:]; cities = cities[:]; templates = _QUERY_TEMPLATES[:]
+    rng.shuffle(terms); rng.shuffle(cities); rng.shuffle(templates)
+
+    plan, used = [], set()
+    i = 0
+    attempts = 0
+    while len(plan) < _MAX_QUERIES and attempts < _MAX_QUERIES * 8:
+        attempts += 1
+        term = terms[(rot + i) % len(terms)]
+        city = cities[(rot + i) % len(cities)]
+        tmpl = templates[i % len(templates)]
+        i += 1
+        q = (tmpl.format(term=term, city=city) + kw_suffix).strip()
+        if q in used:
+            continue
+        used.add(q)
         plan.append({
             "term": term,
             "city": city,
             "industry": _TERM_INDUSTRY.get(term, refinements.get("industry") or industry or ""),
-            "q": f"{term} {city} MN{kw_suffix}".strip(),
+            "q": q,
         })
-        if len(plan) >= _MAX_QUERIES:
-            break
     return plan
 
 
@@ -709,38 +784,43 @@ def discover():
                 return
             seen = set()
             candidates = []
-            pool_cap = overall_cap * 3   # gather extra so verification can drop dead ones
+            pool_cap = overall_cap * 2   # gather extra so verification can drop dead ones
             launch_opts = dict(headless=True,
                                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"])
             async with async_playwright() as pw:
                 browser = await pw.chromium.launch(**launch_opts)
                 try:
-                    # ── Phase A: search every query, gather unique candidates ──
-                    for idx, task in enumerate(plan):
-                        q.put({"event": "query", "data": {
-                            "idx": idx, "total": len(plan),
-                            "q": task["q"], "industry": task["industry"], "city": task["city"],
-                        }})
-                        try:
-                            found = await _multi_source_search(
-                                browser, task["q"], task["industry"], task["city"], want=want_per_q)
-                        except Exception as e:
-                            q.put({"event": "query_error", "data": {"idx": idx, "error": str(e)[:120]}})
-                            found = []
-                        new_count = 0
-                        for biz in found:
-                            domain = _extract_domain(biz.get("website", ""))
-                            if not domain or domain in seen or _is_aggregator(domain):
-                                continue
-                            if not _looks_like_real_domain(domain):
-                                continue
-                            seen.add(domain)
-                            biz["industry"] = biz.get("industry") or task["industry"]
-                            candidates.append(biz)
-                            new_count += 1
-                        q.put({"event": "query_done", "data": {
-                            "idx": idx, "q": task["q"], "found": new_count,
-                            "running_total": len(candidates)}})
+                    # ── Phase A: search queries in small concurrent batches ────
+                    for start in range(0, len(plan), 2):
+                        batch = plan[start:start + 2]
+                        for j, task in enumerate(batch):
+                            q.put({"event": "query", "data": {
+                                "idx": start + j, "total": len(plan),
+                                "q": task["q"], "industry": task["industry"], "city": task["city"],
+                            }})
+                        batch_results = await asyncio.gather(*[
+                            _multi_source_search(browser, t["q"], t["term"], t["city"], want=want_per_q)
+                            for t in batch
+                        ], return_exceptions=True)
+                        for j, (task, found) in enumerate(zip(batch, batch_results)):
+                            if isinstance(found, Exception):
+                                q.put({"event": "query_error", "data": {
+                                    "idx": start + j, "error": str(found)[:120]}})
+                                found = []
+                            new_count = 0
+                            for biz in found:
+                                domain = _extract_domain(biz.get("website", ""))
+                                if not domain or domain in seen or _is_aggregator(domain):
+                                    continue
+                                if not _looks_like_real_domain(domain):
+                                    continue
+                                seen.add(domain)
+                                biz["industry"] = task["industry"]
+                                candidates.append(biz)
+                                new_count += 1
+                            q.put({"event": "query_done", "data": {
+                                "idx": start + j, "q": task["q"], "found": new_count,
+                                "running_total": len(candidates)}})
                         if len(candidates) >= pool_cap:
                             break
 
