@@ -293,13 +293,33 @@ def _extract_domain(url):
 
 _SKIP_DOMAINS = {
     "yelp.com","yellowpages.com","facebook.com","wikipedia.org",
-    "instagram.com","twitter.com","linkedin.com","google.com",
+    "instagram.com","twitter.com","x.com","linkedin.com","google.com",
     "angi.com","thumbtack.com","bbb.org","nextdoor.com","tripadvisor.com",
     "homeadvisor.com","angieslist.com","houzz.com","bark.com",
+    "youtube.com","reddit.com","amazon.com","ebay.com","etsy.com","pinterest.com",
+    "mapquest.com","indeed.com","glassdoor.com","ziprecruiter.com","craigslist.org",
+    "tiktok.com","apple.com","yellowpages.ca","manta.com","chamberofcommerce.com",
+    "expedia.com","booking.com","groupon.com","opentable.com","doordash.com",
+    "ubereats.com","grubhub.com","zomato.com","foursquare.com","wikiwand.com",
+    "businessyab.com","cylex.us.com","superpages.com","local.com","citysearch.com",
+    "mapcarta.com","loc8nearme.com","dnb.com","zoominfo.com","crunchbase.com",
 }
 
 def _is_aggregator(domain):
     return any(domain.endswith(d) for d in _SKIP_DOMAINS)
+
+
+_DOMAIN_RE = re.compile(r'^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}$')
+
+def _looks_like_real_domain(domain):
+    """Reject IPs, schemes, junk and malformed hosts before we spend time loading them."""
+    if not domain or '/' in domain or ' ' in domain:
+        return False
+    if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', domain):  # bare IP
+        return False
+    if domain.endswith('.gov') or domain.endswith('.gov/'):
+        return False  # municipal pages aren't sellable web leads
+    return bool(_DOMAIN_RE.match(domain))
 
 
 def _decode_ddg_href(href):
@@ -673,8 +693,8 @@ def discover():
     region      = data.get("region", "Both")
     keywords    = data.get("keywords", "")
     refinements = data.get("refinements", {}) or {}
-    want_per_q  = int(data.get("per_query", 6))
-    overall_cap = int(data.get("max_results", 30))
+    want_per_q  = int(data.get("per_query", 8))
+    overall_cap = int(data.get("max_results", 12))
     stream      = bool(data.get("stream"))
 
     plan = _build_query_plan(industry, region, keywords, refinements)
@@ -688,12 +708,14 @@ def discover():
                 q.put(None)
                 return
             seen = set()
-            total = 0
+            candidates = []
+            pool_cap = overall_cap * 3   # gather extra so verification can drop dead ones
             launch_opts = dict(headless=True,
                                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"])
             async with async_playwright() as pw:
                 browser = await pw.chromium.launch(**launch_opts)
                 try:
+                    # ── Phase A: search every query, gather unique candidates ──
                     for idx, task in enumerate(plan):
                         q.put({"event": "query", "data": {
                             "idx": idx, "total": len(plan),
@@ -708,22 +730,59 @@ def discover():
                         new_count = 0
                         for biz in found:
                             domain = _extract_domain(biz.get("website", ""))
-                            key = domain or (biz.get("name", "") or "").lower()
-                            if not key or key in seen:
+                            if not domain or domain in seen or _is_aggregator(domain):
                                 continue
-                            seen.add(key)
+                            if not _looks_like_real_domain(domain):
+                                continue
+                            seen.add(domain)
+                            biz["industry"] = biz.get("industry") or task["industry"]
+                            candidates.append(biz)
                             new_count += 1
-                            total += 1
-                            q.put({"event": "business", "data": biz})
-                            if total >= overall_cap:
-                                break
                         q.put({"event": "query_done", "data": {
-                            "idx": idx, "q": task["q"], "found": new_count, "running_total": total}})
-                        if total >= overall_cap:
+                            "idx": idx, "q": task["q"], "found": new_count,
+                            "running_total": len(candidates)}})
+                        if len(candidates) >= pool_cap:
                             break
+
+                    # ── Phase B: verify reachability + capture screenshot ──────
+                    q.put({"event": "verifying", "data": {"candidates": len(candidates)}})
+                    ctx = await browser.new_context(
+                        viewport={"width": 1280, "height": 800},
+                        user_agent="Mozilla/5.0 (compatible; ClientFinder/1.0)",
+                    )
+                    sem = asyncio.Semaphore(5)
+
+                    async def _verify(biz):
+                        async with sem:
+                            try:
+                                site = await _scrape_site(ctx, biz)
+                                return ("ok", {**biz, **site})
+                            except Exception as e:
+                                return ("drop", {"name": biz.get("name", ""),
+                                                 "website": biz.get("website", ""),
+                                                 "reason": str(e)[:80]})
+
+                    tasks = [asyncio.create_task(_verify(b)) for b in candidates[:pool_cap]]
+                    verified = 0
+                    try:
+                        for fut in asyncio.as_completed(tasks):
+                            kind, payload = await fut
+                            if kind == "ok":
+                                if verified >= overall_cap:
+                                    continue
+                                verified += 1
+                                q.put({"event": "business", "data": payload})
+                            else:
+                                q.put({"event": "dropped", "data": payload})
+                            if verified >= overall_cap:
+                                break
+                    finally:
+                        for t2 in tasks:
+                            t2.cancel()
+                        await ctx.close()
                 finally:
                     await browser.close()
-            q.put({"event": "done", "data": {"total": total}})
+            q.put({"event": "done", "data": {"total": verified}})
             q.put(None)
         asyncio.run(_run())
 
@@ -753,7 +812,7 @@ def discover():
     t = threading.Thread(target=_emit, args=(result_q,), daemon=True)
     t.start()
     businesses, queries = [], []
-    deadline = time.time() + 100
+    deadline = time.time() + 160
     while time.time() < deadline:
         try:
             item = result_q.get(timeout=45)
@@ -772,17 +831,52 @@ def discover():
 
 async def _scrape_site(ctx, biz):
     """Screenshot + tech/contact extraction for one site. Returns a data dict."""
-    url = biz.get("website", "")
-    if not url.startswith("http"):
-        url = "https://" + url
+    raw = biz.get("website", "")
+    domain = _extract_domain(raw) or _clean_url(raw)
     name = biz.get("name", "")
     city = biz.get("city", "")
 
+    # Try several URL variants so http-only / www-only sites still resolve.
+    variants = []
+    if raw.startswith("http"):
+        variants.append(raw)
+    if domain:
+        if domain.startswith("www."):
+            variants += [f"https://{domain}", f"https://{domain[4:]}", f"http://{domain}"]
+        else:
+            variants += [f"https://{domain}", f"https://www.{domain}", f"http://{domain}"]
+    # De-dupe while preserving order
+    seen_v, variants = set(), [v for v in variants if not (v in seen_v or seen_v.add(v))]
+
     page = await ctx.new_page()
     try:
-        resp = await page.goto(url, wait_until="domcontentloaded", timeout=15000)
-        status_code = resp.status if resp else 0
-        await page.wait_for_timeout(800)
+        resp, used_url = None, ""
+        for url in variants:
+            try:
+                resp = await page.goto(url, wait_until="domcontentloaded", timeout=9000)
+                if resp and resp.status < 400:
+                    used_url = page.url
+                    break
+                resp = None
+            except Exception:
+                resp = None
+                continue
+        if not resp:
+            raise RuntimeError(f"unreachable: {domain}")
+
+        status_code = resp.status
+        await page.wait_for_timeout(700)
+
+        # Reject parked / empty-shell domains: require a title or real body text.
+        title = (await page.title() or "").strip()
+        body_text = await page.evaluate(
+            "() => document.body ? (document.body.innerText || '').trim() : ''")
+        if len(body_text) < 40 and len(title) < 3:
+            raise RuntimeError(f"empty/parked: {domain}")
+        parked_markers = ("domain is for sale", "buy this domain", "parked free",
+                          "godaddy.com/domainsearch", "is parked", "domain for sale")
+        if any(m in (body_text.lower()) for m in parked_markers):
+            raise RuntimeError(f"parked: {domain}")
 
         # Screenshot
         fname = f"{uuid.uuid4().hex[:12]}.png"
@@ -818,7 +912,8 @@ async def _scrape_site(ctx, biz):
             stack_flags.append("Non-responsive layout")
 
         return {
-            "name": name, "website": biz.get("website", ""), "city": city,
+            "name": name, "website": _extract_domain(final_url) or domain, "city": city,
+            "title": title[:120],
             "screenshot_url": screenshot_url, "emails": emails, "phones": phones,
             "stack_flags": stack_flags, "status_code": status_code,
         }
