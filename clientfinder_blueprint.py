@@ -323,6 +323,20 @@ def _looks_like_real_domain(domain):
     return bool(_DOMAIN_RE.match(domain))
 
 
+# A realistic desktop-Chrome context. Big sites behind WAFs (Akamai/Cloudflare)
+# return 403/503 for bot-looking UAs, so every Playwright context uses this.
+_REAL_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+_BROWSER_CTX_OPTS = dict(
+    viewport={"width": 1280, "height": 800},
+    user_agent=_REAL_UA,
+    locale="en-US",
+    extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+)
+_LAUNCH_ARGS = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
+                "--disable-blink-features=AutomationControlled"]
+
+
 def _decode_ddg_href(href):
     """DuckDuckGo wraps outbound links as /l/?uddg=<encoded>. Unwrap to the real URL."""
     from urllib.parse import unquote, urlparse, parse_qs
@@ -568,16 +582,7 @@ async def _search_yellow_pages(ctx, industry, city):
 
 async def _multi_source_search(browser, query, industry, city, want=12):
     """Run search sources concurrently in isolated contexts, dedupe by domain."""
-    _ctx_opts = dict(
-        viewport={"width": 1280, "height": 800},
-        user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        locale="en-US",
-    )
-    contexts = [await browser.new_context(**_ctx_opts) for _ in range(4)]
+    contexts = [await browser.new_context(**_BROWSER_CTX_OPTS) for _ in range(4)]
     try:
         raw = await asyncio.gather(
             _search_duckduckgo(contexts[0], query, city),
@@ -785,8 +790,7 @@ def discover():
             seen = set()
             candidates = []
             pool_cap = overall_cap * 2   # gather extra so verification can drop dead ones
-            launch_opts = dict(headless=True,
-                               args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"])
+            launch_opts = dict(headless=True, args=_LAUNCH_ARGS)
             async with async_playwright() as pw:
                 browser = await pw.chromium.launch(**launch_opts)
                 try:
@@ -826,10 +830,7 @@ def discover():
 
                     # ── Phase B: verify reachability + capture screenshot ──────
                     q.put({"event": "verifying", "data": {"candidates": len(candidates)}})
-                    ctx = await browser.new_context(
-                        viewport={"width": 1280, "height": 800},
-                        user_agent="Mozilla/5.0 (compatible; ClientFinder/1.0)",
-                    )
+                    ctx = await browser.new_context(**_BROWSER_CTX_OPTS)
                     sem = asyncio.Semaphore(5)
 
                     async def _verify(biz):
@@ -930,66 +931,87 @@ async def _scrape_site(ctx, biz):
 
     page = await ctx.new_page()
     try:
-        resp, used_url = None, ""
+        resp = None
         for url in variants:
             try:
-                resp = await page.goto(url, wait_until="domcontentloaded", timeout=9000)
-                if resp and resp.status < 400:
-                    used_url = page.url
-                    break
-                resp = None
+                r = await page.goto(url, wait_until="domcontentloaded", timeout=12000)
             except Exception:
-                resp = None
                 continue
-        if not resp:
+            if r is None:
+                continue
+            resp = r
+            if r.status < 400:
+                break  # good response — stop trying variants
+            # else keep as fallback but try the next variant (www/http)
+        if resp is None:
             raise RuntimeError(f"unreachable: {domain}")
 
         status_code = resp.status
         await page.wait_for_timeout(700)
 
-        # Reject parked / empty-shell domains: require a title or real body text.
-        title = (await page.title() or "").strip()
-        body_text = await page.evaluate(
-            "() => document.body ? (document.body.innerText || '').trim() : ''")
-        if len(body_text) < 40 and len(title) < 3:
-            raise RuntimeError(f"empty/parked: {domain}")
+        # Title / body text (best-effort) — used only to reject parked/empty shells.
+        try:
+            title = (await page.title() or "").strip()
+        except Exception:
+            title = ""
+        try:
+            body_text = await page.evaluate(
+                "() => document.body ? (document.body.innerText || '').trim() : ''")
+        except Exception:
+            body_text = ""
+        low = body_text.lower()
         parked_markers = ("domain is for sale", "buy this domain", "parked free",
                           "godaddy.com/domainsearch", "is parked", "domain for sale")
-        if any(m in (body_text.lower()) for m in parked_markers):
-            raise RuntimeError(f"parked: {domain}")
+        if (len(body_text) < 25 and len(title) < 3) or any(m in low for m in parked_markers):
+            raise RuntimeError(f"empty/parked: {domain}")
 
-        # Screenshot
-        fname = f"{uuid.uuid4().hex[:12]}.png"
-        fpath = _SCREENSHOTS_DIR / fname
-        await page.screenshot(path=str(fpath), full_page=False,
-                              clip={"x": 0, "y": 0, "width": 1280, "height": 800})
-        screenshot_url = f"/clientfinder/screenshot/{fname}"
+        # Everything below is best-effort: a reachable, real page is kept even if
+        # an individual capture/extraction step fails on this environment.
+        screenshot_url = ""
+        try:
+            fname = f"{uuid.uuid4().hex[:12]}.png"
+            fpath = _SCREENSHOTS_DIR / fname
+            await page.screenshot(path=str(fpath), full_page=False,
+                                  clip={"x": 0, "y": 0, "width": 1280, "height": 800})
+            screenshot_url = f"/clientfinder/screenshot/{fname}"
+        except Exception:
+            screenshot_url = ""
 
-        # Extract contact + stack signals
-        html = await page.content()
-        emails = list(set(re.findall(r'[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}', html)))[:3]
-        phones = list(set(re.findall(r'\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}', html)))[:2]
-        stack_flags = []
-        html_lower = html.lower()
-        if 'wp-content' in html_lower or 'wordpress' in html_lower:
-            stack_flags.append("Legacy WordPress")
-        if 'jquery' in html_lower and ('jquery/1.' in html_lower or 'jquery/2.' in html_lower):
-            stack_flags.append("Outdated jQuery")
+        emails, phones, stack_flags = [], [], []
+        try:
+            html = await page.content()
+            emails = list(set(re.findall(r'[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}', html)))[:3]
+            phones = list(set(re.findall(r'\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}', html)))[:2]
+            html_lower = html.lower()
+            if 'wp-content' in html_lower or 'wordpress' in html_lower:
+                stack_flags.append("Legacy WordPress")
+            if 'jquery' in html_lower and ('jquery/1.' in html_lower or 'jquery/2.' in html_lower):
+                stack_flags.append("Outdated jQuery")
+        except Exception:
+            pass
+
         final_url = page.url
-        if status_code and not final_url.startswith("https://"):
+        if status_code and final_url.startswith("http://"):
             stack_flags.append("Missing HTTPS")
-        viewport_meta = await page.evaluate("() => !!document.querySelector('meta[name=viewport]')")
-        if not viewport_meta:
-            stack_flags.append("No meta viewport")
-        is_responsive = await page.evaluate("""() => {
-            const w = window.innerWidth;
-            window.resizeTo(375,812);
-            const changed = document.body.scrollWidth <= 450;
-            window.resizeTo(w, 800);
-            return changed;
-        }""")
-        if not is_responsive:
-            stack_flags.append("Non-responsive layout")
+        try:
+            viewport_meta = await page.evaluate(
+                "() => !!document.querySelector('meta[name=viewport]')")
+            if not viewport_meta:
+                stack_flags.append("No meta viewport")
+        except Exception:
+            pass
+        try:
+            is_responsive = await page.evaluate("""() => {
+                const w = window.innerWidth;
+                window.resizeTo(375,812);
+                const changed = document.body.scrollWidth <= 450;
+                window.resizeTo(w, 800);
+                return changed;
+            }""")
+            if not is_responsive:
+                stack_flags.append("Non-responsive layout")
+        except Exception:
+            pass
 
         return {
             "name": name, "website": _extract_domain(final_url) or domain, "city": city,
@@ -1032,12 +1054,9 @@ def scrape_stream():
             async with async_playwright() as pw:
                 browser = await pw.chromium.launch(
                     headless=True,
-                    args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+                    args=_LAUNCH_ARGS
                 )
-                ctx = await browser.new_context(
-                    viewport={"width": 1280, "height": 800},
-                    user_agent="Mozilla/5.0 (compatible; ClientFinder/1.0)",
-                )
+                ctx = await browser.new_context(**_BROWSER_CTX_OPTS)
                 for idx, biz in enumerate(businesses):
                     try:
                         site = await _scrape_site(ctx, biz)
@@ -1113,12 +1132,9 @@ def rescrape_stream():
             async with async_playwright() as pw:
                 browser = await pw.chromium.launch(
                     headless=True,
-                    args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+                    args=_LAUNCH_ARGS
                 )
-                ctx = await browser.new_context(
-                    viewport={"width": 1280, "height": 800},
-                    user_agent="Mozilla/5.0 (compatible; ClientFinder/1.0)",
-                )
+                ctx = await browser.new_context(**_BROWSER_CTX_OPTS)
                 for idx, lead in enumerate(targets):
                     if not lead.get("website"):
                         result_q.put({"event": "lead_error", "data": {
