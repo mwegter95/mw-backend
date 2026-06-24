@@ -304,6 +304,10 @@ _SKIP_DOMAINS = {
     "ubereats.com","grubhub.com","zomato.com","foursquare.com","wikiwand.com",
     "businessyab.com","cylex.us.com","superpages.com","local.com","citysearch.com",
     "mapcarta.com","loc8nearme.com","dnb.com","zoominfo.com","crunchbase.com",
+    "merriam-webster.com","dictionary.com","britannica.com","bing.com","wiktionary.org",
+    "thefreedictionary.com","collinsdictionary.com","vocabulary.com","quora.com",
+    "wikihow.com","investopedia.com","glassdoor.com","indeed.com","ziprecruiter.com",
+    "msn.com","microsoft.com","yahoo.com","duckduckgo.com","fandom.com","britannica.com",
 }
 
 def _is_aggregator(domain):
@@ -406,33 +410,39 @@ def _clean_name(title):
 
 
 async def _search_duckduckgo(ctx, query, city):
-    """DuckDuckGo HTML (no JS required) — finds business websites not in directories."""
+    """DuckDuckGo HTML — best-effort. Prefers the .result__url display text for the
+    domain (stable); falls back to decoding the uddg redirect on the anchor href."""
     page = await ctx.new_page()
     results = []
     try:
         safe_q = _urlencode(
             query + " -site:yelp.com -site:yellowpages.com -site:facebook.com -site:linkedin.com"
         )
-        # POST endpoint is far more reliable than the GET html page under automation
-        await page.goto(f"https://html.duckduckgo.com/html/?q={safe_q}",
+        await page.goto(f"https://html.duckduckgo.com/html/?q={safe_q}&kl=us-en",
                         wait_until="domcontentloaded", timeout=15000)
         await page.wait_for_timeout(700)
 
-        anchors = await page.query_selector_all("a.result__a")
-        if not anchors:
-            anchors = await page.query_selector_all(".result__title a")
-        for a in anchors[:14]:
+        for item in (await page.query_selector_all(".result, .web-result"))[:16]:
             try:
-                title = (await a.inner_text()).strip()
-                href  = _decode_ddg_href(await a.get_attribute("href") or "")
-                domain = _extract_domain(href)
-                if not domain or _is_aggregator(domain):
+                title = ""
+                a = await item.query_selector("a.result__a, .result__title a")
+                if a:
+                    title = (await a.inner_text()).strip()
+
+                domain = ""
+                url_el = await item.query_selector(".result__url")
+                if url_el:
+                    disp = (await url_el.inner_text()).strip()
+                    domain = _extract_domain(re.split(r'[\s/]', disp)[0] if disp else "")
+                if not domain and a:
+                    domain = _extract_domain(_decode_ddg_href(await a.get_attribute("href") or ""))
+                if not domain or _is_aggregator(domain) or not _looks_like_real_domain(domain):
                     continue
                 results.append({
-                    "name": _clean_name(title), "website": domain,
+                    "name": _clean_name(title) or domain, "website": domain,
                     "city": city, "address": "", "source": "DuckDuckGo",
                 })
-                if len(results) >= 8:
+                if len(results) >= 10:
                     break
             except Exception:
                 continue
@@ -444,7 +454,8 @@ async def _search_duckduckgo(ctx, query, city):
 
 
 async def _search_bing(ctx, query, city):
-    """Bing HTML — reliable fallback search source under headless automation."""
+    """Bing HTML — reliable fallback. The real domain is in the <cite> display URL;
+    the anchor href is a bing.com/ck/a tracking redirect, so we must NOT use it."""
     page = await ctx.new_page()
     results = []
     try:
@@ -455,21 +466,28 @@ async def _search_bing(ctx, query, city):
                         wait_until="domcontentloaded", timeout=15000)
         await page.wait_for_timeout(700)
 
-        for item in (await page.query_selector_all("li.b_algo"))[:14]:
+        for item in (await page.query_selector_all("li.b_algo"))[:16]:
             try:
+                title = ""
                 a = await item.query_selector("h2 a")
-                if not a:
-                    continue
-                title = (await a.inner_text()).strip()
-                href  = (await a.get_attribute("href") or "").strip()
-                domain = _extract_domain(href)
-                if not domain or _is_aggregator(domain):
+                if a:
+                    title = (await a.inner_text()).strip()
+
+                # Real domain comes from the cite/display URL, e.g.
+                # "https://www.example.com › about" -> example.com
+                domain = ""
+                cite = await item.query_selector("cite")
+                if cite:
+                    ctext = (await cite.inner_text()).strip()
+                    first = re.split(r'[\s›/]', ctext)[0] if ctext else ""
+                    domain = _extract_domain(first)
+                if not domain or _is_aggregator(domain) or not _looks_like_real_domain(domain):
                     continue
                 results.append({
-                    "name": _clean_name(title), "website": domain,
+                    "name": _clean_name(title) or domain, "website": domain,
                     "city": city, "address": "", "source": "Bing",
                 })
-                if len(results) >= 8:
+                if len(results) >= 10:
                     break
             except Exception:
                 continue
@@ -622,7 +640,11 @@ async def _search_yellow_pages(ctx, industry, city):
 
 
 async def _multi_source_search(browser, query, industry, city, want=12):
-    """Run search sources concurrently in isolated contexts, dedupe by domain."""
+    """Run search sources concurrently in isolated contexts, dedupe by domain.
+
+    Returns (businesses, source_counts) where source_counts is the raw per-source
+    hit count, surfaced to the UI so it's clear which sources are producing data.
+    """
     contexts = [await browser.new_context(**_BROWSER_CTX_OPTS) for _ in range(4)]
     try:
         raw = await asyncio.gather(
@@ -639,10 +661,13 @@ async def _multi_source_search(browser, query, industry, city, want=12):
             except Exception:
                 pass
 
+    source_names = ["ddg", "bing", "maps", "yp"]
+    counts = {n: 0 for n in source_names}
     seen, businesses = set(), []
-    for batch in raw:
+    for name, batch in zip(source_names, raw):
         if isinstance(batch, Exception) or not batch:
             continue
+        counts[name] = len(batch)
         for biz in batch:
             domain = _extract_domain(biz.get("website", ""))
             key = domain or (biz.get("name", "") or "").lower()
@@ -650,7 +675,7 @@ async def _multi_source_search(browser, query, industry, city, want=12):
                 seen.add(key)
                 biz["industry"] = industry
                 businesses.append(biz)
-    return businesses[:want]
+    return businesses[:want], counts
 
 
 # ─── Query planning ────────────────────────────────────────────────────────────
@@ -848,11 +873,13 @@ def discover():
                             _multi_source_search(browser, t["q"], t["term"], t["city"], want=want_per_q)
                             for t in batch
                         ], return_exceptions=True)
-                        for j, (task, found) in enumerate(zip(batch, batch_results)):
-                            if isinstance(found, Exception):
+                        for j, (task, result) in enumerate(zip(batch, batch_results)):
+                            if isinstance(result, Exception):
                                 q.put({"event": "query_error", "data": {
-                                    "idx": start + j, "error": str(found)[:120]}})
-                                found = []
+                                    "idx": start + j, "error": str(result)[:120]}})
+                                found, counts = [], {}
+                            else:
+                                found, counts = result
                             new_count = 0
                             for biz in found:
                                 domain = _extract_domain(biz.get("website", ""))
@@ -868,6 +895,8 @@ def discover():
                                 new_count += 1
                             q.put({"event": "query_done", "data": {
                                 "idx": start + j, "q": task["q"], "found": new_count,
+                                "raw": sum(counts.values()) if counts else 0,
+                                "sources": counts,
                                 "running_total": len(candidates)}})
                         if len(candidates) >= pool_cap:
                             break
