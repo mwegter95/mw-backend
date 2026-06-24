@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from datetime import datetime, timezone
 
-import requests
+from urllib.parse import quote as _urlencode
 from flask import Blueprint, request, jsonify, Response, send_from_directory
 
 clientfinder_bp = Blueprint("clientfinder", __name__, url_prefix="/clientfinder")
@@ -21,8 +21,6 @@ clientfinder_bp = Blueprint("clientfinder", __name__, url_prefix="/clientfinder"
 _DB = Path(__file__).parent / "data" / "clientfinder.db"
 _SCREENSHOTS_DIR = Path(__file__).parent / "data" / "cf_screenshots"
 _SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
-
-SERPER_API_KEY = os.environ.get("SERPER_API_KEY", "")
 
 
 def _get_conn():
@@ -282,60 +280,289 @@ def serve_screenshot(filename):
     return send_from_directory(str(_SCREENSHOTS_DIR), filename)
 
 
+def _clean_url(url):
+    """Strip scheme/www and trailing slash, return bare domain+path."""
+    if not url:
+        return ""
+    return re.sub(r'^https?://(www\.)?', '', str(url)).rstrip('/')
+
+def _extract_domain(url):
+    """Return lowercased domain only — used for deduplication."""
+    return _clean_url(url).split('/')[0].lower()
+
+_SKIP_DOMAINS = {
+    "yelp.com","yellowpages.com","facebook.com","wikipedia.org",
+    "instagram.com","twitter.com","linkedin.com","google.com",
+    "angi.com","thumbtack.com","bbb.org","nextdoor.com","tripadvisor.com",
+    "homeadvisor.com","angieslist.com","houzz.com","bark.com",
+}
+
+def _is_aggregator(domain):
+    return any(domain.endswith(d) for d in _SKIP_DOMAINS)
+
+
+async def _search_duckduckgo(ctx, query, city):
+    """DuckDuckGo HTML (no JS required) — finds business websites not in directories."""
+    page = await ctx.new_page()
+    results = []
+    try:
+        safe_q = _urlencode(
+            query + " -site:yelp.com -site:yellowpages.com -site:facebook.com -site:linkedin.com"
+        )
+        await page.goto(f"https://duckduckgo.com/html/?q={safe_q}",
+                        wait_until="domcontentloaded", timeout=15000)
+        await page.wait_for_timeout(800)
+
+        for item in (await page.query_selector_all(".result"))[:12]:
+            try:
+                title_el = await item.query_selector(".result__title a")
+                url_el   = await item.query_selector(".result__url")
+                if not title_el:
+                    continue
+                title       = (await title_el.inner_text()).strip()
+                display_url = (await url_el.inner_text()).strip() if url_el else ""
+                domain      = _extract_domain(display_url)
+                if not domain or _is_aggregator(domain):
+                    continue
+                results.append({
+                    "name": title, "website": domain,
+                    "city": city,  "address": "",
+                    "source": "DuckDuckGo",
+                })
+                if len(results) >= 6:
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
+    finally:
+        await page.close()
+    return results
+
+
+async def _search_google_maps(ctx, query, city):
+    """Google Maps — click each card to retrieve the website link from the detail panel."""
+    page = await ctx.new_page()
+    results = []
+    try:
+        await page.goto(
+            f"https://www.google.com/maps/search/{_urlencode(query)}",
+            wait_until="domcontentloaded", timeout=20000,
+        )
+        await page.wait_for_timeout(2500)
+
+        # Result cards are role=article or .Nv2PK
+        cards = await page.query_selector_all('[role="article"]')
+        if not cards:
+            cards = await page.query_selector_all(".Nv2PK")
+
+        for card in cards[:5]:
+            try:
+                # Grab name from card before clicking
+                heading = await card.query_selector('[role="heading"]')
+                name = (await heading.inner_text()).strip() if heading else ""
+                if not name:
+                    continue
+
+                await card.click()
+                await page.wait_for_timeout(1800)
+
+                # Website link in detail panel — try several stable selectors
+                website = ""
+                for sel in [
+                    'a[data-item-id="authority"]',
+                    'a[aria-label*="website" i]',
+                    'a[href^="http"]:not([href*="google"])[aria-label]',
+                ]:
+                    el = await page.query_selector(sel)
+                    if el:
+                        href = (await el.get_attribute("href") or "").strip()
+                        if href and "google" not in href:
+                            website = _clean_url(href)
+                            break
+
+                # Address
+                address = ""
+                for sel in ['[data-item-id="address"] .rogA2c',
+                            'button[data-item-id="address"]']:
+                    el = await page.query_selector(sel)
+                    if el:
+                        address = (await el.inner_text()).strip()
+                        break
+
+                # Phone
+                phone = ""
+                for sel in ['[data-item-id^="phone"] .rogA2c',
+                            'button[aria-label*="phone" i]']:
+                    el = await page.query_selector(sel)
+                    if el:
+                        phone = (await el.inner_text()).strip()
+                        break
+
+                # Category
+                cat = ""
+                cat_el = await page.query_selector(".DkEaL")
+                if cat_el:
+                    cat = (await cat_el.inner_text()).strip()
+
+                results.append({
+                    "name": name, "website": _extract_domain(website),
+                    "city": city, "address": address,
+                    "phone": phone, "category": cat,
+                    "source": "Google Maps",
+                })
+
+                # Return to list
+                back = await page.query_selector('button[aria-label="Back"]')
+                if back:
+                    await back.click()
+                    await page.wait_for_timeout(800)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    finally:
+        await page.close()
+    return results
+
+
+async def _search_yellow_pages(ctx, industry, city):
+    """Yellow Pages search — website link is in-card, no click-through needed."""
+    page = await ctx.new_page()
+    results = []
+    try:
+        city_yp = city.replace(" ", "+")
+        url = (
+            f"https://www.yellowpages.com/search"
+            f"?search_terms={_urlencode(industry)}"
+            f"&geo_location_terms={city_yp}%2C+MN"
+        )
+        await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+        await page.wait_for_timeout(1000)
+
+        for listing in (await page.query_selector_all(".result"))[:8]:
+            try:
+                name_el = await listing.query_selector(".business-name span")
+                if not name_el:
+                    name_el = await listing.query_selector(".business-name")
+                name = (await name_el.inner_text()).strip() if name_el else ""
+                if not name:
+                    continue
+
+                website = ""
+                site_el = await listing.query_selector("a.track-visit-website")
+                if site_el:
+                    href = await site_el.get_attribute("href") or ""
+                    website = _extract_domain(href)
+
+                phone = ""
+                phone_el = await listing.query_selector(".phones .phone")
+                if phone_el:
+                    phone = (await phone_el.inner_text()).strip()
+
+                address = ""
+                addr_el = await listing.query_selector(".adr")
+                if addr_el:
+                    address = (await addr_el.inner_text()).strip()
+
+                results.append({
+                    "name": name, "website": website,
+                    "city": city, "address": address,
+                    "phone": phone, "source": "Yellow Pages",
+                })
+                if len(results) >= 6:
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
+    finally:
+        await page.close()
+    return results
+
+
+async def _multi_source_search(query, industry, city):
+    """Run all three scrapers concurrently in isolated browser contexts."""
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        return []
+
+    _ctx_opts = dict(
+        viewport={"width": 1280, "height": 800},
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+    )
+    _launch_opts = dict(headless=True, args=["--no-sandbox","--disable-dev-shm-usage","--disable-gpu"])
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(**_launch_opts)
+        c1, c2, c3 = (
+            await browser.new_context(**_ctx_opts),
+            await browser.new_context(**_ctx_opts),
+            await browser.new_context(**_ctx_opts),
+        )
+        raw = await asyncio.gather(
+            _search_duckduckgo(c1, query, city),
+            _search_google_maps(c2, query, city),
+            _search_yellow_pages(c3, industry, city),
+            return_exceptions=True,
+        )
+        for ctx in (c1, c2, c3):
+            await ctx.close()
+        await browser.close()
+
+    seen, businesses = set(), []
+    for batch in raw:
+        if isinstance(batch, Exception):
+            continue
+        for biz in batch:
+            domain = _extract_domain(biz.get("website", ""))
+            key = domain or biz.get("name", "").lower()
+            if key and key not in seen:
+                seen.add(key)
+                businesses.append(biz)
+
+    return businesses[:18]
+
+
 @clientfinder_bp.route("/discover", methods=["POST"])
 def discover():
-    """Stage 1: Serper Places API search. Returns real business listings."""
+    """Stage 1: Multi-source discovery — DuckDuckGo, Google Maps, Yellow Pages via Playwright."""
     data = request.get_json(silent=True) or {}
-    industry = data.get("industry", "small business")
-    region = data.get("region", "Both")
-    keywords = data.get("keywords", "")
-    emp_min = data.get("emp_min", 5)
-    emp_max = data.get("emp_max", 200)
-    refinements = data.get("refinements", {})  # from WebGPU feedback loop
+    industry    = data.get("industry", "small business")
+    region      = data.get("region", "Both")
+    keywords    = data.get("keywords", "")
+    refinements = data.get("refinements", {})
 
-    # Build Serper query
-    city_hint = refinements.get("city") or ("Duluth MN" if region == "Greater MN" else "Minneapolis MN")
+    city_hint      = refinements.get("city") or ("Duluth MN" if region == "Greater MN" else "Minneapolis MN")
+    city           = city_hint.replace(" MN", "").strip()
     query_industry = refinements.get("industry") or industry or "local business"
-    query_parts = [query_industry, city_hint]
-    if keywords:
-        query_parts.append(keywords)
-    q = " ".join(query_parts)
+    q = f"{query_industry} {city_hint}" + (f" {keywords}" if keywords else "")
 
-    if not SERPER_API_KEY:
-        return jsonify({"ok": False, "error": "SERPER_API_KEY not configured on server", "businesses": []}), 503
+    result_holder = {}
 
-    try:
-        resp = requests.post(
-            "https://google.serper.dev/places",
-            headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
-            json={"q": q, "gl": "us", "hl": "en", "num": 10},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        raw = resp.json()
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e), "businesses": []}), 502
+    def _run():
+        try:
+            result_holder["businesses"] = asyncio.run(
+                _multi_source_search(q, query_industry, city)
+            )
+        except Exception as e:
+            result_holder["error"] = str(e)
 
-    places = raw.get("places", [])
-    businesses = []
-    for p in places:
-        name = p.get("title", "")
-        address = p.get("address", "")
-        # Extract city from address
-        city_match = re.search(r',\s*([A-Za-z\s]+),\s*MN', address)
-        city = city_match.group(1).strip() if city_match else city_hint.replace(" MN","").strip()
-        website_raw = p.get("website", "")
-        website = re.sub(r'^https?://(www\.)?', '', website_raw).rstrip('/')
-        businesses.append({
-            "name": name,
-            "website": website or f"{re.sub(r'[^a-z0-9]', '', name.lower())[:12]}.com",
-            "city": city,
-            "address": address,
-            "place_id": p.get("placeId", ""),
-            "rating": p.get("rating"),
-            "category": p.get("category", ""),
-        })
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout=90)
 
+    if "error" in result_holder:
+        return jsonify({"ok": False, "error": result_holder["error"], "businesses": []}), 502
+    if "businesses" not in result_holder:
+        return jsonify({"ok": False, "error": "Discovery timed out", "businesses": []}), 504
+
+    businesses = result_holder["businesses"]
     return jsonify({"ok": True, "businesses": businesses, "query": q, "count": len(businesses)})
 
 
