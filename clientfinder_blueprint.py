@@ -50,6 +50,7 @@ def init_clientfinder_db():
             employee_count INTEGER,
             website TEXT,
             screenshot_url TEXT,
+            screenshots TEXT DEFAULT '[]',
             score_modernity REAL,
             score_mobile REAL,
             score_function REAL,
@@ -72,6 +73,15 @@ def init_clientfinder_db():
     """)
     conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
     conn.commit()
+
+    # Migrate older DBs that predate the multi-screenshot column.
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(leads)").fetchall()]
+        if "screenshots" not in cols:
+            conn.execute("ALTER TABLE leads ADD COLUMN screenshots TEXT DEFAULT '[]'")
+            conn.commit()
+    except Exception:
+        pass
 
     count = conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
     if count == 0:
@@ -135,6 +145,10 @@ def get_leads():
     for r in rows:
         d = dict(r)
         d['stack_flags'] = json.loads(d.get('stack_flags') or '[]')
+        try:
+            d['screenshots'] = json.loads(d.get('screenshots') or '[]')
+        except Exception:
+            d['screenshots'] = []
         d['outdated_stack'] = bool(d['outdated_stack'])
         leads.append(d)
     return jsonify({"leads": leads})
@@ -175,13 +189,13 @@ def update_lead(lead_id):
     allowed = {'outreach_status', 'notes', 'score_modernity', 'score_mobile', 'score_function',
                'composite_score', 'outdated_stack', 'stack_flags', 'dm_name', 'dm_title',
                'dm_seniority', 'email', 'phone', 'contact_form_url', 'screenshot_url',
-               'website', 'industry', 'city', 'employee_count'}
+               'website', 'industry', 'city', 'employee_count', 'screenshots'}
     sets, params = [], []
     for k, v in data.items():
         if k in allowed:
             sets.append(f"{k}=?")
             params.append(
-                json.dumps(v) if k == 'stack_flags'
+                json.dumps(v) if k in ('stack_flags', 'screenshots')
                 else (1 if v is True else (0 if v is False else v))
             )
     if not sets:
@@ -983,8 +997,13 @@ def discover():
 
 
 
-async def _scrape_site(ctx, biz):
-    """Screenshot + tech/contact extraction for one site. Returns a data dict."""
+async def _scrape_site(ctx, biz, extra_views=False):
+    """Screenshot + tech/contact extraction for one site. Returns a data dict.
+
+    When extra_views=True, also scrolls a full-page capture and visits up to two
+    key internal pages (about/services/contact), so the AI audit has several
+    screenshots of the site to analyze, not just the hero viewport.
+    """
     raw = biz.get("website", "")
     domain = _extract_domain(raw) or _clean_url(raw)
     name = biz.get("name", "")
@@ -1041,13 +1060,22 @@ async def _scrape_site(ctx, biz):
 
         # Everything below is best-effort: a reachable, real page is kept even if
         # an individual capture/extraction step fails on this environment.
+        screenshots = []
         screenshot_url = ""
-        try:
+
+        async def _shot(full_page=False):
             fname = f"{uuid.uuid4().hex[:12]}.png"
             fpath = _SCREENSHOTS_DIR / fname
-            await page.screenshot(path=str(fpath), full_page=False,
-                                  clip={"x": 0, "y": 0, "width": 1280, "height": 800})
-            screenshot_url = f"/clientfinder/screenshot/{fname}"
+            if full_page:
+                await page.screenshot(path=str(fpath), full_page=True)
+            else:
+                await page.screenshot(path=str(fpath), full_page=False,
+                                      clip={"x": 0, "y": 0, "width": 1280, "height": 800})
+            return f"/clientfinder/screenshot/{fname}"
+
+        try:
+            screenshot_url = await _shot(full_page=False)
+            screenshots.append(screenshot_url)
         except Exception:
             screenshot_url = ""
 
@@ -1087,10 +1115,54 @@ async def _scrape_site(ctx, biz):
         except Exception:
             pass
 
+        # Deep capture: a scrolled full-page shot + up to two key internal pages,
+        # giving the AI audit several views of the site instead of just the hero.
+        if extra_views:
+            try:
+                screenshots.append(await _shot(full_page=True))
+            except Exception:
+                pass
+            try:
+                host = _extract_domain(final_url) or domain
+                links = await page.evaluate("""(host) => {
+                    const want = ['about','service','contact','product','gallery','portfolio','menu','pricing'];
+                    const out = [];
+                    for (const a of document.querySelectorAll('a[href]')) {
+                        let href = a.href || '';
+                        try {
+                            const u = new URL(href, location.href);
+                            if (u.hostname.replace(/^www\\./,'') !== host.replace(/^www\\./,'')) continue;
+                            const path = (u.pathname || '').toLowerCase();
+                            if (path === '/' || path === '') continue;
+                            if (want.some(w => path.includes(w)) && !out.includes(u.href)) out.push(u.href);
+                        } catch (e) {}
+                        if (out.length >= 4) break;
+                    }
+                    return out;
+                }""", host)
+            except Exception:
+                links = []
+            for link in (links or [])[:2]:
+                try:
+                    sub = await ctx.new_page()
+                    try:
+                        r2 = await sub.goto(link, wait_until="domcontentloaded", timeout=10000)
+                        if r2 and r2.status < 400:
+                            await sub.wait_for_timeout(500)
+                            fname = f"{uuid.uuid4().hex[:12]}.png"
+                            await sub.screenshot(path=str(_SCREENSHOTS_DIR / fname), full_page=False,
+                                                 clip={"x": 0, "y": 0, "width": 1280, "height": 800})
+                            screenshots.append(f"/clientfinder/screenshot/{fname}")
+                    finally:
+                        await sub.close()
+                except Exception:
+                    continue
+
         return {
             "name": name, "website": _extract_domain(final_url) or domain, "city": city,
             "title": title[:120],
-            "screenshot_url": screenshot_url, "emails": emails, "phones": phones,
+            "screenshot_url": screenshot_url, "screenshots": screenshots,
+            "emails": emails, "phones": phones,
             "stack_flags": stack_flags, "status_code": status_code,
         }
     finally:
@@ -1219,10 +1291,12 @@ def rescrape_stream():
                         site = await _scrape_site(ctx, {
                             "name": lead["company_name"], "website": lead["website"],
                             "city": lead["city"],
-                        })
+                        }, extra_views=True)
                         modernity, mobile, function, composite = _scores_from_flags(site["stack_flags"])
+                        shots = site.get("screenshots") or ([site["screenshot_url"]] if site["screenshot_url"] else [])
                         patch = {
                             "screenshot_url": site["screenshot_url"],
+                            "screenshots": shots,
                             "stack_flags": site["stack_flags"],
                             "outdated_stack": 1 if site["stack_flags"] else 0,
                             "score_modernity": modernity,
@@ -1240,7 +1314,7 @@ def rescrape_stream():
                         sets, params = [], []
                         for k, v in patch.items():
                             sets.append(f"{k}=?")
-                            params.append(json.dumps(v) if k == "stack_flags" else v)
+                            params.append(json.dumps(v) if k in ("stack_flags", "screenshots") else v)
                         sets.append("updated_at=?"); params.append(_now())
                         params.append(lead["id"])
                         c2.execute(f"UPDATE leads SET {', '.join(sets)} WHERE id=?", params)
@@ -1249,6 +1323,7 @@ def rescrape_stream():
                         result_q.put({"event": "lead", "data": {
                             "idx": idx, "id": lead["id"], "name": lead["company_name"],
                             "screenshot_url": site["screenshot_url"],
+                            "screenshots": shots,
                             "stack_flags": site["stack_flags"],
                             "outdated_stack": bool(site["stack_flags"]),
                             "score_modernity": modernity, "score_mobile": mobile,
