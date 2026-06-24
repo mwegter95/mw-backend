@@ -3,14 +3,26 @@ import json
 import sqlite3
 import csv
 import io
+import os
+import re
+import uuid
+import asyncio
+import threading
+import queue
+import time
 from pathlib import Path
 from datetime import datetime, timezone
 
-from flask import Blueprint, request, jsonify, Response
+import requests
+from flask import Blueprint, request, jsonify, Response, send_from_directory
 
 clientfinder_bp = Blueprint("clientfinder", __name__, url_prefix="/clientfinder")
 
 _DB = Path(__file__).parent / "data" / "clientfinder.db"
+_SCREENSHOTS_DIR = Path(__file__).parent / "data" / "cf_screenshots"
+_SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+
+SERPER_API_KEY = os.environ.get("SERPER_API_KEY", "")
 
 
 def _get_conn():
@@ -24,8 +36,10 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
+_SEED_VERSION = "2"  # bump to re-migrate on next Flask restart
+
 def init_clientfinder_db():
-    """Idempotent: only seeds if table is empty."""
+    """Seed if empty; migrate seed-record statuses/notes when version bumps."""
     conn = _get_conn()
     conn.execute("""
         CREATE TABLE IF NOT EXISTS leads (
@@ -57,7 +71,9 @@ def init_clientfinder_db():
             updated_at TEXT
         )
     """)
+    conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
     conn.commit()
+
     count = conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
     if count == 0:
         for lead in _SEED_LEADS:
@@ -76,10 +92,20 @@ def init_clientfinder_db():
                 lead.get('dm_name', ''), lead.get('dm_title', ''), lead.get('dm_seniority', ''),
                 lead.get('dm_linkedin', ''), lead.get('email'), lead.get('phone'),
                 lead.get('contact_form_url'),
-                lead.get('outreach_status', 'New'), lead.get('notes', ''),
+                'New', '',  # always seed with New status and empty notes
                 lead.get('created_at', _now()), _now()
             ))
+        conn.execute("INSERT OR REPLACE INTO meta VALUES ('seed_version', ?)", (_SEED_VERSION,))
         conn.commit()
+    else:
+        # One-time migration: reset seed records to clean state
+        ver = conn.execute("SELECT value FROM meta WHERE key='seed_version'").fetchone()
+        if ver is None or ver[0] != _SEED_VERSION:
+            conn.execute(
+                "UPDATE leads SET outreach_status='New', notes='' WHERE id <= 50"
+            )
+            conn.execute("INSERT OR REPLACE INTO meta VALUES ('seed_version', ?)", (_SEED_VERSION,))
+            conn.commit()
     conn.close()
 
 
@@ -217,40 +243,263 @@ def lead_stats():
     })
 
 
+# ─── Discovery endpoints ───────────────────────────────────────────────────────
+
+_ENRICH_TITLES_BY_INDUSTRY = {
+    "Entertainment": ["Owner", "General Manager", "Venue Director", "Franchise Owner"],
+    "Professional Services": ["Managing Partner", "Owner", "Principal", "Founder", "CEO"],
+    "Home & Commercial Services": ["Owner", "President", "Operations Manager", "CEO"],
+    "Healthcare & Wellness": ["Owner", "Clinical Director", "Practice Manager", "CEO"],
+    "Retail & Hospitality": ["Owner", "General Manager", "Co-Founder", "CEO"],
+    "Manufacturing & Logistics": ["Owner", "President", "Operations Director", "CEO"],
+}
+_FIRST_NAMES = ["Alex","Jordan","Taylor","Morgan","Casey","Jamie","Riley","Dana","Cameron","Avery","Blake","Quinn","Reese","Sydney","Drew","Chris","Sam","Pat","Lee","Robin"]
+_LAST_INITS = ["A","B","C","D","E","F","G","H","J","K","L","M","N","O","P","R","S","T","W"]
+
+def _mock_enrich(company_name, industry, city):
+    import random
+    rng = random.Random(company_name)  # deterministic per company
+    fn = rng.choice(_FIRST_NAMES)
+    li = rng.choice(_LAST_INITS)
+    titles = _ENRICH_TITLES_BY_INDUSTRY.get(industry, ["Owner", "CEO", "Manager"])
+    title = rng.choice(titles)
+    seniority = "C-Suite" if title in ("Owner","CEO","Co-Founder","Founder","President","Managing Partner","Principal") else "Director"
+    area = "612" if city in ("Minneapolis","St. Paul","Golden Valley","St. Louis Park") else \
+           "952" if city in ("Bloomington","Edina","Eden Prairie","Plymouth","Minnetonka","Burnsville","Eagan") else \
+           "651" if city == "Roseville" else \
+           "218" if city in ("Duluth","Brainerd","Moorhead") else \
+           "507" if city in ("Rochester","Mankato","Winona") else "320"
+    phone = f"({area}) 555-{rng.randint(1000,9999)}"
+    domain = re.sub(r'[^a-z0-9]', '', company_name.lower())[:12] + ".com"
+    email = f"info@{domain}" if rng.random() > 0.3 else None
+    return {"dm_name": f"{fn} {li}.", "dm_title": title, "dm_seniority": seniority,
+            "dm_source": "Apollo", "dm_linkedin": "", "email": email, "phone": phone,
+            "contact_form_url": f"{domain}/contact" if rng.random() > 0.5 else None}
+
+
+@clientfinder_bp.route("/screenshot/<path:filename>", methods=["GET"])
+def serve_screenshot(filename):
+    return send_from_directory(str(_SCREENSHOTS_DIR), filename)
+
+
+@clientfinder_bp.route("/discover", methods=["POST"])
+def discover():
+    """Stage 1: Serper Places API search. Returns real business listings."""
+    data = request.get_json(silent=True) or {}
+    industry = data.get("industry", "small business")
+    region = data.get("region", "Both")
+    keywords = data.get("keywords", "")
+    emp_min = data.get("emp_min", 5)
+    emp_max = data.get("emp_max", 200)
+    refinements = data.get("refinements", {})  # from WebGPU feedback loop
+
+    # Build Serper query
+    city_hint = refinements.get("city") or ("Duluth MN" if region == "Greater MN" else "Minneapolis MN")
+    query_industry = refinements.get("industry") or industry or "local business"
+    query_parts = [query_industry, city_hint]
+    if keywords:
+        query_parts.append(keywords)
+    q = " ".join(query_parts)
+
+    if not SERPER_API_KEY:
+        return jsonify({"ok": False, "error": "SERPER_API_KEY not configured on server", "businesses": []}), 503
+
+    try:
+        resp = requests.post(
+            "https://google.serper.dev/places",
+            headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
+            json={"q": q, "gl": "us", "hl": "en", "num": 10},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        raw = resp.json()
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "businesses": []}), 502
+
+    places = raw.get("places", [])
+    businesses = []
+    for p in places:
+        name = p.get("title", "")
+        address = p.get("address", "")
+        # Extract city from address
+        city_match = re.search(r',\s*([A-Za-z\s]+),\s*MN', address)
+        city = city_match.group(1).strip() if city_match else city_hint.replace(" MN","").strip()
+        website_raw = p.get("website", "")
+        website = re.sub(r'^https?://(www\.)?', '', website_raw).rstrip('/')
+        businesses.append({
+            "name": name,
+            "website": website or f"{re.sub(r'[^a-z0-9]', '', name.lower())[:12]}.com",
+            "city": city,
+            "address": address,
+            "place_id": p.get("placeId", ""),
+            "rating": p.get("rating"),
+            "category": p.get("category", ""),
+        })
+
+    return jsonify({"ok": True, "businesses": businesses, "query": q, "count": len(businesses)})
+
+
+@clientfinder_bp.route("/scrape", methods=["POST"])
+def scrape_stream():
+    """Stage 2: Playwright SSE stream — screenshot + tech extraction per site."""
+    data = request.get_json(silent=True) or {}
+    businesses = data.get("businesses", [])  # [{name, website, city, ...}]
+
+    result_q = queue.Queue()
+
+    def run_playwright():
+        async def _scrape():
+            try:
+                from playwright.async_api import async_playwright
+            except ImportError:
+                result_q.put({"event": "error", "data": {"msg": "Playwright not available"}})
+                result_q.put(None)
+                return
+
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(
+                    headless=True,
+                    args=["--no-sandbox","--disable-dev-shm-usage","--disable-gpu"]
+                )
+                ctx = await browser.new_context(
+                    viewport={"width": 1280, "height": 800},
+                    user_agent="Mozilla/5.0 (compatible; ClientFinder/1.0)",
+                )
+                for idx, biz in enumerate(businesses):
+                    url = biz.get("website","")
+                    if not url.startswith("http"):
+                        url = "https://" + url
+                    name = biz.get("name","")
+                    city = biz.get("city","")
+                    try:
+                        page = await ctx.new_page()
+                        resp = await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                        status_code = resp.status if resp else 0
+                        await page.wait_for_timeout(800)
+
+                        # Screenshot
+                        fname = f"{uuid.uuid4().hex[:12]}.png"
+                        fpath = _SCREENSHOTS_DIR / fname
+                        await page.screenshot(path=str(fpath), full_page=False, clip={"x":0,"y":0,"width":1280,"height":800})
+                        screenshot_url = f"/clientfinder/screenshot/{fname}"
+
+                        # Extract contact + stack signals
+                        html = await page.content()
+                        emails = list(set(re.findall(r'[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}', html)))[:3]
+                        phones = list(set(re.findall(r'\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}', html)))[:2]
+                        stack_flags = []
+                        html_lower = html.lower()
+                        if 'wp-content' in html_lower or 'wordpress' in html_lower:
+                            stack_flags.append("Legacy WordPress")
+                        if 'jquery' in html_lower and ('jquery/1.' in html_lower or 'jquery/2.' in html_lower):
+                            stack_flags.append("Outdated jQuery")
+                        if status_code == 200 and not url.startswith("https://"):
+                            stack_flags.append("Missing HTTPS")
+                        viewport_meta = await page.evaluate("() => !!document.querySelector('meta[name=viewport]')")
+                        if not viewport_meta:
+                            stack_flags.append("No meta viewport")
+                        # Basic mobile check via CSS media query simulation
+                        is_responsive = await page.evaluate("""() => {
+                            const w = window.innerWidth;
+                            window.resizeTo(375,812);
+                            const changed = document.body.scrollWidth <= 450;
+                            window.resizeTo(w, 800);
+                            return changed;
+                        }""")
+                        if not is_responsive:
+                            stack_flags.append("Non-responsive layout")
+
+                        await page.close()
+                        result_q.put({
+                            "event": "site",
+                            "data": {
+                                "idx": idx,
+                                "name": name,
+                                "website": biz.get("website",""),
+                                "city": city,
+                                "screenshot_url": screenshot_url,
+                                "emails": emails,
+                                "phones": phones,
+                                "stack_flags": stack_flags,
+                                "status_code": status_code,
+                            }
+                        })
+                    except Exception as e:
+                        result_q.put({
+                            "event": "site_error",
+                            "data": {"idx": idx, "name": name, "website": url, "error": str(e)[:120]}
+                        })
+                await browser.close()
+            result_q.put(None)  # sentinel
+
+        asyncio.run(_scrape())
+
+    t = threading.Thread(target=run_playwright, daemon=True)
+    t.start()
+
+    def generate():
+        yield "data: {\"event\":\"start\",\"total\":" + str(len(businesses)) + "}\n\n"
+        while True:
+            try:
+                item = result_q.get(timeout=30)
+            except queue.Empty:
+                yield "data: {\"event\":\"timeout\"}\n\n"
+                break
+            if item is None:
+                yield "data: {\"event\":\"done\"}\n\n"
+                break
+            yield f"data: {json.dumps(item)}\n\n"
+
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@clientfinder_bp.route("/enrich", methods=["POST"])
+def enrich():
+    """Stage 4: Mock Apollo enrichment — deterministic DM info per company."""
+    data = request.get_json(silent=True) or {}
+    companies = data.get("companies", [])  # [{name, industry, city}]
+    results = []
+    for c in companies:
+        dm = _mock_enrich(c.get("name",""), c.get("industry",""), c.get("city",""))
+        results.append({"name": c.get("name"), **dm})
+    return jsonify({"ok": True, "results": results})
+
+
 # ─── Seed data (50 MN leads) ──────────────────────────────────────────────────
 
 _SEED_LEADS = [
   # ENTERTAINMENT (7)
   {"company_name":"Memory Lanes Entertainment","industry":"Entertainment","city":"Minneapolis","employee_count":28,"website":"memorylanes.com","score_modernity":3,"score_mobile":2,"score_function":3,"composite_score":2.7,"outdated_stack":True,"stack_flags":["Legacy WordPress","Missing HTTPS","Non-responsive layout"],"dm_name":"Dale R.","dm_title":"Owner","dm_seniority":"C-Suite","dm_linkedin":"","email":"info@memorylanes.com","phone":"(612) 788-8188","contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-05-28T14:22:00Z"},
   {"company_name":"Brunswick Zone Brooklyn Park","industry":"Entertainment","city":"Brooklyn Park","employee_count":45,"website":"brunswickzone.com","score_modernity":5,"score_mobile":5,"score_function":6,"composite_score":5.3,"outdated_stack":False,"stack_flags":["Outdated jQuery"],"dm_name":"Mark T.","dm_title":"General Manager","dm_seniority":"Manager","dm_linkedin":"","email":None,"phone":"(763) 315-8200","contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-05-29T09:10:00Z"},
-  {"company_name":"Pinstripes Edina","industry":"Entertainment","city":"Edina","employee_count":120,"website":"pinstripes.com","score_modernity":7,"score_mobile":7,"score_function":7,"composite_score":7.0,"outdated_stack":False,"stack_flags":[],"dm_name":"Amy K.","dm_title":"Director of Operations","dm_seniority":"Director","dm_linkedin":"https://linkedin.com/in/amyk-pinstripes","email":None,"phone":"(952) 835-0090","contact_form_url":None,"outreach_status":"Ignored","notes":"Too large, well-established web presence","created_at":"2026-05-29T10:05:00Z"},
+  {"company_name":"Pinstripes Edina","industry":"Entertainment","city":"Edina","employee_count":120,"website":"pinstripes.com","score_modernity":7,"score_mobile":7,"score_function":7,"composite_score":7.0,"outdated_stack":False,"stack_flags":[],"dm_name":"Amy K.","dm_title":"Director of Operations","dm_seniority":"Director","dm_linkedin":"https://linkedin.com/in/amyk-pinstripes","email":None,"phone":"(952) 835-0090","contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-05-29T10:05:00Z"},
   {"company_name":"XP League Gaming Lounge","industry":"Entertainment","city":"Minneapolis","employee_count":12,"website":"xpleague.gg","score_modernity":7,"score_mobile":6,"score_function":5,"composite_score":6.0,"outdated_stack":False,"stack_flags":["No meta viewport"],"dm_name":"Chris M.","dm_title":"Franchise Owner","dm_seniority":"C-Suite","dm_linkedin":"","email":"minneapolis@xpleague.gg","phone":None,"contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-05-30T08:45:00Z"},
   {"company_name":"Brookview Golf Course","industry":"Entertainment","city":"Golden Valley","employee_count":22,"website":"goldenvalleymn.gov","score_modernity":2,"score_mobile":2,"score_function":3,"composite_score":2.3,"outdated_stack":True,"stack_flags":["Non-responsive layout","Missing HTTPS","Outdated jQuery","No meta viewport"],"dm_name":"Susan L.","dm_title":"Recreation Director","dm_seniority":"Director","dm_linkedin":"","email":"brookview@goldenvalleymn.gov","phone":"(763) 512-2300","contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-05-30T11:30:00Z"},
-  {"company_name":"Wild Woods Family Entertainment","industry":"Entertainment","city":"Duluth","employee_count":35,"website":"wildwoodsduluth.com","score_modernity":3,"score_mobile":3,"score_function":3,"composite_score":3.0,"outdated_stack":True,"stack_flags":["Legacy WordPress","Non-responsive layout","Outdated jQuery"],"dm_name":"Todd B.","dm_title":"Owner","dm_seniority":"C-Suite","dm_linkedin":"","email":"info@wildwoodsduluth.com","phone":"(218) 729-7529","contact_form_url":"wildwoodsduluth.com/contact","outreach_status":"Contacted","notes":"Left voicemail 6/2","created_at":"2026-06-01T13:20:00Z"},
+  {"company_name":"Wild Woods Family Entertainment","industry":"Entertainment","city":"Duluth","employee_count":35,"website":"wildwoodsduluth.com","score_modernity":3,"score_mobile":3,"score_function":3,"composite_score":3.0,"outdated_stack":True,"stack_flags":["Legacy WordPress","Non-responsive layout","Outdated jQuery"],"dm_name":"Todd B.","dm_title":"Owner","dm_seniority":"C-Suite","dm_linkedin":"","email":"info@wildwoodsduluth.com","phone":"(218) 729-7529","contact_form_url":"wildwoodsduluth.com/contact","outreach_status":"New","notes":"","created_at":"2026-06-01T13:20:00Z"},
   {"company_name":"The Machine Shop Minneapolis","industry":"Entertainment","city":"Minneapolis","employee_count":55,"website":"themachineshopmpls.com","score_modernity":5,"score_mobile":4,"score_function":6,"composite_score":5.0,"outdated_stack":False,"stack_flags":["Outdated jQuery","No meta viewport"],"dm_name":"Ryan P.","dm_title":"Venue Director","dm_seniority":"Director","dm_linkedin":"","email":"booking@themachineshopmpls.com","phone":"(612) 722-1111","contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-06-02T09:00:00Z"},
   # PROFESSIONAL SERVICES (10)
   {"company_name":"Periscope Creative","industry":"Professional Services","city":"Minneapolis","employee_count":75,"website":"periscope.com","score_modernity":8,"score_mobile":8,"score_function":7,"composite_score":7.7,"outdated_stack":False,"stack_flags":[],"dm_name":"Sarah J.","dm_title":"Chief Executive Officer","dm_seniority":"C-Suite","dm_linkedin":"https://linkedin.com/in/sarahj-periscope","email":None,"phone":"(612) 399-0600","contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-05-28T15:00:00Z"},
-  {"company_name":"Mono Advertising","industry":"Professional Services","city":"Minneapolis","employee_count":40,"website":"monoculture.com","score_modernity":8,"score_mobile":7,"score_function":8,"composite_score":7.7,"outdated_stack":False,"stack_flags":[],"dm_name":"James H.","dm_title":"Co-Founder & CCO","dm_seniority":"C-Suite","dm_linkedin":"https://linkedin.com/in/jamesh-mono","email":"hello@monoculture.com","phone":None,"contact_form_url":None,"outreach_status":"In Progress","notes":"Email sent 6/5, awaiting reply","created_at":"2026-05-29T14:00:00Z"},
+  {"company_name":"Mono Advertising","industry":"Professional Services","city":"Minneapolis","employee_count":40,"website":"monoculture.com","score_modernity":8,"score_mobile":7,"score_function":8,"composite_score":7.7,"outdated_stack":False,"stack_flags":[],"dm_name":"James H.","dm_title":"Co-Founder & CCO","dm_seniority":"C-Suite","dm_linkedin":"https://linkedin.com/in/jamesh-mono","email":"hello@monoculture.com","phone":None,"contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-05-29T14:00:00Z"},
   {"company_name":"Zeus Jones Marketing","industry":"Professional Services","city":"Minneapolis","employee_count":30,"website":"zeusjones.com","score_modernity":7,"score_mobile":6,"score_function":7,"composite_score":6.7,"outdated_stack":False,"stack_flags":[],"dm_name":"Bill H.","dm_title":"Founding Partner","dm_seniority":"C-Suite","dm_linkedin":"https://linkedin.com/in/billh-zeusjones","email":None,"phone":"(612) 200-6262","contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-05-30T10:15:00Z"},
-  {"company_name":"North Loop Creative Agency","industry":"Professional Services","city":"Minneapolis","employee_count":15,"website":"northloopcreative.com","score_modernity":4,"score_mobile":3,"score_function":4,"composite_score":3.7,"outdated_stack":True,"stack_flags":["Legacy WordPress","No SSL certificate","Non-responsive layout"],"dm_name":"Lisa M.","dm_title":"Creative Director","dm_seniority":"C-Suite","dm_linkedin":"","email":"hello@northloopcreative.com","phone":"(612) 555-0141","contact_form_url":"northloopcreative.com/contact","outreach_status":"Contacted","notes":"Emailed 6/3 — no response yet","created_at":"2026-06-01T08:30:00Z"},
-  {"company_name":"Summit Law Group","industry":"Professional Services","city":"Minneapolis","employee_count":18,"website":"summitlawmn.com","score_modernity":3,"score_mobile":2,"score_function":3,"composite_score":2.7,"outdated_stack":True,"stack_flags":["Legacy WordPress","Missing HTTPS","Non-responsive layout","Outdated jQuery"],"dm_name":"David K.","dm_title":"Managing Partner","dm_seniority":"C-Suite","dm_linkedin":"","email":"info@summitlawmn.com","phone":"(612) 555-0213","contact_form_url":"summitlawmn.com/contact","outreach_status":"Contacted","notes":"Reached out via contact form 6/4","created_at":"2026-06-02T11:00:00Z"},
+  {"company_name":"North Loop Creative Agency","industry":"Professional Services","city":"Minneapolis","employee_count":15,"website":"northloopcreative.com","score_modernity":4,"score_mobile":3,"score_function":4,"composite_score":3.7,"outdated_stack":True,"stack_flags":["Legacy WordPress","No SSL certificate","Non-responsive layout"],"dm_name":"Lisa M.","dm_title":"Creative Director","dm_seniority":"C-Suite","dm_linkedin":"","email":"hello@northloopcreative.com","phone":"(612) 555-0141","contact_form_url":"northloopcreative.com/contact","outreach_status":"New","notes":"","created_at":"2026-06-01T08:30:00Z"},
+  {"company_name":"Summit Law Group","industry":"Professional Services","city":"Minneapolis","employee_count":18,"website":"summitlawmn.com","score_modernity":3,"score_mobile":2,"score_function":3,"composite_score":2.7,"outdated_stack":True,"stack_flags":["Legacy WordPress","Missing HTTPS","Non-responsive layout","Outdated jQuery"],"dm_name":"David K.","dm_title":"Managing Partner","dm_seniority":"C-Suite","dm_linkedin":"","email":"info@summitlawmn.com","phone":"(612) 555-0213","contact_form_url":"summitlawmn.com/contact","outreach_status":"New","notes":"","created_at":"2026-06-02T11:00:00Z"},
   {"company_name":"Felhaber Larson Law","industry":"Professional Services","city":"St. Paul","employee_count":50,"website":"felhaber.com","score_modernity":4,"score_mobile":5,"score_function":5,"composite_score":4.7,"outdated_stack":False,"stack_flags":["Outdated jQuery"],"dm_name":"Patricia W.","dm_title":"Managing Partner","dm_seniority":"C-Suite","dm_linkedin":"","email":None,"phone":"(651) 222-5005","contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-06-02T13:45:00Z"},
   {"company_name":"Granite Accounting Partners","industry":"Professional Services","city":"Bloomington","employee_count":22,"website":"graniteaccounting.com","score_modernity":3,"score_mobile":2,"score_function":3,"composite_score":2.7,"outdated_stack":True,"stack_flags":["Legacy WordPress","Non-responsive layout","No meta viewport"],"dm_name":"Greg F.","dm_title":"CPA & Principal","dm_seniority":"C-Suite","dm_linkedin":"","email":"info@graniteaccounting.com","phone":"(952) 555-0182","contact_form_url":"graniteaccounting.com/contact","outreach_status":"New","notes":"","created_at":"2026-06-03T09:20:00Z"},
   {"company_name":"Northfield Architecture Studio","industry":"Professional Services","city":"Minneapolis","employee_count":8,"website":"northfieldarchstudio.com","score_modernity":4,"score_mobile":3,"score_function":4,"composite_score":3.7,"outdated_stack":True,"stack_flags":["Legacy WordPress","Outdated jQuery","Non-responsive layout"],"dm_name":"Anna C.","dm_title":"Principal Architect","dm_seniority":"C-Suite","dm_linkedin":"","email":"studio@northfieldarchstudio.com","phone":"(612) 555-0094","contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-06-03T10:30:00Z"},
   {"company_name":"Lakeside Accounting Group","industry":"Professional Services","city":"Edina","employee_count":12,"website":"lakesideaccounting.com","score_modernity":2,"score_mobile":2,"score_function":3,"composite_score":2.3,"outdated_stack":True,"stack_flags":["Legacy WordPress","Missing HTTPS","Non-responsive layout","No meta viewport"],"dm_name":"Robert M.","dm_title":"Founding Partner","dm_seniority":"C-Suite","dm_linkedin":"","email":"contact@lakesideaccounting.com","phone":"(952) 555-0273","contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-06-03T14:00:00Z"},
-  {"company_name":"Prairie Marketing Collective","industry":"Professional Services","city":"St. Cloud","employee_count":9,"website":"prairiemarketingco.com","score_modernity":3,"score_mobile":3,"score_function":3,"composite_score":3.0,"outdated_stack":True,"stack_flags":["Legacy WordPress","Non-responsive layout"],"dm_name":"Michelle H.","dm_title":"Owner & Strategist","dm_seniority":"C-Suite","dm_linkedin":"","email":"hello@prairiemarketingco.com","phone":"(320) 555-0148","contact_form_url":"prairiemarketingco.com/contact","outreach_status":"Contacted","notes":"Intro call scheduled 6/10","created_at":"2026-06-04T08:00:00Z"},
+  {"company_name":"Prairie Marketing Collective","industry":"Professional Services","city":"St. Cloud","employee_count":9,"website":"prairiemarketingco.com","score_modernity":3,"score_mobile":3,"score_function":3,"composite_score":3.0,"outdated_stack":True,"stack_flags":["Legacy WordPress","Non-responsive layout"],"dm_name":"Michelle H.","dm_title":"Owner & Strategist","dm_seniority":"C-Suite","dm_linkedin":"","email":"hello@prairiemarketingco.com","phone":"(320) 555-0148","contact_form_url":"prairiemarketingco.com/contact","outreach_status":"New","notes":"","created_at":"2026-06-04T08:00:00Z"},
   # HOME & COMMERCIAL SERVICES (9)
   {"company_name":"Genz-Ryan Heating & Cooling","industry":"Home & Commercial Services","city":"Burnsville","employee_count":120,"website":"genzryan.com","score_modernity":6,"score_mobile":6,"score_function":6,"composite_score":6.0,"outdated_stack":False,"stack_flags":["Outdated jQuery"],"dm_name":"Jim R.","dm_title":"President","dm_seniority":"C-Suite","dm_linkedin":"https://linkedin.com/in/jimr-genzryan","email":None,"phone":"(952) 767-1000","contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-05-28T16:00:00Z"},
-  {"company_name":"Sedgwick Heating & Air Conditioning","industry":"Home & Commercial Services","city":"Minneapolis","employee_count":35,"website":"sedgwickheating.com","score_modernity":3,"score_mobile":2,"score_function":3,"composite_score":2.7,"outdated_stack":True,"stack_flags":["Legacy WordPress","Non-responsive layout","Missing HTTPS"],"dm_name":"Kevin S.","dm_title":"Owner","dm_seniority":"C-Suite","dm_linkedin":"","email":"info@sedgwickheating.com","phone":"(612) 827-2561","contact_form_url":"sedgwickheating.com/contact","outreach_status":"Contacted","notes":"Spoke with receptionist 6/5","created_at":"2026-06-01T15:00:00Z"},
+  {"company_name":"Sedgwick Heating & Air Conditioning","industry":"Home & Commercial Services","city":"Minneapolis","employee_count":35,"website":"sedgwickheating.com","score_modernity":3,"score_mobile":2,"score_function":3,"composite_score":2.7,"outdated_stack":True,"stack_flags":["Legacy WordPress","Non-responsive layout","Missing HTTPS"],"dm_name":"Kevin S.","dm_title":"Owner","dm_seniority":"C-Suite","dm_linkedin":"","email":"info@sedgwickheating.com","phone":"(612) 827-2561","contact_form_url":"sedgwickheating.com/contact","outreach_status":"New","notes":"","created_at":"2026-06-01T15:00:00Z"},
   {"company_name":"Standard Heating & Air Conditioning","industry":"Home & Commercial Services","city":"Minneapolis","employee_count":55,"website":"standardheating.com","score_modernity":5,"score_mobile":5,"score_function":5,"composite_score":5.0,"outdated_stack":False,"stack_flags":["Outdated jQuery","No meta viewport"],"dm_name":"Tom A.","dm_title":"CEO","dm_seniority":"C-Suite","dm_linkedin":"","email":"contact@standardheating.com","phone":"(612) 824-3981","contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-06-02T09:30:00Z"},
   {"company_name":"All American Plumbing & Heating","industry":"Home & Commercial Services","city":"Roseville","employee_count":18,"website":"allamericanplumbingmn.com","score_modernity":2,"score_mobile":2,"score_function":2,"composite_score":2.0,"outdated_stack":True,"stack_flags":["Legacy WordPress","Missing HTTPS","Non-responsive layout","No meta viewport","No SSL certificate"],"dm_name":"Bob D.","dm_title":"Owner & Master Plumber","dm_seniority":"C-Suite","dm_linkedin":"","email":"bob@allamericanplumbingmn.com","phone":"(651) 555-0237","contact_form_url":"allamericanplumbingmn.com/contact","outreach_status":"New","notes":"","created_at":"2026-06-02T10:45:00Z"},
   {"company_name":"Northshore Landscaping & Design","industry":"Home & Commercial Services","city":"Duluth","employee_count":25,"website":"northshorelandscaping.com","score_modernity":3,"score_mobile":3,"score_function":3,"composite_score":3.0,"outdated_stack":True,"stack_flags":["Legacy WordPress","Non-responsive layout","Outdated jQuery"],"dm_name":"Paul N.","dm_title":"Owner","dm_seniority":"C-Suite","dm_linkedin":"","email":"paul@northshorelandscaping.com","phone":"(218) 555-0134","contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-06-03T11:00:00Z"},
   {"company_name":"Great Lawns Landscaping","industry":"Home & Commercial Services","city":"Bloomington","employee_count":14,"website":"greatlawnsbloomington.com","score_modernity":2,"score_mobile":2,"score_function":2,"composite_score":2.0,"outdated_stack":True,"stack_flags":["Missing HTTPS","Non-responsive layout","No SSL certificate","No meta viewport"],"dm_name":"Dave W.","dm_title":"Owner","dm_seniority":"C-Suite","dm_linkedin":"","email":"info@greatlawnsbloomington.com","phone":"(952) 555-0189","contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-06-03T13:30:00Z"},
-  {"company_name":"Superior Commercial Cleaning","industry":"Home & Commercial Services","city":"St. Cloud","employee_count":40,"website":"superiorcleaningmn.com","score_modernity":3,"score_mobile":2,"score_function":3,"composite_score":2.7,"outdated_stack":True,"stack_flags":["Legacy WordPress","Non-responsive layout","Missing HTTPS"],"dm_name":"Maria G.","dm_title":"Operations Manager","dm_seniority":"Manager","dm_linkedin":"","email":"maria@superiorcleaningmn.com","phone":"(320) 555-0211","contact_form_url":"superiorcleaningmn.com/contact","outreach_status":"In Progress","notes":"Proposal sent 6/8, reviewing","created_at":"2026-06-04T09:00:00Z"},
+  {"company_name":"Superior Commercial Cleaning","industry":"Home & Commercial Services","city":"St. Cloud","employee_count":40,"website":"superiorcleaningmn.com","score_modernity":3,"score_mobile":2,"score_function":3,"composite_score":2.7,"outdated_stack":True,"stack_flags":["Legacy WordPress","Non-responsive layout","Missing HTTPS"],"dm_name":"Maria G.","dm_title":"Operations Manager","dm_seniority":"Manager","dm_linkedin":"","email":"maria@superiorcleaningmn.com","phone":"(320) 555-0211","contact_form_url":"superiorcleaningmn.com/contact","outreach_status":"New","notes":"","created_at":"2026-06-04T09:00:00Z"},
   {"company_name":"Lakes Area Electric","industry":"Home & Commercial Services","city":"Brainerd","employee_count":12,"website":"lakesareaelectric.com","score_modernity":3,"score_mobile":3,"score_function":3,"composite_score":3.0,"outdated_stack":True,"stack_flags":["Legacy WordPress","Outdated jQuery","Non-responsive layout"],"dm_name":"Eric H.","dm_title":"Master Electrician & Owner","dm_seniority":"C-Suite","dm_linkedin":"","email":"eric@lakesareaelectric.com","phone":"(218) 555-0167","contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-06-04T11:15:00Z"},
   {"company_name":"Tri-City Building Services","industry":"Home & Commercial Services","city":"Moorhead","employee_count":28,"website":"tricitybuilding.com","score_modernity":2,"score_mobile":2,"score_function":2,"composite_score":2.0,"outdated_stack":True,"stack_flags":["Missing HTTPS","Non-responsive layout","No meta viewport","No SSL certificate"],"dm_name":"Mike B.","dm_title":"President","dm_seniority":"C-Suite","dm_linkedin":"","email":"office@tricitybuilding.com","phone":"(218) 555-0093","contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-06-04T14:00:00Z"},
   # HEALTHCARE & WELLNESS (9)
-  {"company_name":"Uptown Dental Studio","industry":"Healthcare & Wellness","city":"Minneapolis","employee_count":15,"website":"uptowndentalstudio.com","score_modernity":5,"score_mobile":5,"score_function":5,"composite_score":5.0,"outdated_stack":False,"stack_flags":["Outdated jQuery"],"dm_name":"Dr. Jennifer L.","dm_title":"Lead Dentist & Owner","dm_seniority":"C-Suite","dm_linkedin":"","email":"appointments@uptowndentalstudio.com","phone":"(612) 824-4600","contact_form_url":"uptowndentalstudio.com/contact","outreach_status":"Contacted","notes":"Emailed owner directly 6/4","created_at":"2026-06-03T15:00:00Z"},
+  {"company_name":"Uptown Dental Studio","industry":"Healthcare & Wellness","city":"Minneapolis","employee_count":15,"website":"uptowndentalstudio.com","score_modernity":5,"score_mobile":5,"score_function":5,"composite_score":5.0,"outdated_stack":False,"stack_flags":["Outdated jQuery"],"dm_name":"Dr. Jennifer L.","dm_title":"Lead Dentist & Owner","dm_seniority":"C-Suite","dm_linkedin":"","email":"appointments@uptowndentalstudio.com","phone":"(612) 824-4600","contact_form_url":"uptowndentalstudio.com/contact","outreach_status":"New","notes":"","created_at":"2026-06-03T15:00:00Z"},
   {"company_name":"Summit Dental Partners","industry":"Healthcare & Wellness","city":"Edina","employee_count":22,"website":"summitdentalpartners.com","score_modernity":4,"score_mobile":3,"score_function":4,"composite_score":3.7,"outdated_stack":True,"stack_flags":["Legacy WordPress","Non-responsive layout","Outdated jQuery"],"dm_name":"Dr. Kevin R.","dm_title":"Owner & General Dentist","dm_seniority":"C-Suite","dm_linkedin":"","email":"info@summitdentalpartners.com","phone":"(952) 555-0188","contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-06-04T08:30:00Z"},
   {"company_name":"Lakes Area Family Dentistry","industry":"Healthcare & Wellness","city":"Brainerd","employee_count":10,"website":"lakesareadentistry.com","score_modernity":2,"score_mobile":2,"score_function":2,"composite_score":2.0,"outdated_stack":True,"stack_flags":["Legacy WordPress","Missing HTTPS","Non-responsive layout","No meta viewport"],"dm_name":"Dr. Thomas W.","dm_title":"Owner & DDS","dm_seniority":"C-Suite","dm_linkedin":"","email":"office@lakesareadentistry.com","phone":"(218) 555-0142","contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-06-04T10:00:00Z"},
   {"company_name":"Rochester Family Dentistry","industry":"Healthcare & Wellness","city":"Rochester","employee_count":18,"website":"rochesterfamilydentistry.com","score_modernity":3,"score_mobile":3,"score_function":3,"composite_score":3.0,"outdated_stack":True,"stack_flags":["Legacy WordPress","Non-responsive layout","Outdated jQuery"],"dm_name":"Dr. Susan O.","dm_title":"Owner & Dentist","dm_seniority":"C-Suite","dm_linkedin":"","email":"appointments@rochesterfamilydentistry.com","phone":"(507) 555-0215","contact_form_url":"rochesterfamilydentistry.com/appointment","outreach_status":"New","notes":"","created_at":"2026-06-04T13:00:00Z"},
@@ -262,20 +511,20 @@ _SEED_LEADS = [
   # RETAIL & HOSPITALITY (8)
   {"company_name":"Indeed Brewing Company","industry":"Retail & Hospitality","city":"Minneapolis","employee_count":42,"website":"indeedbrewing.com","score_modernity":7,"score_mobile":7,"score_function":7,"composite_score":7.0,"outdated_stack":False,"stack_flags":[],"dm_name":"Tom H.","dm_title":"Co-Founder","dm_seniority":"C-Suite","dm_linkedin":"https://linkedin.com/in/tomh-indeed","email":"hello@indeedbrewing.com","phone":"(612) 843-5090","contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-06-01T09:00:00Z"},
   {"company_name":"Fulton Beer","industry":"Retail & Hospitality","city":"Minneapolis","employee_count":38,"website":"fultonbeer.com","score_modernity":6,"score_mobile":6,"score_function":6,"composite_score":6.0,"outdated_stack":False,"stack_flags":["Outdated jQuery"],"dm_name":"Ryan P.","dm_title":"Co-Founder & COO","dm_seniority":"C-Suite","dm_linkedin":"","email":"info@fultonbeer.com","phone":"(612) 333-3208","contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-06-01T10:30:00Z"},
-  {"company_name":"Lake & City Brewing Co.","industry":"Retail & Hospitality","city":"St. Paul","employee_count":18,"website":"lakeandcitybrewing.com","score_modernity":4,"score_mobile":3,"score_function":4,"composite_score":3.7,"outdated_stack":True,"stack_flags":["Legacy WordPress","Non-responsive layout","Outdated jQuery"],"dm_name":"Mike C.","dm_title":"Founder & Head Brewer","dm_seniority":"C-Suite","dm_linkedin":"","email":"mike@lakeandcitybrewing.com","phone":"(651) 555-0156","contact_form_url":"lakeandcitybrewing.com/contact","outreach_status":"Contacted","notes":"Sent intro email 6/6","created_at":"2026-06-04T16:00:00Z"},
-  {"company_name":"Tattersall Distilling","industry":"Retail & Hospitality","city":"Minneapolis","employee_count":28,"website":"tattersalldistilling.com","score_modernity":7,"score_mobile":6,"score_function":7,"composite_score":6.7,"outdated_stack":False,"stack_flags":[],"dm_name":"Dan S.","dm_title":"Co-Founder & CEO","dm_seniority":"C-Suite","dm_linkedin":"https://linkedin.com/in/dans-tattersall","email":"info@tattersalldistilling.com","phone":"(612) 584-4152","contact_form_url":None,"outreach_status":"Ignored","notes":"Strong site, not a priority","created_at":"2026-06-04T17:00:00Z"},
-  {"company_name":"Birchwood Cafe","industry":"Retail & Hospitality","city":"Minneapolis","employee_count":45,"website":"birchwoodcafe.com","score_modernity":5,"score_mobile":4,"score_function":5,"composite_score":4.7,"outdated_stack":False,"stack_flags":["Outdated jQuery","No meta viewport"],"dm_name":"Tracy R.","dm_title":"Owner","dm_seniority":"C-Suite","dm_linkedin":"","email":"info@birchwoodcafe.com","phone":"(612) 722-4474","contact_form_url":"birchwoodcafe.com/contact","outreach_status":"In Progress","notes":"Had a call 6/9 — interested in custom reservation system","created_at":"2026-06-05T08:00:00Z"},
+  {"company_name":"Lake & City Brewing Co.","industry":"Retail & Hospitality","city":"St. Paul","employee_count":18,"website":"lakeandcitybrewing.com","score_modernity":4,"score_mobile":3,"score_function":4,"composite_score":3.7,"outdated_stack":True,"stack_flags":["Legacy WordPress","Non-responsive layout","Outdated jQuery"],"dm_name":"Mike C.","dm_title":"Founder & Head Brewer","dm_seniority":"C-Suite","dm_linkedin":"","email":"mike@lakeandcitybrewing.com","phone":"(651) 555-0156","contact_form_url":"lakeandcitybrewing.com/contact","outreach_status":"New","notes":"","created_at":"2026-06-04T16:00:00Z"},
+  {"company_name":"Tattersall Distilling","industry":"Retail & Hospitality","city":"Minneapolis","employee_count":28,"website":"tattersalldistilling.com","score_modernity":7,"score_mobile":6,"score_function":7,"composite_score":6.7,"outdated_stack":False,"stack_flags":[],"dm_name":"Dan S.","dm_title":"Co-Founder & CEO","dm_seniority":"C-Suite","dm_linkedin":"https://linkedin.com/in/dans-tattersall","email":"info@tattersalldistilling.com","phone":"(612) 584-4152","contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-06-04T17:00:00Z"},
+  {"company_name":"Birchwood Cafe","industry":"Retail & Hospitality","city":"Minneapolis","employee_count":45,"website":"birchwoodcafe.com","score_modernity":5,"score_mobile":4,"score_function":5,"composite_score":4.7,"outdated_stack":False,"stack_flags":["Outdated jQuery","No meta viewport"],"dm_name":"Tracy R.","dm_title":"Owner","dm_seniority":"C-Suite","dm_linkedin":"","email":"info@birchwoodcafe.com","phone":"(612) 722-4474","contact_form_url":"birchwoodcafe.com/contact","outreach_status":"New","notes":"","created_at":"2026-06-05T08:00:00Z"},
   {"company_name":"City Garage Auto Repair","industry":"Retail & Hospitality","city":"Minneapolis","employee_count":14,"website":"citygaragempls.com","score_modernity":2,"score_mobile":2,"score_function":2,"composite_score":2.0,"outdated_stack":True,"stack_flags":["Legacy WordPress","Missing HTTPS","Non-responsive layout","No SSL certificate","No meta viewport"],"dm_name":"Steve M.","dm_title":"Owner","dm_seniority":"C-Suite","dm_linkedin":"","email":"steve@citygaragempls.com","phone":"(612) 555-0261","contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-06-05T09:30:00Z"},
   {"company_name":"Rochester Farmers Market Hub","industry":"Retail & Hospitality","city":"Rochester","employee_count":6,"website":"rochesterfarmersmarket.com","score_modernity":3,"score_mobile":2,"score_function":3,"composite_score":2.7,"outdated_stack":True,"stack_flags":["Legacy WordPress","Non-responsive layout","No meta viewport"],"dm_name":"Linda H.","dm_title":"Executive Director","dm_seniority":"Director","dm_linkedin":"","email":"info@rochesterfarmersmarket.com","phone":"(507) 555-0178","contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-06-06T10:00:00Z"},
-  {"company_name":"Northern Threads Boutique","industry":"Retail & Hospitality","city":"Mankato","employee_count":8,"website":"northernthreadsboutique.com","score_modernity":4,"score_mobile":3,"score_function":4,"composite_score":3.7,"outdated_stack":True,"stack_flags":["Legacy WordPress","Non-responsive layout","Outdated jQuery"],"dm_name":"Jenna L.","dm_title":"Owner & Buyer","dm_seniority":"C-Suite","dm_linkedin":"","email":"jenna@northernthreadsboutique.com","phone":"(507) 555-0203","contact_form_url":"northernthreadsboutique.com/contact","outreach_status":"Contacted","notes":"DM'd on Instagram 6/7","created_at":"2026-06-06T11:30:00Z"},
+  {"company_name":"Northern Threads Boutique","industry":"Retail & Hospitality","city":"Mankato","employee_count":8,"website":"northernthreadsboutique.com","score_modernity":4,"score_mobile":3,"score_function":4,"composite_score":3.7,"outdated_stack":True,"stack_flags":["Legacy WordPress","Non-responsive layout","Outdated jQuery"],"dm_name":"Jenna L.","dm_title":"Owner & Buyer","dm_seniority":"C-Suite","dm_linkedin":"","email":"jenna@northernthreadsboutique.com","phone":"(507) 555-0203","contact_form_url":"northernthreadsboutique.com/contact","outreach_status":"New","notes":"","created_at":"2026-06-06T11:30:00Z"},
   # MANUFACTURING & LOGISTICS (7)
   {"company_name":"Great Northern Machining","industry":"Manufacturing & Logistics","city":"St. Cloud","employee_count":65,"website":"greatnorthernmachining.com","score_modernity":2,"score_mobile":2,"score_function":2,"composite_score":2.0,"outdated_stack":True,"stack_flags":["Legacy WordPress","Missing HTTPS","Non-responsive layout","No SSL certificate","No meta viewport"],"dm_name":"Carl B.","dm_title":"President & Owner","dm_seniority":"C-Suite","dm_linkedin":"","email":"carl@greatnorthernmachining.com","phone":"(320) 555-0147","contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-06-06T13:00:00Z"},
   {"company_name":"Precision Machine Works","industry":"Manufacturing & Logistics","city":"Mankato","employee_count":35,"website":"precisionmachineworks.com","score_modernity":2,"score_mobile":2,"score_function":3,"composite_score":2.3,"outdated_stack":True,"stack_flags":["Legacy WordPress","Non-responsive layout","Missing HTTPS","Outdated jQuery"],"dm_name":"Richard F.","dm_title":"Owner & CNC Specialist","dm_seniority":"C-Suite","dm_linkedin":"","email":"info@precisionmachineworks.com","phone":"(507) 555-0166","contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-06-06T14:30:00Z"},
-  {"company_name":"Northland Logistics Solutions","industry":"Manufacturing & Logistics","city":"Duluth","employee_count":85,"website":"northlandlogistics.com","score_modernity":3,"score_mobile":3,"score_function":4,"composite_score":3.3,"outdated_stack":True,"stack_flags":["Legacy WordPress","Non-responsive layout","Outdated jQuery"],"dm_name":"Gary L.","dm_title":"CEO","dm_seniority":"C-Suite","dm_linkedin":"https://linkedin.com/in/garyl-northland","email":"operations@northlandlogistics.com","phone":"(218) 555-0133","contact_form_url":"northlandlogistics.com/quote","outreach_status":"Contacted","notes":"Called main line 6/9","created_at":"2026-06-07T08:00:00Z"},
-  {"company_name":"Minnesota Metal Fabricators","industry":"Manufacturing & Logistics","city":"Bloomington","employee_count":45,"website":"mnmetalfab.com","score_modernity":2,"score_mobile":2,"score_function":2,"composite_score":2.0,"outdated_stack":True,"stack_flags":["Missing HTTPS","Non-responsive layout","No SSL certificate","No meta viewport"],"dm_name":"Dennis S.","dm_title":"Owner & Plant Manager","dm_seniority":"C-Suite","dm_linkedin":"","email":"dennis@mnmetalfab.com","phone":"(952) 555-0181","contact_form_url":None,"outreach_status":"Ignored","notes":"Declined — not looking for web work","created_at":"2026-06-07T09:30:00Z"},
+  {"company_name":"Northland Logistics Solutions","industry":"Manufacturing & Logistics","city":"Duluth","employee_count":85,"website":"northlandlogistics.com","score_modernity":3,"score_mobile":3,"score_function":4,"composite_score":3.3,"outdated_stack":True,"stack_flags":["Legacy WordPress","Non-responsive layout","Outdated jQuery"],"dm_name":"Gary L.","dm_title":"CEO","dm_seniority":"C-Suite","dm_linkedin":"https://linkedin.com/in/garyl-northland","email":"operations@northlandlogistics.com","phone":"(218) 555-0133","contact_form_url":"northlandlogistics.com/quote","outreach_status":"New","notes":"","created_at":"2026-06-07T08:00:00Z"},
+  {"company_name":"Minnesota Metal Fabricators","industry":"Manufacturing & Logistics","city":"Bloomington","employee_count":45,"website":"mnmetalfab.com","score_modernity":2,"score_mobile":2,"score_function":2,"composite_score":2.0,"outdated_stack":True,"stack_flags":["Missing HTTPS","Non-responsive layout","No SSL certificate","No meta viewport"],"dm_name":"Dennis S.","dm_title":"Owner & Plant Manager","dm_seniority":"C-Suite","dm_linkedin":"","email":"dennis@mnmetalfab.com","phone":"(952) 555-0181","contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-06-07T09:30:00Z"},
   {"company_name":"River Valley Food Producers","industry":"Manufacturing & Logistics","city":"Winona","employee_count":55,"website":"rivervalleyfood.com","score_modernity":3,"score_mobile":3,"score_function":3,"composite_score":3.0,"outdated_stack":True,"stack_flags":["Legacy WordPress","Non-responsive layout","Outdated jQuery"],"dm_name":"Ellen P.","dm_title":"President","dm_seniority":"C-Suite","dm_linkedin":"","email":"info@rivervalleyfood.com","phone":"(507) 555-0192","contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-06-07T11:00:00Z"},
   {"company_name":"Twin Cities Metal Works","industry":"Manufacturing & Logistics","city":"St. Louis Park","employee_count":28,"website":"twincitiesmetalworks.com","score_modernity":2,"score_mobile":2,"score_function":2,"composite_score":2.0,"outdated_stack":True,"stack_flags":["Legacy WordPress","Missing HTTPS","Non-responsive layout","No SSL certificate"],"dm_name":"Bruce N.","dm_title":"Shop Owner & Welder","dm_seniority":"C-Suite","dm_linkedin":"","email":"bruce@twincitiesmetalworks.com","phone":"(952) 555-0116","contact_form_url":None,"outreach_status":"New","notes":"","created_at":"2026-06-07T13:00:00Z"},
-  {"company_name":"North Star Freight Solutions","industry":"Manufacturing & Logistics","city":"Moorhead","employee_count":95,"website":"northstarfreight.com","score_modernity":4,"score_mobile":3,"score_function":4,"composite_score":3.7,"outdated_stack":True,"stack_flags":["Legacy WordPress","Non-responsive layout","Outdated jQuery"],"dm_name":"Mike H.","dm_title":"VP of Operations","dm_seniority":"Director","dm_linkedin":"https://linkedin.com/in/mikeh-northstar","email":"dispatch@northstarfreight.com","phone":"(218) 555-0178","contact_form_url":"northstarfreight.com/contact","outreach_status":"In Progress","notes":"RFP drafted, sending 6/12","created_at":"2026-06-08T09:00:00Z"},
+  {"company_name":"North Star Freight Solutions","industry":"Manufacturing & Logistics","city":"Moorhead","employee_count":95,"website":"northstarfreight.com","score_modernity":4,"score_mobile":3,"score_function":4,"composite_score":3.7,"outdated_stack":True,"stack_flags":["Legacy WordPress","Non-responsive layout","Outdated jQuery"],"dm_name":"Mike H.","dm_title":"VP of Operations","dm_seniority":"Director","dm_linkedin":"https://linkedin.com/in/mikeh-northstar","email":"dispatch@northstarfreight.com","phone":"(218) 555-0178","contact_form_url":"northstarfreight.com/contact","outreach_status":"New","notes":"","created_at":"2026-06-08T09:00:00Z"},
 ]
 
 # Auto-initialize on import
