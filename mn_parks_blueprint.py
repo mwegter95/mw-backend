@@ -7,7 +7,7 @@ import os, sqlite3, datetime, mimetypes
 from pathlib import Path
 from functools import wraps
 import bcrypt, jwt
-from flask import Blueprint, request, jsonify, send_file, g
+from flask import Blueprint, request, jsonify, send_file, g, Response
 
 mn_parks_bp = Blueprint("mn_parks", __name__, url_prefix="/mn-parks")
 
@@ -21,6 +21,17 @@ SECRET_KEY_FILE = DATA_DIR / ".secret_key"
 SECRET_KEY = SECRET_KEY_FILE.read_text().strip() if SECRET_KEY_FILE.exists() else "mn_parks_secret"
 JWT_ALGO   = "HS256"
 TTL        = datetime.timedelta(days=30)
+
+# Encryption at rest for photos (Fernet/AES). Key persisted next to the data.
+try:
+    from cryptography.fernet import Fernet
+    _PHOTO_KEY_FILE = DATA_DIR / ".mn_photo_key"
+    if _PHOTO_KEY_FILE.exists():
+        _FERNET = Fernet(_PHOTO_KEY_FILE.read_bytes())
+    else:
+        _k = Fernet.generate_key(); _PHOTO_KEY_FILE.write_bytes(_k); _FERNET = Fernet(_k)
+except Exception:
+    _FERNET = None
 
 DEMO_EMAIL = "demo@mnparks.test"
 DEMO_PASS  = "Parks2024!"
@@ -266,6 +277,9 @@ def upload_photo(vid):
             fpath = jpg
         except Exception:
             pass  # conversion unavailable: keep the original file
+    if _FERNET:
+        try: fpath.write_bytes(_FERNET.encrypt(fpath.read_bytes()))
+        except Exception: pass
     cur = db.execute("INSERT INTO mn_photos (visit_id, file_path) VALUES (?,?)",
                      (vid, str(fpath)))
     db.commit()
@@ -288,7 +302,11 @@ def get_photo(vid, pid):
     if not fpath.exists():
         return jsonify({"error": "file missing"}), 404
     mime = mimetypes.guess_type(str(fpath))[0] or "image/jpeg"
-    return send_file(str(fpath), mimetype=mime)
+    raw = fpath.read_bytes()
+    if _FERNET:
+        try: raw = _FERNET.decrypt(raw)
+        except Exception: pass  # legacy unencrypted photo
+    return Response(raw, mimetype=mime)
 
 @mn_parks_bp.route("/visits/<int:vid>/photos/<int:pid>", methods=["DELETE"])
 @require_auth
