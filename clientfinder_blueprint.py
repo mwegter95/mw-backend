@@ -173,7 +173,8 @@ def update_lead(lead_id):
     data = request.get_json(silent=True) or {}
     allowed = {'outreach_status', 'notes', 'score_modernity', 'score_mobile', 'score_function',
                'composite_score', 'outdated_stack', 'stack_flags', 'dm_name', 'dm_title',
-               'dm_seniority', 'email', 'phone', 'contact_form_url'}
+               'dm_seniority', 'email', 'phone', 'contact_form_url', 'screenshot_url',
+               'website', 'industry', 'city', 'employee_count'}
     sets, params = [], []
     for k, v in data.items():
         if k in allowed:
@@ -301,6 +302,33 @@ def _is_aggregator(domain):
     return any(domain.endswith(d) for d in _SKIP_DOMAINS)
 
 
+def _decode_ddg_href(href):
+    """DuckDuckGo wraps outbound links as /l/?uddg=<encoded>. Unwrap to the real URL."""
+    from urllib.parse import unquote, urlparse, parse_qs
+    if not href:
+        return ""
+    if "duckduckgo.com/l/" in href or href.startswith("/l/"):
+        try:
+            qs = parse_qs(urlparse(href).query)
+            if "uddg" in qs:
+                return unquote(qs["uddg"][0])
+        except Exception:
+            return ""
+    return href
+
+
+def _clean_name(title):
+    """Trim a SERP title down to a business-like name (drop trailing taglines)."""
+    if not title:
+        return ""
+    # Cut at common separators that precede taglines / location suffixes
+    for sep in (" | ", " – ", " — ", " - ", " : "):
+        if sep in title:
+            title = title.split(sep)[0]
+            break
+    return title.strip()[:80]
+
+
 async def _search_duckduckgo(ctx, query, city):
     """DuckDuckGo HTML (no JS required) — finds business websites not in directories."""
     page = await ctx.new_page()
@@ -309,27 +337,63 @@ async def _search_duckduckgo(ctx, query, city):
         safe_q = _urlencode(
             query + " -site:yelp.com -site:yellowpages.com -site:facebook.com -site:linkedin.com"
         )
-        await page.goto(f"https://duckduckgo.com/html/?q={safe_q}",
+        # POST endpoint is far more reliable than the GET html page under automation
+        await page.goto(f"https://html.duckduckgo.com/html/?q={safe_q}",
                         wait_until="domcontentloaded", timeout=15000)
-        await page.wait_for_timeout(800)
+        await page.wait_for_timeout(700)
 
-        for item in (await page.query_selector_all(".result"))[:12]:
+        anchors = await page.query_selector_all("a.result__a")
+        if not anchors:
+            anchors = await page.query_selector_all(".result__title a")
+        for a in anchors[:14]:
             try:
-                title_el = await item.query_selector(".result__title a")
-                url_el   = await item.query_selector(".result__url")
-                if not title_el:
-                    continue
-                title       = (await title_el.inner_text()).strip()
-                display_url = (await url_el.inner_text()).strip() if url_el else ""
-                domain      = _extract_domain(display_url)
+                title = (await a.inner_text()).strip()
+                href  = _decode_ddg_href(await a.get_attribute("href") or "")
+                domain = _extract_domain(href)
                 if not domain or _is_aggregator(domain):
                     continue
                 results.append({
-                    "name": title, "website": domain,
-                    "city": city,  "address": "",
-                    "source": "DuckDuckGo",
+                    "name": _clean_name(title), "website": domain,
+                    "city": city, "address": "", "source": "DuckDuckGo",
                 })
-                if len(results) >= 6:
+                if len(results) >= 8:
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
+    finally:
+        await page.close()
+    return results
+
+
+async def _search_bing(ctx, query, city):
+    """Bing HTML — reliable fallback search source under headless automation."""
+    page = await ctx.new_page()
+    results = []
+    try:
+        safe_q = _urlencode(
+            query + " -site:yelp.com -site:yellowpages.com -site:facebook.com -site:linkedin.com"
+        )
+        await page.goto(f"https://www.bing.com/search?q={safe_q}&setlang=en-us&cc=us",
+                        wait_until="domcontentloaded", timeout=15000)
+        await page.wait_for_timeout(700)
+
+        for item in (await page.query_selector_all("li.b_algo"))[:14]:
+            try:
+                a = await item.query_selector("h2 a")
+                if not a:
+                    continue
+                title = (await a.inner_text()).strip()
+                href  = (await a.get_attribute("href") or "").strip()
+                domain = _extract_domain(href)
+                if not domain or _is_aggregator(domain):
+                    continue
+                results.append({
+                    "name": _clean_name(title), "website": domain,
+                    "city": city, "address": "", "source": "Bing",
+                })
+                if len(results) >= 8:
                     break
             except Exception:
                 continue
@@ -481,13 +545,8 @@ async def _search_yellow_pages(ctx, industry, city):
     return results
 
 
-async def _multi_source_search(query, industry, city):
-    """Run all three scrapers concurrently in isolated browser contexts."""
-    try:
-        from playwright.async_api import async_playwright
-    except ImportError:
-        return []
-
+async def _multi_source_search(browser, query, industry, city, want=12):
+    """Run search sources concurrently in isolated contexts, dedupe by domain."""
     _ctx_opts = dict(
         viewport={"width": 1280, "height": 800},
         user_agent=(
@@ -495,75 +554,287 @@ async def _multi_source_search(query, industry, city):
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/124.0.0.0 Safari/537.36"
         ),
+        locale="en-US",
     )
-    _launch_opts = dict(headless=True, args=["--no-sandbox","--disable-dev-shm-usage","--disable-gpu"])
-
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(**_launch_opts)
-        c1, c2, c3 = (
-            await browser.new_context(**_ctx_opts),
-            await browser.new_context(**_ctx_opts),
-            await browser.new_context(**_ctx_opts),
-        )
+    contexts = [await browser.new_context(**_ctx_opts) for _ in range(4)]
+    try:
         raw = await asyncio.gather(
-            _search_duckduckgo(c1, query, city),
-            _search_google_maps(c2, query, city),
-            _search_yellow_pages(c3, industry, city),
+            _search_duckduckgo(contexts[0], query, city),
+            _search_bing(contexts[1], query, city),
+            _search_google_maps(contexts[2], query, city),
+            _search_yellow_pages(contexts[3], industry, city),
             return_exceptions=True,
         )
-        for ctx in (c1, c2, c3):
-            await ctx.close()
-        await browser.close()
+    finally:
+        for c in contexts:
+            try:
+                await c.close()
+            except Exception:
+                pass
 
     seen, businesses = set(), []
     for batch in raw:
-        if isinstance(batch, Exception):
+        if isinstance(batch, Exception) or not batch:
             continue
         for biz in batch:
             domain = _extract_domain(biz.get("website", ""))
-            key = domain or biz.get("name", "").lower()
+            key = domain or (biz.get("name", "") or "").lower()
             if key and key not in seen:
                 seen.add(key)
+                biz["industry"] = industry
                 businesses.append(biz)
+    return businesses[:want]
 
-    return businesses[:18]
+
+# ─── Query planning ────────────────────────────────────────────────────────────
+# Concrete, searchable business types per industry — never the literal "local business".
+_INDUSTRY_QUERY_TERMS = {
+    "Entertainment":              ["bowling alley", "family entertainment center", "escape room", "arcade", "mini golf"],
+    "Professional Services":      ["law firm", "accounting firm", "marketing agency", "architecture firm", "insurance agency"],
+    "Home & Commercial Services": ["HVAC contractor", "plumbing company", "landscaping company", "electrician", "roofing contractor"],
+    "Healthcare & Wellness":      ["dental clinic", "chiropractor", "physical therapy clinic", "med spa", "family clinic"],
+    "Retail & Hospitality":       ["restaurant", "boutique", "craft brewery", "auto repair shop", "coffee shop"],
+    "Manufacturing & Logistics":  ["machine shop", "metal fabrication", "freight company", "manufacturer", "food producer"],
+}
+
+_TWIN_CITIES = ["Minneapolis", "St. Paul", "Bloomington", "Edina", "Plymouth", "Eden Prairie", "Maple Grove"]
+_GREATER_MN  = ["Duluth", "Rochester", "St. Cloud", "Mankato", "Moorhead", "Brainerd"]
+
+# Reverse lookup: term -> industry label, for tagging discovered leads.
+_TERM_INDUSTRY = {}
+for _ind, _terms in _INDUSTRY_QUERY_TERMS.items():
+    for _t in _terms:
+        _TERM_INDUSTRY[_t] = _ind
+
+_MAX_QUERIES = 8
+
+
+def _cities_for_region(region, refinements):
+    rc = refinements.get("city")
+    if rc:
+        return [rc.replace(" MN", "").strip()]
+    if region == "Twin Cities":
+        return list(_TWIN_CITIES)
+    if region == "Greater MN":
+        return list(_GREATER_MN)
+    # Both — interleave so the plan spans the whole state
+    out = []
+    for a, b in zip(_TWIN_CITIES, _GREATER_MN):
+        out.extend([a, b])
+    return out
+
+
+def _terms_for_industry(industry, refinements, keywords):
+    """Pick concrete search terms. Refinement/keyword/industry aware; never generic."""
+    ref_ind = refinements.get("industry")
+    target = ref_ind or industry
+    if target and target in _INDUSTRY_QUERY_TERMS:
+        return list(_INDUSTRY_QUERY_TERMS[target]), target
+    # If the user typed a keyword that reads like a business type, lead with it
+    if keywords and len(keywords.split()) <= 4:
+        return [keywords.strip()], (target or "")
+    # "All industries" — spread one strong term from each industry for breadth
+    spread = [terms[0] for terms in _INDUSTRY_QUERY_TERMS.values()]
+    return spread, ""
+
+
+def _build_query_plan(industry, region, keywords, refinements):
+    """Produce up to _MAX_QUERIES concrete {q, term, city, industry} search tasks."""
+    terms, _ = _terms_for_industry(industry, refinements, keywords)
+    cities = _cities_for_region(region, refinements)
+    kw = keywords.strip() if keywords else ""
+    # Don't duplicate keyword into the query when it's already the term
+    kw_suffix = f" {kw}" if (kw and not any(kw.lower() in t.lower() for t in terms)) else ""
+
+    plan = []
+    for i in range(min(_MAX_QUERIES, max(len(terms), len(cities)))):
+        term = terms[i % len(terms)]
+        city = cities[i % len(cities)]
+        plan.append({
+            "term": term,
+            "city": city,
+            "industry": _TERM_INDUSTRY.get(term, refinements.get("industry") or industry or ""),
+            "q": f"{term} {city} MN{kw_suffix}".strip(),
+        })
+        if len(plan) >= _MAX_QUERIES:
+            break
+    return plan
 
 
 @clientfinder_bp.route("/discover", methods=["POST"])
 def discover():
-    """Stage 1: Multi-source discovery — DuckDuckGo, Google Maps, Yellow Pages via Playwright."""
+    """Stage 1: Multi-query discovery across DuckDuckGo, Bing, Google Maps & Yellow Pages.
+
+    Streams Server-Sent Events when the client requests it ({"stream": true}); otherwise
+    aggregates every query and returns a single JSON payload for direct API use.
+    """
     data = request.get_json(silent=True) or {}
-    industry    = data.get("industry", "small business")
+    industry    = data.get("industry", "")
     region      = data.get("region", "Both")
     keywords    = data.get("keywords", "")
-    refinements = data.get("refinements", {})
+    refinements = data.get("refinements", {}) or {}
+    want_per_q  = int(data.get("per_query", 6))
+    overall_cap = int(data.get("max_results", 30))
+    stream      = bool(data.get("stream"))
 
-    city_hint      = refinements.get("city") or ("Duluth MN" if region == "Greater MN" else "Minneapolis MN")
-    city           = city_hint.replace(" MN", "").strip()
-    query_industry = refinements.get("industry") or industry or "local business"
-    q = f"{query_industry} {city_hint}" + (f" {keywords}" if keywords else "")
+    plan = _build_query_plan(industry, region, keywords, refinements)
 
-    result_holder = {}
+    def _emit(q):
+        async def _run():
+            try:
+                from playwright.async_api import async_playwright
+            except ImportError:
+                q.put({"event": "error", "data": {"msg": "Playwright not available"}})
+                q.put(None)
+                return
+            seen = set()
+            total = 0
+            launch_opts = dict(headless=True,
+                               args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"])
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(**launch_opts)
+                try:
+                    for idx, task in enumerate(plan):
+                        q.put({"event": "query", "data": {
+                            "idx": idx, "total": len(plan),
+                            "q": task["q"], "industry": task["industry"], "city": task["city"],
+                        }})
+                        try:
+                            found = await _multi_source_search(
+                                browser, task["q"], task["industry"], task["city"], want=want_per_q)
+                        except Exception as e:
+                            q.put({"event": "query_error", "data": {"idx": idx, "error": str(e)[:120]}})
+                            found = []
+                        new_count = 0
+                        for biz in found:
+                            domain = _extract_domain(biz.get("website", ""))
+                            key = domain or (biz.get("name", "") or "").lower()
+                            if not key or key in seen:
+                                continue
+                            seen.add(key)
+                            new_count += 1
+                            total += 1
+                            q.put({"event": "business", "data": biz})
+                            if total >= overall_cap:
+                                break
+                        q.put({"event": "query_done", "data": {
+                            "idx": idx, "q": task["q"], "found": new_count, "running_total": total}})
+                        if total >= overall_cap:
+                            break
+                finally:
+                    await browser.close()
+            q.put({"event": "done", "data": {"total": total}})
+            q.put(None)
+        asyncio.run(_run())
 
-    def _run():
-        try:
-            result_holder["businesses"] = asyncio.run(
-                _multi_source_search(q, query_industry, city)
-            )
-        except Exception as e:
-            result_holder["error"] = str(e)
+    # ── Streaming mode ─────────────────────────────────────────────────────────
+    if stream:
+        result_q = queue.Queue()
+        t = threading.Thread(target=_emit, args=(result_q,), daemon=True)
+        t.start()
 
-    t = threading.Thread(target=_run, daemon=True)
+        def generate():
+            yield f"data: {json.dumps({'event': 'start', 'queries': len(plan)})}\n\n"
+            while True:
+                try:
+                    item = result_q.get(timeout=45)
+                except queue.Empty:
+                    yield "data: {\"event\":\"timeout\"}\n\n"
+                    break
+                if item is None:
+                    break
+                yield f"data: {json.dumps(item)}\n\n"
+
+        return Response(generate(), mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    # ── Aggregated JSON mode (direct API / curl) ───────────────────────────────
+    result_q = queue.Queue()
+    t = threading.Thread(target=_emit, args=(result_q,), daemon=True)
     t.start()
-    t.join(timeout=90)
+    businesses, queries = [], []
+    deadline = time.time() + 100
+    while time.time() < deadline:
+        try:
+            item = result_q.get(timeout=45)
+        except queue.Empty:
+            break
+        if item is None:
+            break
+        if item.get("event") == "business":
+            businesses.append(item["data"])
+        elif item.get("event") == "query":
+            queries.append(item["data"]["q"])
+    return jsonify({"ok": True, "businesses": businesses,
+                    "queries": queries, "count": len(businesses)})
 
-    if "error" in result_holder:
-        return jsonify({"ok": False, "error": result_holder["error"], "businesses": []}), 502
-    if "businesses" not in result_holder:
-        return jsonify({"ok": False, "error": "Discovery timed out", "businesses": []}), 504
 
-    businesses = result_holder["businesses"]
-    return jsonify({"ok": True, "businesses": businesses, "query": q, "count": len(businesses)})
+
+async def _scrape_site(ctx, biz):
+    """Screenshot + tech/contact extraction for one site. Returns a data dict."""
+    url = biz.get("website", "")
+    if not url.startswith("http"):
+        url = "https://" + url
+    name = biz.get("name", "")
+    city = biz.get("city", "")
+
+    page = await ctx.new_page()
+    try:
+        resp = await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+        status_code = resp.status if resp else 0
+        await page.wait_for_timeout(800)
+
+        # Screenshot
+        fname = f"{uuid.uuid4().hex[:12]}.png"
+        fpath = _SCREENSHOTS_DIR / fname
+        await page.screenshot(path=str(fpath), full_page=False,
+                              clip={"x": 0, "y": 0, "width": 1280, "height": 800})
+        screenshot_url = f"/clientfinder/screenshot/{fname}"
+
+        # Extract contact + stack signals
+        html = await page.content()
+        emails = list(set(re.findall(r'[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}', html)))[:3]
+        phones = list(set(re.findall(r'\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}', html)))[:2]
+        stack_flags = []
+        html_lower = html.lower()
+        if 'wp-content' in html_lower or 'wordpress' in html_lower:
+            stack_flags.append("Legacy WordPress")
+        if 'jquery' in html_lower and ('jquery/1.' in html_lower or 'jquery/2.' in html_lower):
+            stack_flags.append("Outdated jQuery")
+        final_url = page.url
+        if status_code and not final_url.startswith("https://"):
+            stack_flags.append("Missing HTTPS")
+        viewport_meta = await page.evaluate("() => !!document.querySelector('meta[name=viewport]')")
+        if not viewport_meta:
+            stack_flags.append("No meta viewport")
+        is_responsive = await page.evaluate("""() => {
+            const w = window.innerWidth;
+            window.resizeTo(375,812);
+            const changed = document.body.scrollWidth <= 450;
+            window.resizeTo(w, 800);
+            return changed;
+        }""")
+        if not is_responsive:
+            stack_flags.append("Non-responsive layout")
+
+        return {
+            "name": name, "website": biz.get("website", ""), "city": city,
+            "screenshot_url": screenshot_url, "emails": emails, "phones": phones,
+            "stack_flags": stack_flags, "status_code": status_code,
+        }
+    finally:
+        await page.close()
+
+
+def _scores_from_flags(stack_flags):
+    """Heuristic 1-10 sub-scores + composite from detected outdated-stack flags."""
+    penalty = min(len(stack_flags or []) * 1.4, 7)
+    base = max(1.0, 8.0 - penalty)
+    modernity = max(1, min(10, round(base)))
+    mobile    = max(1, min(10, round(base - (1 if any('responsive' in f.lower() or 'viewport' in f.lower() for f in (stack_flags or [])) else 0))))
+    function  = max(1, min(10, round(base + 0.5)))
+    composite = round((modernity + mobile + function) / 3, 1)
+    return modernity, mobile, function, composite
 
 
 @clientfinder_bp.route("/scrape", methods=["POST"])
@@ -586,75 +857,22 @@ def scrape_stream():
             async with async_playwright() as pw:
                 browser = await pw.chromium.launch(
                     headless=True,
-                    args=["--no-sandbox","--disable-dev-shm-usage","--disable-gpu"]
+                    args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
                 )
                 ctx = await browser.new_context(
                     viewport={"width": 1280, "height": 800},
                     user_agent="Mozilla/5.0 (compatible; ClientFinder/1.0)",
                 )
                 for idx, biz in enumerate(businesses):
-                    url = biz.get("website","")
-                    if not url.startswith("http"):
-                        url = "https://" + url
-                    name = biz.get("name","")
-                    city = biz.get("city","")
                     try:
-                        page = await ctx.new_page()
-                        resp = await page.goto(url, wait_until="domcontentloaded", timeout=15000)
-                        status_code = resp.status if resp else 0
-                        await page.wait_for_timeout(800)
-
-                        # Screenshot
-                        fname = f"{uuid.uuid4().hex[:12]}.png"
-                        fpath = _SCREENSHOTS_DIR / fname
-                        await page.screenshot(path=str(fpath), full_page=False, clip={"x":0,"y":0,"width":1280,"height":800})
-                        screenshot_url = f"/clientfinder/screenshot/{fname}"
-
-                        # Extract contact + stack signals
-                        html = await page.content()
-                        emails = list(set(re.findall(r'[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}', html)))[:3]
-                        phones = list(set(re.findall(r'\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}', html)))[:2]
-                        stack_flags = []
-                        html_lower = html.lower()
-                        if 'wp-content' in html_lower or 'wordpress' in html_lower:
-                            stack_flags.append("Legacy WordPress")
-                        if 'jquery' in html_lower and ('jquery/1.' in html_lower or 'jquery/2.' in html_lower):
-                            stack_flags.append("Outdated jQuery")
-                        if status_code == 200 and not url.startswith("https://"):
-                            stack_flags.append("Missing HTTPS")
-                        viewport_meta = await page.evaluate("() => !!document.querySelector('meta[name=viewport]')")
-                        if not viewport_meta:
-                            stack_flags.append("No meta viewport")
-                        # Basic mobile check via CSS media query simulation
-                        is_responsive = await page.evaluate("""() => {
-                            const w = window.innerWidth;
-                            window.resizeTo(375,812);
-                            const changed = document.body.scrollWidth <= 450;
-                            window.resizeTo(w, 800);
-                            return changed;
-                        }""")
-                        if not is_responsive:
-                            stack_flags.append("Non-responsive layout")
-
-                        await page.close()
-                        result_q.put({
-                            "event": "site",
-                            "data": {
-                                "idx": idx,
-                                "name": name,
-                                "website": biz.get("website",""),
-                                "city": city,
-                                "screenshot_url": screenshot_url,
-                                "emails": emails,
-                                "phones": phones,
-                                "stack_flags": stack_flags,
-                                "status_code": status_code,
-                            }
-                        })
+                        site = await _scrape_site(ctx, biz)
+                        site["idx"] = idx
+                        result_q.put({"event": "site", "data": site})
                     except Exception as e:
                         result_q.put({
                             "event": "site_error",
-                            "data": {"idx": idx, "name": name, "website": url, "error": str(e)[:120]}
+                            "data": {"idx": idx, "name": biz.get("name", ""),
+                                     "website": biz.get("website", ""), "error": str(e)[:120]}
                         })
                 await browser.close()
             result_q.put(None)  # sentinel
@@ -679,6 +897,129 @@ def scrape_stream():
 
     return Response(generate(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@clientfinder_bp.route("/rescrape", methods=["POST"])
+def rescrape_stream():
+    """Re-run Playwright capture for existing CRM leads (by id) and persist the results.
+
+    Body: {"lead_ids": [1,2,3]}. Streams SSE progress; each lead's screenshot, stack
+    flags, recomputed scores and any newly found contact info are written back to the DB.
+    """
+    data = request.get_json(silent=True) or {}
+    lead_ids = data.get("lead_ids", [])
+    try:
+        lead_ids = [int(x) for x in lead_ids]
+    except (TypeError, ValueError):
+        lead_ids = []
+
+    # Load the target leads up front (website + current contact fields)
+    conn = _get_conn()
+    targets = []
+    if lead_ids:
+        placeholders = ",".join("?" * len(lead_ids))
+        rows = conn.execute(
+            f"SELECT id, company_name, website, city, email, phone FROM leads "
+            f"WHERE id IN ({placeholders})", lead_ids).fetchall()
+        targets = [dict(r) for r in rows]
+    conn.close()
+
+    result_q = queue.Queue()
+
+    def run_playwright():
+        async def _run():
+            try:
+                from playwright.async_api import async_playwright
+            except ImportError:
+                result_q.put({"event": "error", "data": {"msg": "Playwright not available"}})
+                result_q.put(None)
+                return
+
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(
+                    headless=True,
+                    args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+                )
+                ctx = await browser.new_context(
+                    viewport={"width": 1280, "height": 800},
+                    user_agent="Mozilla/5.0 (compatible; ClientFinder/1.0)",
+                )
+                for idx, lead in enumerate(targets):
+                    if not lead.get("website"):
+                        result_q.put({"event": "lead_error", "data": {
+                            "idx": idx, "id": lead["id"], "name": lead["company_name"],
+                            "error": "No website on file"}})
+                        continue
+                    try:
+                        site = await _scrape_site(ctx, {
+                            "name": lead["company_name"], "website": lead["website"],
+                            "city": lead["city"],
+                        })
+                        modernity, mobile, function, composite = _scores_from_flags(site["stack_flags"])
+                        patch = {
+                            "screenshot_url": site["screenshot_url"],
+                            "stack_flags": site["stack_flags"],
+                            "outdated_stack": 1 if site["stack_flags"] else 0,
+                            "score_modernity": modernity,
+                            "score_mobile": mobile,
+                            "score_function": function,
+                            "composite_score": composite,
+                        }
+                        # Only fill contact info that was previously empty
+                        if not lead.get("email") and site["emails"]:
+                            patch["email"] = site["emails"][0]
+                        if not lead.get("phone") and site["phones"]:
+                            patch["phone"] = site["phones"][0]
+
+                        c2 = _get_conn()
+                        sets, params = [], []
+                        for k, v in patch.items():
+                            sets.append(f"{k}=?")
+                            params.append(json.dumps(v) if k == "stack_flags" else v)
+                        sets.append("updated_at=?"); params.append(_now())
+                        params.append(lead["id"])
+                        c2.execute(f"UPDATE leads SET {', '.join(sets)} WHERE id=?", params)
+                        c2.commit(); c2.close()
+
+                        result_q.put({"event": "lead", "data": {
+                            "idx": idx, "id": lead["id"], "name": lead["company_name"],
+                            "screenshot_url": site["screenshot_url"],
+                            "stack_flags": site["stack_flags"],
+                            "outdated_stack": bool(site["stack_flags"]),
+                            "score_modernity": modernity, "score_mobile": mobile,
+                            "score_function": function, "composite_score": composite,
+                            "email": patch.get("email", lead.get("email")),
+                            "phone": patch.get("phone", lead.get("phone")),
+                            "status_code": site["status_code"],
+                        }})
+                    except Exception as e:
+                        result_q.put({"event": "lead_error", "data": {
+                            "idx": idx, "id": lead["id"], "name": lead["company_name"],
+                            "error": str(e)[:120]}})
+                await browser.close()
+            result_q.put(None)
+
+        asyncio.run(_run())
+
+    t = threading.Thread(target=run_playwright, daemon=True)
+    t.start()
+
+    def generate():
+        yield f"data: {json.dumps({'event': 'start', 'total': len(targets)})}\n\n"
+        while True:
+            try:
+                item = result_q.get(timeout=30)
+            except queue.Empty:
+                yield "data: {\"event\":\"timeout\"}\n\n"
+                break
+            if item is None:
+                yield "data: {\"event\":\"done\"}\n\n"
+                break
+            yield f"data: {json.dumps(item)}\n\n"
+
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
 
 
 @clientfinder_bp.route("/enrich", methods=["POST"])
