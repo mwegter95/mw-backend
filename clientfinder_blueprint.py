@@ -310,6 +310,47 @@ def _is_aggregator(domain):
     return any(domain.endswith(d) for d in _SKIP_DOMAINS)
 
 
+# National brands / chains / enterprises that are not realistic small-business web
+# leads (you won't be building a site for USPS or AutoZone). Dropped during discovery.
+_SKIP_BRANDS = {
+    # shipping / logistics
+    "usps.com", "ups.com", "fedex.com", "dhl.com", "uline.com", "freightquote.com",
+    # big box / national retail
+    "walmart.com", "target.com", "homedepot.com", "lowes.com", "menards.com",
+    "bestbuy.com", "costco.com", "samsclub.com", "ikea.com", "macys.com", "kohls.com",
+    "autozone.com", "oreillyauto.com", "advanceautoparts.com", "napaonline.com",
+    "acehardware.com", "truevalue.com", "petco.com", "petsmart.com", "michaels.com",
+    "dickssportinggoods.com", "officedepot.com", "staples.com", "guitarcenter.com",
+    # grocery / pharmacy chains
+    "cvs.com", "walgreens.com", "kroger.com", "cub.com", "hy-vee.com", "aldi.us",
+    "wholefoodsmarket.com", "traderjoes.com", "target.com",
+    # food / restaurant chains
+    "mcdonalds.com", "starbucks.com", "subway.com", "chipotle.com", "dominos.com",
+    "pizzahut.com", "wendys.com", "burgerking.com", "tacobell.com", "kfc.com",
+    "dunkindonuts.com", "chick-fil-a.com", "panerabread.com", "applebees.com",
+    "olivegarden.com", "buffalowildwings.com", "culvers.com", "cariboucoffee.com",
+    # hotels / travel
+    "marriott.com", "hilton.com", "hyatt.com", "ihg.com", "choicehotels.com",
+    "bestwestern.com", "wyndhamhotels.com", "airbnb.com", "vrbo.com",
+    # telecom / utilities / banks / insurance nationals
+    "verizon.com", "att.com", "t-mobile.com", "xfinity.com", "comcast.com",
+    "centurylink.com", "chase.com", "bankofamerica.com", "wellsfargo.com",
+    "usbank.com", "citi.com", "capitalone.com", "statefarm.com", "geico.com",
+    "progressive.com", "allstate.com", "libertymutual.com", "aaa.com",
+    # fitness / services chains
+    "planetfitness.com", "lifetime.life", "anytimefitness.com", "lacarpet.com",
+    "jiffylube.com", "midas.com", "meineke.com", "valvoline.com", "firestone.com",
+    "discounttire.com", "hrblock.com", "jackson-hewitt.com", "libertytax.com",
+    # auto manufacturers / dealers national
+    "ford.com", "chevrolet.com", "toyota.com", "honda.com", "carmax.com", "carvana.com",
+}
+
+
+def _is_national_brand(domain):
+    d = domain[4:] if domain.startswith("www.") else domain
+    return d in _SKIP_BRANDS or any(d.endswith("." + b) for b in _SKIP_BRANDS)
+
+
 _DOMAIN_RE = re.compile(r'^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}$')
 
 def _looks_like_real_domain(domain):
@@ -621,7 +662,8 @@ _INDUSTRY_QUERY_TERMS = {
         "mini golf", "go kart track", "trampoline park", "laser tag", "axe throwing",
         "comedy club", "banquet hall", "event venue", "pottery studio", "dance studio"],
     "Professional Services": [
-        "law firm", "accounting firm", "marketing agency", "architecture firm",
+        "law firm", "accounting firm", "marketing agency", "advertising agency",
+        "digital marketing agency", "branding agency", "architecture firm",
         "insurance agency", "financial advisor", "consulting firm", "engineering firm",
         "staffing agency", "tax preparation service", "bookkeeping service",
         "public relations agency", "title company", "real estate brokerage"],
@@ -816,6 +858,8 @@ def discover():
                                 domain = _extract_domain(biz.get("website", ""))
                                 if not domain or domain in seen or _is_aggregator(domain):
                                     continue
+                                if _is_national_brand(domain):
+                                    continue
                                 if not _looks_like_real_domain(domain):
                                     continue
                                 seen.add(domain)
@@ -927,7 +971,8 @@ async def _scrape_site(ctx, biz):
         else:
             variants += [f"https://{domain}", f"https://www.{domain}", f"http://{domain}"]
     # De-dupe while preserving order
-    seen_v, variants = set(), [v for v in variants if not (v in seen_v or seen_v.add(v))]
+    seen_v = set()
+    variants = [v for v in variants if not (v in seen_v or seen_v.add(v))]
 
     page = await ctx.new_page()
     try:
