@@ -438,15 +438,25 @@ async def _search_duckduckgo(ctx, query, city):
     domain (stable); falls back to decoding the uddg redirect on the anchor href."""
     page = await ctx.new_page()
     results = []
+    diag = {"source": "ddg", "loaded": False, "title": "", "rows": 0, "kept": 0, "note": ""}
     try:
         safe_q = _urlencode(
             query + " -site:yelp.com -site:yellowpages.com -site:facebook.com -site:linkedin.com"
         )
-        await page.goto(f"https://html.duckduckgo.com/html/?q={safe_q}&kl=us-en",
-                        wait_until="domcontentloaded", timeout=15000)
+        resp = await page.goto(f"https://html.duckduckgo.com/html/?q={safe_q}&kl=us-en",
+                               wait_until="domcontentloaded", timeout=15000)
+        diag["status"] = resp.status if resp else 0
         await page.wait_for_timeout(700)
+        diag["loaded"] = True
+        try:
+            diag["title"] = (await page.title() or "")[:60]
+        except Exception:
+            pass
 
-        for item in (await page.query_selector_all(".result, .web-result"))[:16]:
+        rows = (await page.query_selector_all(".result, .web-result"))[:16]
+        diag["rows"] = len(rows)
+        filtered = 0
+        for item in rows:
             try:
                 title = ""
                 a = await item.query_selector("a.result__a, .result__title a")
@@ -463,6 +473,7 @@ async def _search_duckduckgo(ctx, query, city):
                 if not domain and a:
                     domain = _extract_domain(_decode_ddg_href(await a.get_attribute("href") or ""))
                 if not domain or _is_aggregator(domain) or not _looks_like_real_domain(domain):
+                    filtered += 1
                     continue
                 results.append({
                     "name": _clean_name(title) or domain, "website": domain,
@@ -472,11 +483,16 @@ async def _search_duckduckgo(ctx, query, city):
                     break
             except Exception:
                 continue
-    except Exception:
-        pass
+        diag["kept"] = len(results)
+        if diag["rows"] == 0:
+            diag["note"] = f"0 result rows on page (title='{diag['title']}'). DDG likely served a blank/challenge page"
+        else:
+            diag["note"] = f"{diag['rows']} rows, {filtered} filtered (aggregator/invalid), {diag['kept']} kept"
+    except Exception as e:
+        diag["note"] = f"error: {str(e)[:90]}"
     finally:
         await page.close()
-    return results
+    return results, diag
 
 
 async def _search_bing(ctx, query, city):
@@ -484,15 +500,26 @@ async def _search_bing(ctx, query, city):
     the anchor href is a bing.com/ck/a tracking redirect, so we must NOT use it."""
     page = await ctx.new_page()
     results = []
+    diag = {"source": "bing", "loaded": False, "title": "", "rows": 0, "kept": 0, "note": ""}
     try:
         safe_q = _urlencode(
             query + " -site:yelp.com -site:yellowpages.com -site:facebook.com -site:linkedin.com"
         )
-        await page.goto(f"https://www.bing.com/search?q={safe_q}&setlang=en-us&cc=us",
-                        wait_until="domcontentloaded", timeout=15000)
+        resp = await page.goto(f"https://www.bing.com/search?q={safe_q}&setlang=en-us&cc=us",
+                               wait_until="domcontentloaded", timeout=15000)
+        diag["status"] = resp.status if resp else 0
         await page.wait_for_timeout(700)
+        diag["loaded"] = True
+        try:
+            diag["title"] = (await page.title() or "")[:60]
+        except Exception:
+            pass
 
-        for item in (await page.query_selector_all("li.b_algo"))[:16]:
+        rows = (await page.query_selector_all("li.b_algo"))[:16]
+        diag["rows"] = len(rows)
+        no_cite = 0
+        filtered = 0
+        for item in rows:
             try:
                 title = ""
                 a = await item.query_selector("h2 a")
@@ -509,7 +536,10 @@ async def _search_bing(ctx, query, city):
                     ctext = (await cite.inner_text()).strip()
                     first = re.split(r'\s|›', ctext)[0] if ctext else ""
                     domain = _extract_domain(first)
+                else:
+                    no_cite += 1
                 if not domain or _is_aggregator(domain) or not _looks_like_real_domain(domain):
+                    filtered += 1
                     continue
                 results.append({
                     "name": _clean_name(title) or domain, "website": domain,
@@ -519,23 +549,37 @@ async def _search_bing(ctx, query, city):
                     break
             except Exception:
                 continue
-    except Exception:
-        pass
+        diag["kept"] = len(results)
+        if diag["rows"] == 0:
+            diag["note"] = f"0 b_algo rows on page (title='{diag['title']}'). Bing served no organic results / consent page"
+        else:
+            diag["note"] = f"{diag['rows']} rows, {no_cite} missing <cite>, {filtered} filtered, {diag['kept']} kept"
+    except Exception as e:
+        diag["note"] = f"error: {str(e)[:90]}"
     finally:
         await page.close()
-    return results
+    return results, diag
 
 
 async def _search_google_maps(ctx, query, city):
     """Google Maps — click each card to retrieve the website link from the detail panel."""
     page = await ctx.new_page()
     results = []
+    diag = {"source": "maps", "loaded": False, "title": "", "rows": 0, "kept": 0,
+            "consent": False, "no_website": 0, "note": ""}
     try:
-        await page.goto(
+        resp = await page.goto(
             f"https://www.google.com/maps/search/{_urlencode(query)}?hl=en&gl=us",
             wait_until="domcontentloaded", timeout=20000,
         )
+        diag["status"] = resp.status if resp else 0
         await page.wait_for_timeout(2200)
+        diag["loaded"] = True
+        try:
+            diag["title"] = (await page.title() or "")[:60]
+            diag["url"] = (page.url or "")[:80]
+        except Exception:
+            pass
 
         # Dismiss a consent dialog if Google shows one.
         for sel in ['button[aria-label*="Accept all" i]', 'button[aria-label*="Agree" i]',
@@ -543,11 +587,14 @@ async def _search_google_maps(ctx, query, city):
             try:
                 btn = await page.query_selector(sel)
                 if btn:
+                    diag["consent"] = True
                     await btn.click()
                     await page.wait_for_timeout(1200)
                     break
             except Exception:
                 pass
+        if "consent.google" in (page.url or "") or "/sorry/" in (page.url or ""):
+            diag["consent"] = True
 
         # Scroll the results feed a couple times so more cards load.
         try:
@@ -563,6 +610,7 @@ async def _search_google_maps(ctx, query, city):
         cards = await page.query_selector_all('[role="article"]')
         if not cards:
             cards = await page.query_selector_all(".Nv2PK")
+        diag["rows"] = len(cards)
 
         for card in cards[:6]:
             try:
@@ -613,12 +661,18 @@ async def _search_google_maps(ctx, query, city):
                 if cat_el:
                     cat = (await cat_el.inner_text()).strip()
 
-                results.append({
-                    "name": name, "website": _extract_domain(website),
-                    "city": city, "address": address,
-                    "phone": phone, "category": cat,
-                    "source": "Google Maps",
-                })
+                dom = _extract_domain(website)
+                if not dom:
+                    diag["no_website"] += 1
+                elif _is_aggregator(dom) or not _looks_like_real_domain(dom):
+                    pass
+                else:
+                    results.append({
+                        "name": name, "website": dom,
+                        "city": city, "address": address,
+                        "phone": phone, "category": cat,
+                        "source": "Google Maps",
+                    })
 
                 # Return to list
                 back = await page.query_selector('button[aria-label="Back"]')
@@ -627,17 +681,25 @@ async def _search_google_maps(ctx, query, city):
                     await page.wait_for_timeout(800)
             except Exception:
                 continue
-    except Exception:
-        pass
+        diag["kept"] = len(results)
+        if diag["consent"]:
+            diag["note"] = f"blocked by Google consent/sorry page (url='{diag.get('url','')}'). datacenter IP likely flagged"
+        elif diag["rows"] == 0:
+            diag["note"] = f"0 result cards found (title='{diag['title']}'). selectors stale or no local results"
+        else:
+            diag["note"] = f"{diag['rows']} cards, {diag['no_website']} had no website link, {diag['kept']} kept"
+    except Exception as e:
+        diag["note"] = f"error: {str(e)[:90]}"
     finally:
         await page.close()
-    return results
+    return results, diag
 
 
 async def _search_yellow_pages(ctx, industry, city):
     """Yellow Pages search — website link is in-card, no click-through needed."""
     page = await ctx.new_page()
     results = []
+    diag = {"source": "yp", "loaded": False, "title": "", "rows": 0, "kept": 0, "no_website": 0, "note": ""}
     try:
         city_yp = city.replace(" ", "+")
         url = (
@@ -645,10 +707,18 @@ async def _search_yellow_pages(ctx, industry, city):
             f"?search_terms={_urlencode(industry)}"
             f"&geo_location_terms={city_yp}%2C+MN"
         )
-        await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+        resp = await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+        diag["status"] = resp.status if resp else 0
         await page.wait_for_timeout(1000)
+        diag["loaded"] = True
+        try:
+            diag["title"] = (await page.title() or "")[:60]
+        except Exception:
+            pass
 
-        for listing in (await page.query_selector_all(".result"))[:8]:
+        rows = (await page.query_selector_all(".result"))[:8]
+        diag["rows"] = len(rows)
+        for listing in rows:
             try:
                 name_el = await listing.query_selector(".business-name span")
                 if not name_el:
@@ -662,6 +732,9 @@ async def _search_yellow_pages(ctx, industry, city):
                 if site_el:
                     href = await site_el.get_attribute("href") or ""
                     website = _extract_domain(href)
+                if not website:
+                    diag["no_website"] += 1
+                    continue
 
                 phone = ""
                 phone_el = await listing.query_selector(".phones .phone")
@@ -682,18 +755,23 @@ async def _search_yellow_pages(ctx, industry, city):
                     break
             except Exception:
                 continue
-    except Exception:
-        pass
+        diag["kept"] = len(results)
+        if diag["rows"] == 0:
+            diag["note"] = f"0 .result rows (title='{diag['title']}')"
+        else:
+            diag["note"] = f"{diag['rows']} rows, {diag['no_website']} had no website link, {diag['kept']} kept"
+    except Exception as e:
+        diag["note"] = f"error: {str(e)[:90]}"
     finally:
         await page.close()
-    return results
+    return results, diag
 
 
 async def _multi_source_search(browser, query, industry, city, want=12):
     """Run search sources concurrently in isolated contexts, dedupe by domain.
 
-    Returns (businesses, source_counts) where source_counts is the raw per-source
-    hit count, surfaced to the UI so it's clear which sources are producing data.
+    Returns (businesses, source_counts, diags) — diags carries a per-source note
+    explaining exactly what each engine did (so the UI can show why a source got 0).
     """
     contexts = [await browser.new_context(**_BROWSER_CTX_OPTS) for _ in range(4)]
     try:
@@ -713,19 +791,23 @@ async def _multi_source_search(browser, query, industry, city, want=12):
 
     source_names = ["ddg", "bing", "maps", "yp"]
     counts = {n: 0 for n in source_names}
+    diags = []
     seen, businesses = set(), []
-    for name, batch in zip(source_names, raw):
-        if isinstance(batch, Exception) or not batch:
+    for name, item in zip(source_names, raw):
+        if isinstance(item, Exception):
+            diags.append({"source": name, "note": f"crashed: {str(item)[:90]}"})
             continue
-        counts[name] = len(batch)
-        for biz in batch:
+        batch, diag = item
+        diags.append(diag)
+        counts[name] = len(batch or [])
+        for biz in (batch or []):
             domain = _extract_domain(biz.get("website", ""))
             key = domain or (biz.get("name", "") or "").lower()
             if key and key not in seen:
                 seen.add(key)
                 biz["industry"] = industry
                 businesses.append(biz)
-    return businesses[:want], counts
+    return businesses[:want], counts, diags
 
 
 # ─── Query planning ────────────────────────────────────────────────────────────
@@ -916,9 +998,9 @@ async def _run_search_plan(plan, want_per_q):
                 for t, r in zip(batch, results):
                     if isinstance(r, Exception):
                         out.append({"q": t["q"], "industry": t["industry"], "city": t["city"],
-                                    "sources": {}, "candidates": []})
+                                    "sources": {}, "diags": [], "candidates": []})
                         continue
-                    found, counts = r
+                    found, counts, diags = r
                     seen, cands = set(), []
                     for biz in found:
                         d = _extract_domain(biz.get("website", ""))
@@ -933,7 +1015,7 @@ async def _run_search_plan(plan, want_per_q):
                             "industry": t["industry"], "source": biz.get("source", ""),
                         })
                     out.append({"q": t["q"], "industry": t["industry"], "city": t["city"],
-                                "sources": counts, "candidates": cands})
+                                "sources": counts, "diags": diags, "candidates": cands})
         finally:
             await browser.close()
     return out
@@ -1020,9 +1102,9 @@ def discover():
                             if isinstance(result, Exception):
                                 q.put({"event": "query_error", "data": {
                                     "idx": start + j, "error": str(result)[:120]}})
-                                found, counts = [], {}
+                                found, counts, diags = [], {}, []
                             else:
-                                found, counts = result
+                                found, counts, diags = result
                             new_count = 0
                             for biz in found:
                                 domain = _extract_domain(biz.get("website", ""))
@@ -1039,7 +1121,7 @@ def discover():
                             q.put({"event": "query_done", "data": {
                                 "idx": start + j, "q": task["q"], "found": new_count,
                                 "raw": sum(counts.values()) if counts else 0,
-                                "sources": counts,
+                                "sources": counts, "diags": diags,
                                 "running_total": len(candidates)}})
                         if len(candidates) >= pool_cap:
                             break
@@ -1342,6 +1424,10 @@ def scrape_stream():
     """Stage 2: Playwright SSE stream — screenshot + tech extraction per site."""
     data = request.get_json(silent=True) or {}
     businesses = data.get("businesses", [])  # [{name, website, city, ...}]
+    extra_views = bool(data.get("extra_views"))
+    nav_keywords = data.get("nav_keywords") or []
+    if not isinstance(nav_keywords, list):
+        nav_keywords = []
 
     result_q = queue.Queue()
 
@@ -1362,7 +1448,8 @@ def scrape_stream():
                 ctx = await browser.new_context(**_BROWSER_CTX_OPTS)
                 for idx, biz in enumerate(businesses):
                     try:
-                        site = await _scrape_site(ctx, biz)
+                        site = await _scrape_site(ctx, biz, extra_views=extra_views,
+                                                  nav_keywords=nav_keywords)
                         site["idx"] = idx
                         result_q.put({"event": "site", "data": site})
                     except Exception as e:
