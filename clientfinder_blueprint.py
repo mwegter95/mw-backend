@@ -51,6 +51,7 @@ def init_clientfinder_db():
             website TEXT,
             screenshot_url TEXT,
             screenshots TEXT DEFAULT '[]',
+            quality_notes TEXT DEFAULT '[]',
             score_modernity REAL,
             score_mobile REAL,
             score_function REAL,
@@ -79,6 +80,9 @@ def init_clientfinder_db():
         cols = [r[1] for r in conn.execute("PRAGMA table_info(leads)").fetchall()]
         if "screenshots" not in cols:
             conn.execute("ALTER TABLE leads ADD COLUMN screenshots TEXT DEFAULT '[]'")
+            conn.commit()
+        if "quality_notes" not in cols:
+            conn.execute("ALTER TABLE leads ADD COLUMN quality_notes TEXT DEFAULT '[]'")
             conn.commit()
     except Exception:
         pass
@@ -149,6 +153,10 @@ def get_leads():
             d['screenshots'] = json.loads(d.get('screenshots') or '[]')
         except Exception:
             d['screenshots'] = []
+        try:
+            d['quality_notes'] = json.loads(d.get('quality_notes') or '[]')
+        except Exception:
+            d['quality_notes'] = []
         d['outdated_stack'] = bool(d['outdated_stack'])
         leads.append(d)
     return jsonify({"leads": leads})
@@ -163,13 +171,15 @@ def add_lead():
     for item in items:
         cur = conn.execute("""
             INSERT INTO leads (company_name,industry,city,employee_count,website,
-                screenshot_url,score_modernity,score_mobile,score_function,composite_score,
+                screenshot_url,screenshots,quality_notes,score_modernity,score_mobile,score_function,composite_score,
                 outdated_stack,stack_flags,dm_name,dm_title,dm_seniority,email,phone,
                 contact_form_url,outreach_status,notes,created_at,updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             item.get('company_name', ''), item.get('industry', ''), item.get('city', ''),
             item.get('employee_count'), item.get('website', ''), item.get('screenshot_url', ''),
+            json.dumps(item.get('screenshots', []) or []),
+            json.dumps(item.get('quality_notes', []) or []),
             item.get('score_modernity', 5), item.get('score_mobile', 5), item.get('score_function', 5),
             item.get('composite_score', 5), 1 if item.get('outdated_stack') else 0,
             json.dumps(item.get('stack_flags', [])), item.get('dm_name', ''), item.get('dm_title', ''),
@@ -189,13 +199,13 @@ def update_lead(lead_id):
     allowed = {'outreach_status', 'notes', 'score_modernity', 'score_mobile', 'score_function',
                'composite_score', 'outdated_stack', 'stack_flags', 'dm_name', 'dm_title',
                'dm_seniority', 'email', 'phone', 'contact_form_url', 'screenshot_url',
-               'website', 'industry', 'city', 'employee_count', 'screenshots'}
+               'website', 'industry', 'city', 'employee_count', 'screenshots', 'quality_notes'}
     sets, params = [], []
     for k, v in data.items():
         if k in allowed:
             sets.append(f"{k}=?")
             params.append(
-                json.dumps(v) if k in ('stack_flags', 'screenshots')
+                json.dumps(v) if k in ('stack_flags', 'screenshots', 'quality_notes')
                 else (1 if v is True else (0 if v is False else v))
             )
     if not sets:
@@ -447,7 +457,9 @@ async def _search_duckduckgo(ctx, query, city):
                 url_el = await item.query_selector(".result__url")
                 if url_el:
                     disp = (await url_el.inner_text()).strip()
-                    domain = _extract_domain(re.split(r'[\s/]', disp)[0] if disp else "")
+                    # _extract_domain strips scheme + path itself, so just take the
+                    # first whitespace token (never pre-split on '/').
+                    domain = _extract_domain(re.split(r'\s', disp)[0] if disp else "")
                 if not domain and a:
                     domain = _extract_domain(_decode_ddg_href(await a.get_attribute("href") or ""))
                 if not domain or _is_aggregator(domain) or not _looks_like_real_domain(domain):
@@ -488,12 +500,14 @@ async def _search_bing(ctx, query, city):
                     title = (await a.inner_text()).strip()
 
                 # Real domain comes from the cite/display URL, e.g.
-                # "https://www.example.com › about" -> example.com
+                # "https://www.example.com › about" -> example.com.
+                # NOTE: split only on whitespace/breadcrumb, never on '/', or
+                # "https://..." becomes "https:" and every result gets dropped.
                 domain = ""
                 cite = await item.query_selector("cite")
                 if cite:
                     ctext = (await cite.inner_text()).strip()
-                    first = re.split(r'[\s›/]', ctext)[0] if ctext else ""
+                    first = re.split(r'\s|›', ctext)[0] if ctext else ""
                     domain = _extract_domain(first)
                 if not domain or _is_aggregator(domain) or not _looks_like_real_domain(domain):
                     continue
@@ -518,17 +532,39 @@ async def _search_google_maps(ctx, query, city):
     results = []
     try:
         await page.goto(
-            f"https://www.google.com/maps/search/{_urlencode(query)}",
+            f"https://www.google.com/maps/search/{_urlencode(query)}?hl=en&gl=us",
             wait_until="domcontentloaded", timeout=20000,
         )
-        await page.wait_for_timeout(2000)
+        await page.wait_for_timeout(2200)
+
+        # Dismiss a consent dialog if Google shows one.
+        for sel in ['button[aria-label*="Accept all" i]', 'button[aria-label*="Agree" i]',
+                    'form[action*="consent"] button']:
+            try:
+                btn = await page.query_selector(sel)
+                if btn:
+                    await btn.click()
+                    await page.wait_for_timeout(1200)
+                    break
+            except Exception:
+                pass
+
+        # Scroll the results feed a couple times so more cards load.
+        try:
+            feed = await page.query_selector('[role="feed"]')
+            for _ in range(3):
+                if feed:
+                    await feed.evaluate("el => el.scrollBy(0, el.scrollHeight)")
+                    await page.wait_for_timeout(900)
+        except Exception:
+            pass
 
         # Result cards are role=article or .Nv2PK
         cards = await page.query_selector_all('[role="article"]')
         if not cards:
             cards = await page.query_selector_all(".Nv2PK")
 
-        for card in cards[:4]:
+        for card in cards[:6]:
             try:
                 # Grab name from card before clicking
                 heading = await card.query_selector('[role="heading"]')
@@ -842,6 +878,28 @@ def _build_query_plan(industry, region, keywords, refinements):
     return plan
 
 
+def _plan_from_queries(queries, industry, region, refinements):
+    """Build a discovery plan from externally supplied (e.g. LLM-generated) queries."""
+    cities = _cities_for_region(region, refinements)
+    plan = []
+    for i, raw in enumerate(queries):
+        qs = (str(raw) or "").strip()
+        if not qs:
+            continue
+        # Best-effort city guess from the query text, else rotate through region cities.
+        city = ""
+        for c in (_TWIN_CITIES + _GREATER_MN):
+            if c.lower() in qs.lower():
+                city = c
+                break
+        if not city and cities:
+            city = cities[i % len(cities)]
+        plan.append({"q": qs, "term": qs, "city": city, "industry": industry or ""})
+        if len(plan) >= _MAX_QUERIES:
+            break
+    return plan
+
+
 @clientfinder_bp.route("/discover", methods=["POST"])
 def discover():
     """Stage 1: Multi-query discovery across DuckDuckGo, Bing, Google Maps & Yellow Pages.
@@ -858,7 +916,11 @@ def discover():
     overall_cap = int(data.get("max_results", 12))
     stream      = bool(data.get("stream"))
 
-    plan = _build_query_plan(industry, region, keywords, refinements)
+    ext_queries = data.get("queries")
+    if isinstance(ext_queries, list) and any((str(x) or "").strip() for x in ext_queries):
+        plan = _plan_from_queries(ext_queries, industry, region, refinements)
+    else:
+        plan = _build_query_plan(industry, region, keywords, refinements)
 
     def _emit(q):
         async def _run():
@@ -997,12 +1059,12 @@ def discover():
 
 
 
-async def _scrape_site(ctx, biz, extra_views=False):
+async def _scrape_site(ctx, biz, extra_views=False, nav_keywords=None):
     """Screenshot + tech/contact extraction for one site. Returns a data dict.
 
     When extra_views=True, also scrolls a full-page capture and visits up to two
-    key internal pages (about/services/contact), so the AI audit has several
-    screenshots of the site to analyze, not just the hero viewport.
+    key internal pages (about/services/contact, plus any AI-suggested nav_keywords),
+    so the details view has several screenshots and quality notes of the site.
     """
     raw = biz.get("website", "")
     domain = _extract_domain(raw) or _clean_url(raw)
@@ -1124,8 +1186,13 @@ async def _scrape_site(ctx, biz, extra_views=False):
                 pass
             try:
                 host = _extract_domain(final_url) or domain
-                links = await page.evaluate("""(host) => {
-                    const want = ['about','service','contact','product','gallery','portfolio','menu','pricing'];
+                want_kw = ['about','service','contact','product','gallery','portfolio','menu','pricing']
+                for kw in (nav_keywords or []):
+                    kw = (str(kw) or '').strip().lower()
+                    if kw and kw not in want_kw:
+                        want_kw.insert(0, kw)
+                links = await page.evaluate("""(args) => {
+                    const [host, want] = args;
                     const out = [];
                     for (const a of document.querySelectorAll('a[href]')) {
                         let href = a.href || '';
@@ -1139,7 +1206,7 @@ async def _scrape_site(ctx, biz, extra_views=False):
                         if (out.length >= 4) break;
                     }
                     return out;
-                }""", host)
+                }""", [host, want_kw])
             except Exception:
                 links = []
             for link in (links or [])[:2]:
@@ -1158,10 +1225,33 @@ async def _scrape_site(ctx, biz, extra_views=False):
                 except Exception:
                     continue
 
+        # Deterministic "website quality" notes from the Playwright test (no AI).
+        quality_notes = []
+        quality_notes.append(
+            "Serves over HTTPS" if final_url.startswith("https://") else "No HTTPS (insecure http://)")
+        quality_notes.append(
+            "Has mobile viewport meta tag" if "No meta viewport" not in stack_flags
+            else "Missing mobile viewport meta tag")
+        quality_notes.append(
+            "Layout adapts to mobile width" if "Non-responsive layout" not in stack_flags
+            else "Layout does not adapt to mobile (likely not responsive)")
+        if "Legacy WordPress" in stack_flags:
+            quality_notes.append("Built on legacy WordPress")
+        if "Outdated jQuery" in stack_flags:
+            quality_notes.append("Loads an outdated jQuery version")
+        quality_notes.append(
+            f"Contact email present on site ({emails[0]})" if emails else "No contact email found on page")
+        quality_notes.append(f"Phone number {'found' if phones else 'not found'} on page")
+        quality_notes.append(f"{len(screenshots)} page view(s) captured")
+        if title:
+            quality_notes.append(f'Page title: "{title[:90]}"')
+        quality_notes.append(f"Homepage returned HTTP {status_code}")
+
         return {
             "name": name, "website": _extract_domain(final_url) or domain, "city": city,
             "title": title[:120],
             "screenshot_url": screenshot_url, "screenshots": screenshots,
+            "quality_notes": quality_notes,
             "emails": emails, "phones": phones,
             "stack_flags": stack_flags, "status_code": status_code,
         }
@@ -1248,6 +1338,9 @@ def rescrape_stream():
     """
     data = request.get_json(silent=True) or {}
     lead_ids = data.get("lead_ids", [])
+    nav_keywords = data.get("nav_keywords") or []
+    if not isinstance(nav_keywords, list):
+        nav_keywords = []
     try:
         lead_ids = [int(x) for x in lead_ids]
     except (TypeError, ValueError):
@@ -1291,12 +1384,14 @@ def rescrape_stream():
                         site = await _scrape_site(ctx, {
                             "name": lead["company_name"], "website": lead["website"],
                             "city": lead["city"],
-                        }, extra_views=True)
+                        }, extra_views=True, nav_keywords=nav_keywords)
                         modernity, mobile, function, composite = _scores_from_flags(site["stack_flags"])
                         shots = site.get("screenshots") or ([site["screenshot_url"]] if site["screenshot_url"] else [])
+                        qnotes = site.get("quality_notes") or []
                         patch = {
                             "screenshot_url": site["screenshot_url"],
                             "screenshots": shots,
+                            "quality_notes": qnotes,
                             "stack_flags": site["stack_flags"],
                             "outdated_stack": 1 if site["stack_flags"] else 0,
                             "score_modernity": modernity,
@@ -1314,7 +1409,7 @@ def rescrape_stream():
                         sets, params = [], []
                         for k, v in patch.items():
                             sets.append(f"{k}=?")
-                            params.append(json.dumps(v) if k in ("stack_flags", "screenshots") else v)
+                            params.append(json.dumps(v) if k in ("stack_flags", "screenshots", "quality_notes") else v)
                         sets.append("updated_at=?"); params.append(_now())
                         params.append(lead["id"])
                         c2.execute(f"UPDATE leads SET {', '.join(sets)} WHERE id=?", params)
@@ -1324,6 +1419,7 @@ def rescrape_stream():
                             "idx": idx, "id": lead["id"], "name": lead["company_name"],
                             "screenshot_url": site["screenshot_url"],
                             "screenshots": shots,
+                            "quality_notes": qnotes,
                             "stack_flags": site["stack_flags"],
                             "outdated_stack": bool(site["stack_flags"]),
                             "score_modernity": modernity, "score_mobile": mobile,
