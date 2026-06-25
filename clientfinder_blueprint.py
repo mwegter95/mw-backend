@@ -900,6 +900,73 @@ def _plan_from_queries(queries, industry, region, refinements):
     return plan
 
 
+async def _run_search_plan(plan, want_per_q):
+    """Search-only pass (no verify/screenshot). Returns candidates grouped per query."""
+    from playwright.async_api import async_playwright
+    out = []
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True, args=_LAUNCH_ARGS)
+        try:
+            for start in range(0, len(plan), 2):
+                batch = plan[start:start + 2]
+                results = await asyncio.gather(*[
+                    _multi_source_search(browser, t["q"], t["term"], t["city"], want=want_per_q)
+                    for t in batch
+                ], return_exceptions=True)
+                for t, r in zip(batch, results):
+                    if isinstance(r, Exception):
+                        out.append({"q": t["q"], "industry": t["industry"], "city": t["city"],
+                                    "sources": {}, "candidates": []})
+                        continue
+                    found, counts = r
+                    seen, cands = set(), []
+                    for biz in found:
+                        d = _extract_domain(biz.get("website", ""))
+                        if not d or d in seen or _is_aggregator(d) or _is_national_brand(d):
+                            continue
+                        if not _looks_like_real_domain(d):
+                            continue
+                        seen.add(d)
+                        cands.append({
+                            "name": biz.get("name", "") or d, "website": d,
+                            "city": biz.get("city") or t["city"],
+                            "industry": t["industry"], "source": biz.get("source", ""),
+                        })
+                    out.append({"q": t["q"], "industry": t["industry"], "city": t["city"],
+                                "sources": counts, "candidates": cands})
+        finally:
+            await browser.close()
+    return out
+
+
+@clientfinder_bp.route("/search", methods=["POST"])
+def search_only():
+    """Run search sources only (no screenshot/verify) and return candidates grouped
+    by query. Used by the reflection loop: search -> AI reflects -> improved query."""
+    data = request.get_json(silent=True) or {}
+    industry    = data.get("industry", "")
+    region      = data.get("region", "Both")
+    keywords    = data.get("keywords", "")
+    refinements = data.get("refinements", {}) or {}
+    want_per_q  = int(data.get("per_query", 10))
+
+    ext_queries = data.get("queries")
+    if isinstance(ext_queries, list) and any((str(x) or "").strip() for x in ext_queries):
+        plan = _plan_from_queries(ext_queries, industry, region, refinements)
+    else:
+        plan = _build_query_plan(industry, region, keywords, refinements)
+
+    try:
+        from playwright.async_api import async_playwright  # noqa: F401 (availability check)
+    except ImportError:
+        return jsonify({"ok": False, "error": "Playwright not available", "by_query": []}), 502
+    try:
+        by_query = asyncio.run(_run_search_plan(plan, want_per_q))
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:200], "by_query": []}), 500
+    return jsonify({"ok": True, "by_query": by_query, "queries": [t["q"] for t in plan]})
+
+
 @clientfinder_bp.route("/discover", methods=["POST"])
 def discover():
     """Stage 1: Multi-query discovery across DuckDuckGo, Bing, Google Maps & Yellow Pages.
