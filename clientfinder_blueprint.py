@@ -1533,44 +1533,60 @@ def scrape_stream():
             try:
                 from playwright.async_api import async_playwright
             except ImportError:
-                result_q.put({"event": "error", "data": {"msg": "Playwright not available"}})
+                result_q.put({"event": "error", "data": {"msg": "Playwright not installed on the server"}})
                 result_q.put(None)
                 return
-
-            async with async_playwright() as pw:
-                browser = await pw.chromium.launch(
-                    headless=True,
-                    args=_LAUNCH_ARGS
-                )
-                ctx = await browser.new_context(**_BROWSER_CTX_OPTS)
-                for idx, biz in enumerate(businesses):
+            try:
+                async with async_playwright() as pw:
+                    browser = await pw.chromium.launch(headless=True, args=_LAUNCH_ARGS)
+                    ctx = await browser.new_context(**_BROWSER_CTX_OPTS)
                     try:
-                        site = await _scrape_site(ctx, biz, extra_views=extra_views,
-                                                  nav_keywords=nav_keywords)
-                        site["idx"] = idx
-                        result_q.put({"event": "site", "data": site})
-                    except Exception as e:
-                        result_q.put({
-                            "event": "site_error",
-                            "data": {"idx": idx, "name": biz.get("name", ""),
-                                     "website": biz.get("website", ""), "error": str(e)[:120]}
-                        })
-                await browser.close()
+                        for idx, biz in enumerate(businesses):
+                            # Emit progress BEFORE the (potentially slow) per-site scrape so
+                            # the stream stays fed and the client shows live activity.
+                            result_q.put({"event": "progress", "data": {
+                                "idx": idx, "total": len(businesses),
+                                "name": biz.get("name", ""), "website": biz.get("website", "")}})
+                            try:
+                                site = await _scrape_site(ctx, biz, extra_views=extra_views,
+                                                          nav_keywords=nav_keywords)
+                                site["idx"] = idx
+                                result_q.put({"event": "site", "data": site})
+                            except Exception as e:
+                                result_q.put({"event": "site_error", "data": {
+                                    "idx": idx, "name": biz.get("name", ""),
+                                    "website": biz.get("website", ""), "error": str(e)[:120]}})
+                    finally:
+                        await browser.close()
+            except Exception as e:
+                # Browser failed to launch (e.g. chromium not installed) — surface it.
+                result_q.put({"event": "error", "data": {
+                    "msg": f"Playwright failed to start: {str(e)[:160]}"}})
             result_q.put(None)  # sentinel
 
-        asyncio.run(_scrape())
+        try:
+            asyncio.run(_scrape())
+        except Exception as e:
+            result_q.put({"event": "error", "data": {"msg": f"scrape worker crashed: {str(e)[:160]}"}})
+            result_q.put(None)
 
     t = threading.Thread(target=run_playwright, daemon=True)
     t.start()
 
     def generate():
         yield "data: {\"event\":\"start\",\"total\":" + str(len(businesses)) + "}\n\n"
+        idle = 0
         while True:
             try:
-                item = result_q.get(timeout=30)
+                item = result_q.get(timeout=15)
             except queue.Empty:
-                yield "data: {\"event\":\"timeout\"}\n\n"
-                break
+                idle += 1
+                if idle >= 12:  # ~180s of total worker silence -> give up
+                    yield "data: {\"event\":\"timeout\"}\n\n"
+                    break
+                yield ": keep-alive\n\n"  # SSE comment heartbeat keeps the stream warm
+                continue
+            idle = 0
             if item is None:
                 yield "data: {\"event\":\"done\"}\n\n"
                 break
@@ -1686,19 +1702,31 @@ def rescrape_stream():
                 await browser.close()
             result_q.put(None)
 
-        asyncio.run(_run())
+        try:
+            asyncio.run(_run())
+        except Exception as e:
+            # Browser failed to launch (e.g. chromium not installed) — surface it.
+            result_q.put({"event": "error", "data": {
+                "msg": f"Playwright failed to start: {str(e)[:160]}"}})
+            result_q.put(None)
 
     t = threading.Thread(target=run_playwright, daemon=True)
     t.start()
 
     def generate():
         yield f"data: {json.dumps({'event': 'start', 'total': len(targets)})}\n\n"
+        idle = 0
         while True:
             try:
-                item = result_q.get(timeout=30)
+                item = result_q.get(timeout=15)
             except queue.Empty:
-                yield "data: {\"event\":\"timeout\"}\n\n"
-                break
+                idle += 1
+                if idle >= 12:  # ~180s of total worker silence -> give up
+                    yield "data: {\"event\":\"timeout\"}\n\n"
+                    break
+                yield ": keep-alive\n\n"
+                continue
+            idle = 0
             if item is None:
                 yield "data: {\"event\":\"done\"}\n\n"
                 break
