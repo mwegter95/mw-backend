@@ -1021,6 +1021,103 @@ async def _run_search_plan(plan, want_per_q):
     return out
 
 
+# ─── Assisted harvest (human-in-the-loop) ──────────────────────────────────
+# A bookmarklet running in the user's real, logged-in Chrome scrapes business
+# domains off a Google Search / Google Maps results page and POSTs them here.
+# The demo polls /harvest/<token> and audits those sites with the backend robot.
+# This sidesteps the datacenter-IP bot blocks that kill the server-side scrapers.
+_HARVEST = {}              # token -> {"ts": float, "items": {domain: {...}}}
+_HARVEST_LOCK = threading.Lock()
+_HARVEST_TTL = 6 * 3600    # forget a token's buffer after 6h of inactivity
+_HARVEST_MAX = 400         # cap businesses kept per token
+
+
+def _harvest_prune(now):
+    for t in [t for t, v in _HARVEST.items() if now - v.get("ts", 0) > _HARVEST_TTL]:
+        _HARVEST.pop(t, None)
+
+
+def _clean_harvest_token(tok):
+    return re.sub(r'[^a-zA-Z0-9_-]', '', str(tok or ''))[:64]
+
+
+@clientfinder_bp.route("/ingest", methods=["POST", "OPTIONS"])
+def harvest_ingest():
+    """Receive scraped domains from the in-browser bookmarklet. Cross-origin and
+    credential-free; filters aggregators / national brands / junk before storing."""
+    if request.method == "OPTIONS":
+        resp = Response("", status=204)
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        return resp
+
+    # navigator.sendBeacon posts text/plain, so parse the raw body as JSON.
+    raw = request.get_data(as_text=True) or ""
+    try:
+        data = json.loads(raw) if raw.strip() else (request.get_json(silent=True) or {})
+    except Exception:
+        data = request.get_json(silent=True) or {}
+
+    token = _clean_harvest_token(data.get("token"))
+    source = (data.get("source") or "")[:40]
+    query = (data.get("query") or "")[:160]
+    items = data.get("items") or []
+    added = total = 0
+    if token and isinstance(items, list):
+        now = time.time()
+        with _HARVEST_LOCK:
+            _harvest_prune(now)
+            bucket = _HARVEST.setdefault(token, {"ts": now, "items": {}})
+            bucket["ts"] = now
+            for it in items[:200]:
+                it = it or {}
+                dom = _extract_domain(it.get("website") or it.get("domain") or "")
+                if not dom or _is_aggregator(dom) or _is_national_brand(dom) or not _looks_like_real_domain(dom):
+                    continue
+                if dom in bucket["items"] or len(bucket["items"]) >= _HARVEST_MAX:
+                    continue
+                bucket["items"][dom] = {
+                    "name": _clean_name(it.get("name") or "") or dom,
+                    "website": dom,
+                    "source": source or "harvest",
+                    "query": query,
+                }
+                added += 1
+            total = len(bucket["items"])
+    resp = jsonify({"ok": True, "added": added, "total": total})
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
+
+
+@clientfinder_bp.route("/harvest/<token>", methods=["GET"])
+def harvest_list(token):
+    token = _clean_harvest_token(token)
+    with _HARVEST_LOCK:
+        bucket = _HARVEST.get(token) or {"items": {}}
+        businesses = list(bucket["items"].values())
+    return jsonify({"ok": True, "total": len(businesses), "businesses": businesses})
+
+
+@clientfinder_bp.route("/harvest/<token>/clear", methods=["POST"])
+def harvest_clear(token):
+    token = _clean_harvest_token(token)
+    with _HARVEST_LOCK:
+        _HARVEST.pop(token, None)
+    return jsonify({"ok": True})
+
+
+@clientfinder_bp.route("/plan", methods=["POST"])
+def query_plan():
+    """Return a clean, deterministic query plan (no scraping). Assisted mode turns
+    each query into one-click Google / Google Maps search links."""
+    data = request.get_json(silent=True) or {}
+    plan = _build_query_plan(
+        data.get("industry", ""), data.get("region", "Both"),
+        data.get("keywords", ""), data.get("refinements", {}) or {})
+    return jsonify({"ok": True, "queries": plan})
+
+
 @clientfinder_bp.route("/search", methods=["POST"])
 def search_only():
     """Run search sources only (no screenshot/verify) and return candidates grouped
