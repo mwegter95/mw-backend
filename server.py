@@ -345,6 +345,10 @@ app.register_blueprint(auction_scraper_bp)
 from clientfinder_blueprint import clientfinder_bp
 app.register_blueprint(clientfinder_bp)
 
+# ─── Maryland Driveway Restore WordPress demo bridge ─────────────────────────
+from maryland_driveway_wp_bridge_blueprint import bridge_bp as mdr_wp_bridge_bp
+app.register_blueprint(mdr_wp_bridge_bp)
+
 from yard_seed import seed_for_owner as _yard_seed_for_owner
 from yard_seed_v2 import seed_v2_for_owner as _yard_seed_v2_for_owner
 
