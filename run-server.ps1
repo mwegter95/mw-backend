@@ -159,10 +159,18 @@ $script:svcLastStart = @{}   # name -> last launch time (debounce)
 
 function Read-Services {
     if (-not (Test-Path $ServicesFile)) { return @() }
-    try { $j = (Get-Content $ServicesFile -Raw) | ConvertFrom-Json }
+    try { $raw = (Get-Content $ServicesFile -Raw | ConvertFrom-Json) }
     catch { Write-Host "$(Get-Date -f 'HH:mm:ss')  services.json invalid -- ignoring" -ForegroundColor Red; return @() }
-    if ($null -eq $j) { return @() }
-    if ($j -is [System.Array]) { return $j } else { return @($j) }
+    if ($null -eq $raw) { return @() }
+    $items = if ($raw -is [System.Array]) { $raw } else { @($raw) }
+    $out = @()
+    foreach ($e in $items) {
+        if ($e.name) { $out += $e; continue }
+        if ($e.value) {
+            foreach ($n in @($e.value)) { if ($n.name) { $out += $n } }
+        }
+    }
+    return $out
 }
 
 # Merge repo-tracked services.manifest.json into data/services.json (by name).
@@ -170,11 +178,23 @@ function Sync-ServiceManifest {
     $manifest = Join-Path $ScriptDir 'services.manifest.json'
     if (-not (Test-Path $manifest)) { return }
     try {
-        $entries = @((Get-Content $manifest -Raw) | ConvertFrom-Json)
+        $entries = @((Get-Content $manifest -Raw | ConvertFrom-Json))
         $byName = @{}
-        foreach ($e in Read-Services) { $byName[[string]$e.name] = $e }
-        foreach ($e in $entries) { $byName[[string]$e.name] = $e }
-        ($byName.Values | ConvertTo-Json -Depth 5) | Set-Content -Path $ServicesFile
+        foreach ($e in Read-Services) {
+            if (-not $e.name) { continue }
+            $byName[[string]$e.name] = [pscustomobject]@{
+                name = [string]$e.name; cmd = [string]$e.cmd; args = [string]$e.args
+                cwd = [string]$e.cwd; port = [int]$e.port
+            }
+        }
+        foreach ($e in $entries) {
+            if (-not $e.name) { continue }
+            $byName[[string]$e.name] = [pscustomobject]@{
+                name = [string]$e.name; cmd = [string]$e.cmd; args = [string]$e.args
+                cwd = [string]$e.cwd; port = [int]$e.port
+            }
+        }
+        @($byName.Values) | ConvertTo-Json -Depth 5 | Set-Content -Path $ServicesFile
     } catch {
         Write-Host "$(Get-Date -f 'HH:mm:ss')  services.manifest.json sync failed: $_" -ForegroundColor Red
     }
