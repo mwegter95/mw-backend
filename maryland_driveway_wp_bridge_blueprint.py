@@ -18,7 +18,7 @@ bridge_bp = Blueprint("mdr_wp_bridge", __name__, url_prefix=f"/{PREFIX}")
 _HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailers", "transfer-encoding", "upgrade", "host",
-    "content-length", "content-encoding",
+    "content-length", "content-encoding", "accept-encoding",
 }
 _METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
 
