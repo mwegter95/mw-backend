@@ -23,6 +23,15 @@ _HOP = {
 _METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow redirects — pass them straight through to the client."""
+    def redirect_request(self, req, fp, code, msg, hdrs, newurl):
+        return None
+
+
+_opener = urllib.request.build_opener(_NoRedirect())
+
+
 @bridge_bp.route("/", defaults={"path": ""}, methods=_METHODS)
 @bridge_bp.route("/<path:path>", methods=_METHODS)
 def _proxy(path):
@@ -40,7 +49,7 @@ def _proxy(path):
     upstream_req.add_unredirected_header("X-Forwarded-Proto", "https")
 
     try:
-        with urllib.request.urlopen(upstream_req, timeout=30) as r:
+        with _opener.open(upstream_req, timeout=30) as r:
             body = r.read()
             status = r.status
             headers = [(k, v) for k, v in r.getheaders() if k.lower() not in _HOP]
