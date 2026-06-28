@@ -165,6 +165,47 @@ function Read-Services {
     if ($j -is [System.Array]) { return $j } else { return @($j) }
 }
 
+# Merge repo-tracked services.manifest.json into data/services.json (by name).
+function Sync-ServiceManifest {
+    $manifest = Join-Path $ScriptDir 'services.manifest.json'
+    if (-not (Test-Path $manifest)) { return }
+    try {
+        $entries = @((Get-Content $manifest -Raw) | ConvertFrom-Json)
+        $byName = @{}
+        foreach ($e in Read-Services) { $byName[[string]$e.name] = $e }
+        foreach ($e in $entries) { $byName[[string]$e.name] = $e }
+        ($byName.Values | ConvertTo-Json -Depth 5) | Set-Content -Path $ServicesFile
+    } catch {
+        Write-Host "$(Get-Date -f 'HH:mm:ss')  services.manifest.json sync failed: $_" -ForegroundColor Red
+    }
+}
+
+function Stop-ManagedService($name) {
+    if ($script:managed[$name] -and -not $script:managed[$name].HasExited) {
+        try { $script:managed[$name].Kill() } catch {}
+    }
+    if ($script:managed.ContainsKey($name)) { $script:managed.Remove($name) }
+    foreach ($svc in Read-Services) {
+        if ([string]$svc.name -eq $name -and $svc.port) { Free-Port $svc.port }
+    }
+}
+
+function Build-OrschellService {
+    $svcDir = Join-Path $ScriptDir 'services/orschell-ecommerce'
+    if (-not (Test-Path $svcDir)) { return }
+    $npm = if (Get-Command npm.cmd -ErrorAction SilentlyContinue) { 'npm.cmd' } else { 'npm' }
+    Write-Host "  Building orschell-ecommerce-api..." -ForegroundColor Yellow
+    Push-Location $svcDir
+    try {
+        & $npm install 2>&1 | Write-Host
+        if ($LASTEXITCODE -ne 0) { throw "npm install failed ($LASTEXITCODE)" }
+        & $npm run build 2>&1 | Write-Host
+        if ($LASTEXITCODE -ne 0) { throw "npm run build failed ($LASTEXITCODE)" }
+    } finally { Pop-Location }
+    Stop-ManagedService 'orschell-ecommerce-api'
+    Write-Host "  orschell-ecommerce-api built; will restart on next tick" -ForegroundColor Green
+}
+
 function Test-Port($p) {
     try {
         $c = New-Object System.Net.Sockets.TcpClient
@@ -262,6 +303,7 @@ Normalize-TunnelConfig
 $script:tunnelProc = Start-Tunnel
 
 Write-Host "-> Managed services from data/services.json..."
+Sync-ServiceManifest
 Ensure-Services
 
 Write-Host ""
@@ -290,6 +332,10 @@ function Invoke-AutoDeploy {
             if ($changed -match 'requirements\.txt') {
                 Write-Host "  requirements.txt changed -- installing deps..." -ForegroundColor Yellow
                 & $PythonExe -m pip install -r (Join-Path $ScriptDir 'requirements.txt') 2>&1 | Write-Host
+            }
+            Sync-ServiceManifest
+            if ($changed -match 'services/orschell-ecommerce|services\.manifest\.json') {
+                Build-OrschellService
             }
             Write-Host "  Restarting server in this window (window stays open)..." -ForegroundColor Yellow
             if ($script:flaskProc -and -not $script:flaskProc.HasExited) { try { $script:flaskProc.Kill() } catch {} }

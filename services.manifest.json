@@ -1,0 +1,9 @@
+[
+  {
+    "name": "orschell-ecommerce-api",
+    "cmd": "node",
+    "args": "dist/index.js",
+    "cwd": "services/orschell-ecommerce",
+    "port": 3742
+  }
+]
