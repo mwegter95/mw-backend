@@ -206,6 +206,19 @@ function Build-OrschellService {
     Write-Host "  orschell-ecommerce-api built; will restart on next tick" -ForegroundColor Green
 }
 
+function Ensure-OrschellBuilt {
+    $svcDir = Join-Path $ScriptDir 'services/orschell-ecommerce'
+    $distJs = Join-Path $svcDir 'dist/index.js'
+    $srcDir = Join-Path $svcDir 'src'
+    if (-not (Test-Path (Join-Path $svcDir 'package.json'))) { return }
+    $needsBuild = -not (Test-Path $distJs)
+    if (-not $needsBuild -and (Test-Path $srcDir)) {
+        $srcNewest = (Get-ChildItem $srcDir -Recurse -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1).LastWriteTime
+        $needsBuild = $srcNewest -gt (Get-Item $distJs).LastWriteTime
+    }
+    if ($needsBuild) { Build-OrschellService }
+}
+
 function Test-Port($p) {
     try {
         $c = New-Object System.Net.Sockets.TcpClient
@@ -304,6 +317,7 @@ $script:tunnelProc = Start-Tunnel
 
 Write-Host "-> Managed services from data/services.json..."
 Sync-ServiceManifest
+Ensure-OrschellBuilt
 Ensure-Services
 
 Write-Host ""
