@@ -349,6 +349,10 @@ app.register_blueprint(clientfinder_bp)
 from maryland_driveway_wp_bridge_blueprint import bridge_bp as mdr_wp_bridge_bp
 app.register_blueprint(mdr_wp_bridge_bp)
 
+# ─── Panhandle Garage Door Company WordPress demo bridge ─────────────────────
+from panhandle_wp_bridge_blueprint import bridge_bp as panhandle_wp_bridge_bp
+app.register_blueprint(panhandle_wp_bridge_bp)
+
 # ─── Orschell E-Commerce demo bridge ─────────────────────────────────────────
 from orschell_ecommerce_blueprint import bridge_bp as orschell_ecommerce_bp
 app.register_blueprint(orschell_ecommerce_bp)
