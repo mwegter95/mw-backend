@@ -26,7 +26,9 @@ import hmac
 import time
 import json
 import hashlib
+import logging
 import datetime
+import threading
 import subprocess
 import tempfile
 from pathlib import Path
@@ -34,6 +36,10 @@ from pathlib import Path
 from flask import Blueprint, request, jsonify
 
 runner_bp = Blueprint("runner", __name__, url_prefix="/run")
+
+# Reuse the app's stdout logger so runner activity shows in the visible
+# run-server.ps1 console (and any file the console is teed to).
+log = logging.getLogger("mw-backend")
 
 BASE_DIR = Path(__file__).parent
 SECRET = os.environ.get("RUN_SECRET", "")
@@ -43,6 +49,15 @@ MAX_TIMEOUT = 1800
 WORKDIR = Path(os.environ.get("RUN_WORKDIR", str(BASE_DIR / "data" / "runner-workspace")))
 AUDIT_LOG = BASE_DIR / "data" / "runner-audit.log"
 MAX_OUTPUT = 200_000  # bytes returned per stream
+# Echo each exec's script + live output to the backend log (the visible Surface
+# console). On by default so you can see what is running and its results; set
+# RUN_LOG_VERBOSE=0 to silence. RUN_LOG_MAX_BYTES caps how much of a single
+# stream is echoed to the log (the full output is still captured + returned).
+LOG_VERBOSE = os.environ.get("RUN_LOG_VERBOSE", "1") not in ("", "0", "false", "False")
+try:
+    LOG_MAX_BYTES = max(0, int(os.environ.get("RUN_LOG_MAX_BYTES", "20000")))
+except (TypeError, ValueError):
+    LOG_MAX_BYTES = 20000
 try:
     WORKDIR.mkdir(parents=True, exist_ok=True)
 except Exception:
@@ -128,18 +143,59 @@ def execute():
                   if ln.strip() and not ln.strip().startswith("#")), "")[:60]
     started = time.time()
     timed_out = False
+
+    # Echo the script we are about to run to the backend log so it is visible in
+    # the Surface console. ASCII-only markers (Windows console charmap safe).
+    if LOG_VERBOSE:
+        log.info("[runner %s] exec start lang=%s cwd=%s timeout=%ss cmd=%r",
+                 sha, lang, cwd, timeout, label)
+        log.info("[runner %s] --- script ---", sha)
+        for _ln in script.splitlines():
+            log.info("[runner %s] | %s", sha, _ln)
+        log.info("[runner %s] --- output ---", sha)
+
+    def _pump(stream, chunks, is_err):
+        # Read the child's output line by line, append it to the capture buffer,
+        # and live-echo it to the backend log (capped per stream).
+        tag = "err" if is_err else "out"
+        emit = log.warning if is_err else log.info
+        logged = 0
+        try:
+            for line in iter(stream.readline, ""):
+                if not line:
+                    break
+                chunks.append(line)
+                if LOG_VERBOSE and logged < LOG_MAX_BYTES:
+                    emit("[runner %s] %s| %s", sha, tag, line.rstrip("\n"))
+                    logged += len(line)
+                    if logged >= LOG_MAX_BYTES:
+                        log.info("[runner %s] %s| [further %s output omitted from log; full result still returned]", sha, tag, tag)
+        except Exception:
+            pass
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
     fd, path = tempfile.mkstemp(suffix=suffix, dir=str(WORKDIR))
+    out_chunks, err_chunks = [], []
     try:
         with os.fdopen(fd, "w") as f:
             f.write(script)
         proc = subprocess.Popen(
             [argv0, path], cwd=cwd,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, start_new_session=True,
+            text=True, bufsize=1, start_new_session=True,
         )
+        # Threads drain both pipes concurrently (prevents the classic PIPE-full
+        # deadlock) while streaming each line to the log in real time.
+        t_out = threading.Thread(target=_pump, args=(proc.stdout, out_chunks, False), daemon=True)
+        t_err = threading.Thread(target=_pump, args=(proc.stderr, err_chunks, True), daemon=True)
+        t_out.start()
+        t_err.start()
         try:
-            out, err = proc.communicate(timeout=timeout)
-            exit_code = proc.returncode
+            exit_code = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             timed_out = True
             # Kill the entire process group so spawned children (Node, postgres, etc.)
@@ -159,12 +215,20 @@ def execute():
                 except Exception:
                     pass
             try:
-                out, err = proc.communicate(timeout=5)
+                proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                proc.kill()
-                out, err = proc.communicate()
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
             exit_code = 124
-            err = (err or "") + f"\n[timed out after {timeout}s — process tree killed]"
+        # Let the readers drain whatever is left before we assemble the result.
+        t_out.join(timeout=5)
+        t_err.join(timeout=5)
+        out = "".join(out_chunks)
+        err = "".join(err_chunks)
+        if timed_out:
+            err = (err or "") + f"\n[timed out after {timeout}s - process tree killed]"
     except Exception as e:
         return jsonify({"ok": False, "error": f"exec failed: {e}"}), 500
     finally:
@@ -174,6 +238,9 @@ def execute():
             pass
 
     dur = int((time.time() - started) * 1000)
+    if LOG_VERBOSE:
+        log.info("[runner %s] exec done exit=%s timed_out=%s dur=%sms",
+                 sha, exit_code, timed_out, dur)
     _audit(f"RUN ip={_client_ip()} lang={lang} sha={sha} exit={exit_code} timeout={timed_out} dur={dur}ms cmd={label!r}")
     return jsonify({
         "ok": (exit_code == 0 and not timed_out),
