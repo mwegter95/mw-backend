@@ -176,25 +176,42 @@ Perfect — Paul Cardall (solo piano)`;
     if (!text) { showStatus('Please enter a song list', 'error'); return; }
 
     document.getElementById('searchBtn').disabled = true;
-    showStatus('Searching Spotify for each song…', 'loading');
     document.getElementById('resultsSection').style.display = 'none';
+    showStatus('Starting search…', 'loading');
 
     try {
-      const res = await fetch('/spotify/search-songs', {
+      // Start the background job
+      const startRes = await fetch('/spotify/search-songs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ song_list: text }),
       });
-      const data = await res.json();
-      if (data.success) {
-        searchResults = data.results;
-        renderResults(data.results);
-        document.getElementById('resultsSection').style.display = 'block';
-        showStatus(`✓ Found matches for ${data.results.length} songs`, 'success');
-        // Scroll to the top build bar so user sees it immediately
-        document.getElementById('resultsSection').scrollIntoView({ behavior: 'smooth', block: 'start' });
-      } else {
-        showStatus(`Error: ${data.error}`, 'error');
+      const startData = await startRes.json();
+      if (!startData.success) {
+        showStatus(`Error: ${startData.error}`, 'error');
+        return;
+      }
+
+      const { job_id: jobId, total } = startData;
+
+      // Poll until done
+      while (true) {
+        await new Promise(r => setTimeout(r, 1000));
+        const statusRes = await fetch(`/spotify/search-songs/status?job_id=${jobId}`);
+        const status = await statusRes.json();
+        if (!status.success) {
+          showStatus(`Error: ${status.error}`, 'error');
+          return;
+        }
+        showStatus(`Searching Spotify… (${status.completed} / ${status.total})`, 'loading');
+        if (status.status === 'done') {
+          searchResults = status.results.filter(Boolean);
+          renderResults(searchResults);
+          document.getElementById('resultsSection').style.display = 'block';
+          showStatus(`✓ Found matches for ${searchResults.length} songs`, 'success');
+          document.getElementById('resultsSection').scrollIntoView({ behavior: 'smooth', block: 'start' });
+          return;
+        }
       }
     } catch (e) {
       showStatus(`Error: ${e.message}`, 'error');

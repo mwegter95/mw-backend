@@ -21,10 +21,11 @@ import os
 import re
 import uuid
 import time
+import threading
 from pathlib import Path
 from datetime import datetime
 from difflib import SequenceMatcher
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from flask import (
     Blueprint, render_template, request, jsonify,
@@ -386,21 +387,81 @@ def _search_one(entry):
     }
 
 
+# ─── Background job store for /search-songs ───────────────────────────────────
+
+_jobs: dict = {}
+_jobs_lock = threading.Lock()
+_JOB_TTL = 600  # seconds before stale jobs are purged
+
+
+def _cleanup_jobs():
+    cutoff = time.time() - _JOB_TTL
+    with _jobs_lock:
+        stale = [jid for jid, j in _jobs.items() if j.get("created_at", 0) < cutoff]
+        for jid in stale:
+            del _jobs[jid]
+
+
+def _run_search_job(job_id: str, parsed: list):
+    total = len(parsed)
+    results = [None] * total
+
+    with _jobs_lock:
+        _jobs[job_id].update({"status": "running", "total": total, "completed": 0})
+
+    def _indexed(args):
+        i, entry = args
+        result = _search_one(entry)
+        result["index"] = i
+        return i, result
+
+    with ThreadPoolExecutor(max_workers=min(total, 3)) as executor:
+        futures = {executor.submit(_indexed, (i, e)): i for i, e in enumerate(parsed)}
+        for future in as_completed(futures):
+            try:
+                i, result = future.result()
+                results[i] = result
+            except Exception:
+                pass
+            with _jobs_lock:
+                _jobs[job_id]["completed"] = sum(1 for r in results if r is not None)
+
+    with _jobs_lock:
+        _jobs[job_id]["status"] = "done"
+        _jobs[job_id]["results"] = results
+
+
 @spotify_bp.route("/search-songs", methods=["POST"])
 def search_songs():
+    _cleanup_jobs()
     data = request.get_json(silent=True) or {}
     song_list_text = data.get("song_list", "").strip()
     if not song_list_text:
         return jsonify({"success": False, "error": "Please provide a song list"})
     try:
         parsed = parse_song_list(song_list_text)
-        workers = min(len(parsed), 3)
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            # executor.map preserves input order
-            results = list(executor.map(_search_one, parsed))
-        return jsonify({"success": True, "results": results})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
+
+    job_id = str(uuid.uuid4())
+    with _jobs_lock:
+        _jobs[job_id] = {"status": "pending", "created_at": time.time()}
+    threading.Thread(target=_run_search_job, args=(job_id, parsed), daemon=True).start()
+    return jsonify({"success": True, "job_id": job_id, "total": len(parsed)})
+
+
+@spotify_bp.route("/search-songs/status", methods=["GET"])
+def search_songs_status():
+    job_id = request.args.get("job_id", "")
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if not job:
+        return jsonify({"success": False, "error": "Job not found"})
+    resp = {"success": True, "status": job["status"], "total": job.get("total", 0),
+            "completed": job.get("completed", 0)}
+    if job["status"] == "done":
+        resp["results"] = job.get("results", [])
+    return jsonify(resp)
 
 
 @spotify_bp.route("/create-playlist", methods=["POST"])
