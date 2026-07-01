@@ -20,6 +20,7 @@ Required .env keys (add to mw-backend .env):
 import os
 import re
 import uuid
+import time
 from pathlib import Path
 from datetime import datetime
 from difflib import SequenceMatcher
@@ -152,7 +153,9 @@ def search_and_rank(sp, song_name, artist_name):
     ]
     seen_ids = set()
     all_results = []
-    for query in queries:
+    for i, query in enumerate(queries):
+        if i > 0:
+            time.sleep(0.15)
         try:
             results = sp.search(q=query, type="track", limit=10)
             for track in results["tracks"]["items"]:
@@ -391,7 +394,7 @@ def search_songs():
         return jsonify({"success": False, "error": "Please provide a song list"})
     try:
         parsed = parse_song_list(song_list_text)
-        workers = min(len(parsed), 10)
+        workers = min(len(parsed), 3)
         with ThreadPoolExecutor(max_workers=workers) as executor:
             # executor.map preserves input order
             results = list(executor.map(_search_one, parsed))
