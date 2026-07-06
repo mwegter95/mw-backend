@@ -357,6 +357,10 @@ app.register_blueprint(panhandle_wp_bridge_bp)
 from orschell_ecommerce_blueprint import bridge_bp as orschell_ecommerce_bp
 app.register_blueprint(orschell_ecommerce_bp)
 
+# ─── Bowling Shirt Designer demo ─────────────────────────────────────────────
+from bowling_blueprint import bowling_bp
+app.register_blueprint(bowling_bp)
+
 from yard_seed import seed_for_owner as _yard_seed_for_owner
 from yard_seed_v2 import seed_v2_for_owner as _yard_seed_v2_for_owner
 
