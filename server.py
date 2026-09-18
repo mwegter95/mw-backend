@@ -564,6 +564,11 @@ CREATE TABLE IF NOT EXISTS life_gcal_accounts (
     connected_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
     last_synced_at    DATETIME,
     last_generated_at DATETIME,
+    -- Set when Google rejects the refresh token (invalid_grant). Nothing but a
+    -- fresh OAuth consent clears it, so the scheduler skips flagged accounts
+    -- instead of retrying hourly forever.
+    needs_reauth      INTEGER NOT NULL DEFAULT 0,
+    reauth_reason     TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (owner_type, owner_id)
 );
 """
@@ -592,7 +597,9 @@ def init_db():
     except Exception:
         pass  # column already exists
     # Migrate: add last_synced_at / last_generated_at to life_gcal_accounts
-    for _col, _type in (("last_synced_at", "DATETIME"), ("last_generated_at", "DATETIME")):
+    for _col, _type in (("last_synced_at", "DATETIME"), ("last_generated_at", "DATETIME"),
+                        ("needs_reauth", "INTEGER NOT NULL DEFAULT 0"),
+                        ("reauth_reason", "TEXT NOT NULL DEFAULT ''")):
         try:
             conn.execute(f"ALTER TABLE life_gcal_accounts ADD COLUMN {_col} {_type}")
             conn.commit()
@@ -3468,6 +3475,36 @@ def _gcal_redirect(status):
     return redirect(f"{LIFE_DASHBOARD_URL}{sep}gcal={status}")
 
 
+def _gcal_flag_reauth(db, ot, oi, reason=""):
+    """Mark a connection dead so the UI can prompt a reconnect and the scheduler
+    stops retrying a token Google will never accept again."""
+    try:
+        db.execute(
+            "UPDATE life_gcal_accounts SET needs_reauth=1, reauth_reason=? "
+            "WHERE owner_type=? AND owner_id=?",
+            (reason[:300], ot, oi),
+        )
+        db.commit()
+    except Exception as e:  # pragma: no cover - never let bookkeeping break a request
+        log.warning("[gcal] couldn't flag reauth for %s:%s — %s", ot, oi, e)
+
+
+def _gcal_clear_reauth(db, ot, oi):
+    try:
+        db.execute(
+            "UPDATE life_gcal_accounts SET needs_reauth=0, reauth_reason='' "
+            "WHERE owner_type=? AND owner_id=? AND needs_reauth=1",
+            (ot, oi),
+        )
+        db.commit()
+    except Exception as e:  # pragma: no cover
+        log.warning("[gcal] couldn't clear reauth for %s:%s — %s", ot, oi, e)
+
+
+def _gcal_needs_reauth(exc) -> bool:
+    return bool(getattr(exc, "needs_reauth", False))
+
+
 def _apply_smart_tasks(db, ot, oi, tasks):
     """Idempotently upsert AI tasks as dated reminders (life_habits with
     freq.kind='date', tagged source='gcal-ai'), then prune future-dated AI
@@ -3558,7 +3595,13 @@ def _smart_generate_for_owner(db, ot, oi):
     if not acct:
         raise RuntimeError("No connected Google Calendar")
     refresh = _gcal_decrypt(acct["refresh_token_enc"])
-    events = life_gcal.list_upcoming_events(refresh, days=120)   # ~4 months so trips aren't missed
+    try:
+        events = life_gcal.list_upcoming_events(refresh, days=120)   # ~4 months so trips aren't missed
+    except Exception as e:
+        if _gcal_needs_reauth(e):
+            _gcal_flag_reauth(db, ot, oi, getattr(e, "detail", "") or str(e))
+        raise
+    _gcal_clear_reauth(db, ot, oi)
     if not events:
         db.execute(
             "UPDATE life_gcal_accounts SET last_synced_at=?, last_generated_at=? "
@@ -3612,13 +3655,19 @@ def life_ai_health():
 def life_gcal_status():
     db = get_db()
     row = db.execute(
-        "SELECT google_email, connected_at, last_synced_at, last_generated_at "
+        "SELECT google_email, connected_at, last_synced_at, last_generated_at, "
+        "needs_reauth, reauth_reason "
         "FROM life_gcal_accounts WHERE owner_type=? AND owner_id=?",
         (g.owner_type, g.owner_id),
     ).fetchone()
+    needs_reauth = bool(row and row["needs_reauth"])
     return jsonify({
         "configured": bool(_GCAL_AVAILABLE and life_gcal.is_configured()),
+        # `connected` stays true so the UI keeps showing which account is linked;
+        # `needs_reauth` is what tells it to surface a Reconnect prompt.
         "connected": bool(row),
+        "needs_reauth": needs_reauth,
+        "reauth_reason": (row["reauth_reason"] if row else "") or "",
         "email": row["google_email"] if row else "",
         "connected_at": row["connected_at"] if row else None,
         "last_synced_at": row["last_synced_at"] if row else None,
@@ -3664,7 +3713,10 @@ def life_gcal_callback():
         "VALUES (?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(owner_type, owner_id) DO UPDATE SET "
         "google_email=excluded.google_email, refresh_token_enc=excluded.refresh_token_enc, "
-        "scope=excluded.scope, connected_at=excluded.connected_at",
+        "scope=excluded.scope, connected_at=excluded.connected_at, "
+        # A fresh consent is the only thing that revives a dead token, so this
+        # is where the reconnect prompt gets cleared.
+        "needs_reauth=0, reauth_reason=''",
         (ot, oi, res.get("email", ""), _gcal_encrypt(res["refresh_token"]),
          res.get("scope", ""), utc_now_iso_legacy()),
     )
@@ -3705,13 +3757,28 @@ def life_gcal_events():
     try:
         events = life_gcal.list_upcoming_events(_gcal_decrypt(row["refresh_token_enc"]), days=days)
     except Exception as e:
+        detail = getattr(e, "detail", "") or str(e)
+        if _gcal_needs_reauth(e):
+            # Dead refresh token. This is a user-actionable state, not a server
+            # fault: flag it once, answer 409, and let the dashboard show a
+            # Reconnect button rather than retrying into a 502 loop.
+            _gcal_flag_reauth(db, g.owner_type, g.owner_id, detail)
+            log.info("[gcal] refresh token rejected for %s:%s — reconnect required (%s)",
+                     g.owner_type, g.owner_id, detail)
+            return jsonify({
+                "error": "Google Calendar access expired. Reconnect your Google account.",
+                "detail": detail,
+                "needs_reauth": True,
+            }), 409
         log.warning("[gcal] events fetch failed: %s", e)
-        if hasattr(e, "detail") and e.detail:
-            log.warning("[gcal] events fetch detail: %s", e.detail)
+        if detail and detail != str(e):
+            log.warning("[gcal] events fetch detail: %s", detail)
         return jsonify({
             "error": "Couldn't fetch events",
-            "detail": getattr(e, "detail", "") or str(e),
+            "detail": detail,
+            "needs_reauth": False,
         }), 502
+    _gcal_clear_reauth(db, g.owner_type, g.owner_id)
     return jsonify({"events": events})
 
 
@@ -3736,10 +3803,16 @@ def _run_due_generations():
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
-            "SELECT owner_type, owner_id, last_generated_at FROM life_gcal_accounts"
+            "SELECT owner_type, owner_id, last_generated_at, needs_reauth "
+            "FROM life_gcal_accounts"
         ).fetchall()
         now = utc_now().replace(tzinfo=None)
         for r in rows:
+            if r["needs_reauth"]:
+                # Google will keep rejecting this token until the user reconnects;
+                # retrying hourly only fills the log. The dashboard shows the
+                # prompt, and the OAuth callback clears the flag.
+                continue
             due = True
             if r["last_generated_at"]:
                 try:

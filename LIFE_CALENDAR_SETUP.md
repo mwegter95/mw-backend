@@ -108,6 +108,47 @@ git pull
 Verify the AI health route and then run a manual smart-task generation from the
 dashboard.
 
+## When Google says `invalid_grant`
+
+Symptom — the events route 502s and the log repeats:
+
+```
+[gcal] events fetch failed: Couldn't refresh Google Calendar credentials:
+RefreshError: ('invalid_grant: Bad Request', {'error': 'invalid_grant', ...})
+```
+
+`invalid_grant` on a *refresh* means the stored refresh token is dead. Retrying
+never helps; only a fresh OAuth consent does. The usual causes, most likely first
+for a personal project:
+
+1. **The OAuth consent screen is still in `Testing`.** Google expires every
+   refresh token issued by a Testing-status app after **7 days**. This is the one
+   that comes back every week or so. Fix it once: Google Cloud Console → APIs &
+   Services → OAuth consent screen → **Publish app** (moves it to `In production`).
+   Verification is *not* required for a personal app under 100 users — you get a
+   one-time "Google hasn't verified this app" screen at consent that you click
+   through via *Advanced → Go to …*, and the 7-day expiry goes away.
+2. The Google account revoked the app at
+   [myaccount.google.com/permissions](https://myaccount.google.com/permissions).
+3. `GOOGLE_CLIENT_SECRET` was rotated in the Cloud Console but not in `.env`.
+4. The account's password was changed (Google invalidates offline tokens).
+
+After publishing, reconnect once from the dashboard to mint a non-expiring token.
+
+**How the server handles it.** `life_gcal.CalendarAuthError` (a `CalendarFetchError`
+with `needs_reauth = True`) is raised only for `invalid_grant`; everything else
+stays a plain `CalendarFetchError`. The server then:
+
+- sets `life_gcal_accounts.needs_reauth = 1` with the reason,
+- answers `GET /api/life/gcal/events` with **409** and `{"needs_reauth": true}`
+  instead of a 502 (a 502 reads as "the server broke"; this is user-actionable),
+- reports `needs_reauth` from `GET /api/life/gcal/status`, which makes the
+  dashboard's Calendar panel swap to a **Reconnect Google Calendar** card,
+- **skips the account in the daily scheduler** so it stops hammering the token
+  endpoint and filling the log every hour,
+- clears the flag on the next successful fetch, and on a successful OAuth
+  callback.
+
 ## Operational notes
 - Store the OAuth refresh token encrypted.
 - Smart reminders should be tagged `source: "gcal-ai"`.

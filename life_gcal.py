@@ -61,9 +61,36 @@ def _google_error_detail(exc):
 class CalendarFetchError(RuntimeError):
     """Raised when Google Calendar could not be reached or authorized."""
 
+    # Transient/unknown by default: worth retrying on the next scheduler tick.
+    needs_reauth = False
+
     def __init__(self, message, cause=None):
         self.detail = _google_error_detail(cause) if cause else ""
         super().__init__(f"{message}: {self.detail}" if self.detail else message)
+
+
+class CalendarAuthError(CalendarFetchError):
+    """The stored refresh token is dead — only a fresh OAuth consent fixes it.
+
+    Google returns `invalid_grant` when the refresh token was revoked, when the
+    user changed their password, when the OAuth client's secret was rotated, or
+    (the usual one for a personal project) when the OAuth consent screen is still
+    in *Testing* publishing status, which expires every refresh token after 7
+    days. Retrying is pointless, so callers should flag the account for
+    reconnect instead of hammering the token endpoint on every scheduler tick.
+    """
+
+    needs_reauth = True
+
+
+def _is_invalid_grant(exc) -> bool:
+    """True when a RefreshError means 'this token is permanently dead'."""
+    text = f"{exc}".lower()
+    args = getattr(exc, "args", ()) or ()
+    for a in args:
+        if isinstance(a, dict) and str(a.get("error", "")).lower() == "invalid_grant":
+            return True
+    return "invalid_grant" in text
 
 
 def is_configured():
@@ -173,6 +200,10 @@ def list_upcoming_events(refresh_token, days=90, max_events=400):
     try:
         creds.refresh(Request())
     except RefreshError as exc:
+        if _is_invalid_grant(exc):
+            raise CalendarAuthError(
+                "Google Calendar access expired — reconnect the account", exc
+            ) from exc
         raise CalendarFetchError("Couldn't refresh Google Calendar credentials", exc) from exc
     svc = build("calendar", "v3", credentials=creds, cache_discovery=False)
 
