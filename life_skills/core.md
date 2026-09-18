@@ -17,12 +17,22 @@ For EACH event:
    a `kind` chosen ONLY from that skill's allowed kinds, plus a short `title`.
 
 ## Decision principles
-- Prefer no-miss for clearly personal/life events: birthdays, anniversaries,
-  weddings, true travel, medical/legal/DMV/interview appointments, holidays,
-  real deadlines, and named social events.
-- Prefer omitting for low-signal events: routine work meetings, generic busy
-  blocks, focus time, commutes, holds, tentative placeholders, and ambiguous
-  one-word events.
+- **Default to omitting.** Most events need no reminder. An event already has a
+  time and a place; the person will attend it. A task earns its place only when
+  there is real work to do BEFORE the event that would otherwise be forgotten.
+- Never produce a task that merely restates the event ("Confirm X", "Attend Y").
+- Always omit: medical and dental anything (appointments, follow-ups, virtual
+  visits, therapy, checkups, labs); meals and bookings (dinner, lunch, brunch,
+  coffee, drinks, restaurant reservations); meetings of any kind, work or
+  volunteer, including board/committee meetings, open houses, calls, classes,
+  lessons, practices, rehearsals and shifts; work admin (timesheets, hours, pay
+  periods); recurring money (bills, loan or mortgage payments, rent,
+  subscriptions, reimbursing someone); routine services (haircuts, cleaning,
+  oil changes, vehicle drop-off/pick-up, grooming, workouts); minor observances
+  and awareness days.
+- Prefer no-miss only for: birthdays, anniversaries, weddings, true travel,
+  major holidays, real one-off deadlines, and social gatherings that need
+  something brought, an RSVP, or genuine planning.
 - Multi-day is only a signal, not a category. Treat a multi-day event as `trip`
   only when the title/location/description/calendar indicates being away from
   home, lodging, flights, vacation, conference travel, or being "in <place>".
@@ -34,8 +44,10 @@ For EACH event:
 - Output ONLY `eventId`, `category`, and per task `kind` + `title`. NEVER output
   dates, points, durations, explanations, locations, or any other field — the
   app computes dates/points mechanically.
-- `category` MUST be one of: birthday, anniversary, wedding, trip, appointment,
-  holiday, social, deadline, generic.
+- `category` MUST be one of: birthday, anniversary, wedding, trip, holiday,
+  social, deadline. (`appointment` and `generic` were removed — they were the
+  two widest nets and produced most of the noise. There is no catch-all: if an
+  event fits none of the seven, omit it.)
 - `kind` MUST be one of the allowed kinds listed in that category's skill.
 - Include ONLY events that get at least 1 useful task.
 - Max 2 tasks per event. Never duplicate a task.
@@ -57,3 +69,5 @@ For EACH event:
 4) There are no dates, points, durations, extra fields, markdown, or prose.
 5) Titles are ≤ 8 words, imperative, specific, and non-duplicative.
 6) Routine/ambiguous events are omitted.
+7) No task restates an event the person will simply attend.
+8) `holiday` is used ONLY for the major holidays listed in the holiday skill.

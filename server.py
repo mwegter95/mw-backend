@@ -3583,7 +3583,41 @@ def _apply_smart_tasks(db, ot, oi, tasks):
     return {"created_or_updated": len(new_by_id), "pruned": pruned}
 
 
-def _smart_generate_for_owner(db, ot, oi):
+def _purge_smart_reminders(db, ot, oi):
+    """Delete every AI calendar reminder the user hasn't acted on.
+
+    The normal prune in _apply_smart_tasks only removes future-dated suggestions
+    that the new run didn't re-suggest, and it leaves hidden/soft-deleted rows
+    in place. That's right for a routine refresh, but useless after a rules
+    change: the old list was generated under the old qualifications and none of
+    it should survive on its own merits. Anything with a completion is kept —
+    those points are earned and the retirement logic in the dashboard depends on
+    the row still existing."""
+    rows = db.execute(
+        "SELECT id, data FROM life_habits WHERE owner_type=? AND owner_id=?", (ot, oi)
+    ).fetchall()
+    removed = 0
+    for r in rows:
+        try:
+            h = json.loads(r["data"])
+        except Exception:
+            continue
+        if h.get("source") != "gcal-ai":
+            continue
+        touched = db.execute(
+            "SELECT 1 FROM life_completions WHERE habit_id=? AND owner_type=? AND owner_id=? LIMIT 1",
+            (r["id"], ot, oi),
+        ).fetchone()
+        if touched:
+            continue
+        db.execute("DELETE FROM life_habits WHERE id=? AND owner_type=? AND owner_id=?",
+                   (r["id"], ot, oi))
+        removed += 1
+    db.commit()
+    return removed
+
+
+def _smart_generate_for_owner(db, ot, oi, reset=False):
     """Fetch ~3 months of events, ask the model for smart reminders, apply them.
     Used by the manual endpoint, the post-connect kick-off, and the scheduler."""
     if not (_GCAL_AVAILABLE and life_gcal.is_configured()):
@@ -3594,6 +3628,10 @@ def _smart_generate_for_owner(db, ot, oi):
     ).fetchone()
     if not acct:
         raise RuntimeError("No connected Google Calendar")
+    purged = _purge_smart_reminders(db, ot, oi) if reset else 0
+    if purged:
+        log.info("[life] reset: cleared %d untouched smart reminders for %s:%s",
+                 purged, ot, oi)
     refresh = _gcal_decrypt(acct["refresh_token_enc"])
     try:
         events = life_gcal.list_upcoming_events(refresh, days=120)   # ~4 months so trips aren't missed
@@ -3612,6 +3650,7 @@ def _smart_generate_for_owner(db, ot, oi):
         return {
             "created_or_updated": 0,
             "pruned": 0,
+            "purged": purged,
             "events": 0,
             "skipped": True,
             "reason": "No upcoming Google Calendar events were returned; existing smart reminders were left unchanged.",
@@ -3626,6 +3665,7 @@ def _smart_generate_for_owner(db, ot, oi):
     )
     db.commit()
     result["events"] = len(events)
+    result["purged"] = purged
     return result
 
 
@@ -3786,8 +3826,10 @@ def life_gcal_events():
 @require_owner
 def life_smart_generate():
     db = get_db()
+    body = request.get_json(silent=True) or {}
+    reset = bool(body.get("reset"))
     try:
-        result = _smart_generate_for_owner(db, g.owner_type, g.owner_id)
+        result = _smart_generate_for_owner(db, g.owner_type, g.owner_id, reset=reset)
     except Exception as e:
         log.exception("[life] smart-tasks generate failed for %s:%s", g.owner_type, g.owner_id)
         return jsonify({"error": str(e)}), 400

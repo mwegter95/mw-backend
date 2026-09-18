@@ -4,7 +4,7 @@ Use the event title first, then location/calendar/description/all-day span when
 available. Match case-insensitively. Pick the single best fit.
 
 ## Priority when multiple cues match
-birthday → anniversary → wedding → holiday → deadline → trip → appointment → social → generic → ignore
+birthday → anniversary → wedding → holiday → deadline → trip → social → ignore
 
 Use the priority only when two categories are genuinely plausible. Otherwise use
 the category that would create the most useful real-world prep task.
@@ -23,16 +23,20 @@ the category that would create the most useful real-world prep task.
   context. Use `wedding` over `trip` if the event is a wedding, even when travel
   may be needed; the wedding skill can emit travel.
 
-- **holiday** — culturally-prepped days: Thanksgiving, Christmas, Christmas Eve,
-  Hanukkah, Eid, Diwali, Valentine's Day, Mother's Day, Father's Day, New Year's
-  Eve, Easter, Passover, Halloween, July 4th/Independence Day. Use `holiday`, not
-  `trip`, unless the title clearly describes travel such as "Flight to Chicago".
+- **holiday** — ONLY these, and nothing else: Thanksgiving, Christmas, Christmas
+  Eve, Hanukkah, Eid, Diwali, Lunar New Year, Rosh Hashanah, Yom Kippur,
+  Valentine's Day, Mother's Day, Father's Day, New Year's Eve/Day, Easter,
+  Passover, Halloween, July 4th/Independence Day. This is an allowlist and the
+  code enforces it. Awareness days, observances and local festivals — World
+  Mental Health Day, Columbus Day, Fall Fest — are NOT holidays; omit them. Use
+  `holiday`, not `trip`, unless the title clearly describes travel.
 
-- **deadline** — time-bound obligations: "due", "deadline", "renew", "expires",
-  "expiration", "registration", "payment", "pay", "file", "submit", "taxes",
-  "application", "enrollment", "cancel by", "return by", "RSVP due". Use
-  `deadline` over appointment/social when the main action is completing something
-  by a date.
+- **deadline** — a ONE-OFF obligation with a real consequence for missing it:
+  "renew", "expires", "expiration", "registration", "taxes", "application",
+  "enrollment", "cancel by", "return by", "RSVP due", "file by". NOT recurring
+  bills ("pay mortgage", "rent due", a phone reimbursement) and NOT work admin
+  ("submit hours", "timesheet", "pay period") — those recur forever and
+  reminding about each one is noise.
 
 - **trip** — being away from home or travel logistics: "flight", "airport", "trip",
   "vacation", "getaway", "travel", "hotel", "Airbnb", "check-in", "check out",
@@ -41,23 +45,19 @@ the category that would create the most useful real-world prep task.
   NOT automatically a trip; ignore generic "OOO"/"PTO"/"busy" unless it includes
   a destination or travel reason.
 
-- **appointment** — prep/paperwork events: doctor, dentist, therapy, vet,
-  appointment, interview, exam, test, DMV, consultation, court, inspection,
-  service appointment, repair appointment, estimate, fitting, passport, license,
-  school conference. Routine work meetings are not appointments.
 
-- **social** — gatherings worth light prep with a named person/occasion: "dinner
-  with <name>", "<name>'s party", housewarming, baby shower, bridal shower,
-  graduation party, BBQ, potluck, game night, concert with a named person, date
-  night, hosting, family gathering. Plain "Lunch"/"Coffee" without a person or
-  purpose is ignore.
+- **social** — a gathering that needs something BROUGHT, an RSVP, or genuine
+  planning: "<name>'s party", housewarming, baby shower, graduation party, BBQ,
+  potluck, game night, hosting, family gathering. A booked restaurant table or a
+  ticketed show is NOT social — it is already handled, and the person simply
+  attends. Meals of any kind (dinner, lunch, brunch, coffee, drinks) are always
+  ignore, with or without a name attached.
 
-- **generic** — clearly noteworthy and personal but fits nothing above and still
-  benefits from a heads-up: recital, performance, move, race, tournament, photos,
-  audition, big presentation, home project day, first day of school. Use sparingly.
 
 ## Otherwise: ignore / omit the event
-Always omit routine or low-signal items: meetings, standups, 1:1s, syncs,
+Always omit routine or low-signal items: all medical and dental events, all
+meals and restaurant bookings, all routine services (haircuts, cleaning, vehicle
+drop-off), recurring bills and payments, work admin, meetings, standups, 1:1s, syncs,
 reviews, sprint ceremonies, focus/blocked/busy/hold, generic OOO/PTO, reminders
 already phrased as tasks, commutes, workouts, chores, recurring work blocks,
 automated calendar holds, birthdays for unknown contacts with no useful action,

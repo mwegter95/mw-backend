@@ -16,3 +16,15 @@ Guidance:
 - Do not classify a holiday as trip unless the event itself is travel.
 
 Titles: "Plan Thanksgiving", "Shop for Christmas gifts", "Get a Valentine's gift", "Buy Mother's Day flowers".
+
+## Allowlist (enforced in code)
+Only these count as holidays. Anything else — awareness days, observances, local
+festivals, minor federal days — is omitted, whatever the model decides:
+
+Thanksgiving · Christmas · Christmas Eve · Hanukkah · New Year's Eve · New
+Year's Day · Easter · Passover · Halloween · Valentine's Day · Mother's Day ·
+Father's Day · Independence Day (July 4th) · Eid · Diwali · Lunar New Year ·
+Rosh Hashanah · Yom Kippur
+
+`life_smart._MAJOR_HOLIDAY_RE` is the source of truth; add to it and to this
+list together.
