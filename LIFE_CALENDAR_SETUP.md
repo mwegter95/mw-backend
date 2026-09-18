@@ -92,9 +92,46 @@ python -m copilot download-runtime    # or have an authenticated `copilot` on PA
 copilot --version                     # sanity check
 ```
 
-The CLI must be signed in to a GitHub account with Copilot. Leave
-`LIFE_AI_GITHUB_TOKEN` unset and the SDK uses that logged-in identity — the
-normal arrangement. Set it only if the server needs a different account.
+**Authentication is the part that bites.** The SDK doesn't call an HTTP API —
+it spawns the Copilot CLI, and that process needs a GitHub credential of its own.
+`copilot login` stores one in the OS keychain (Windows Credential Manager), but a
+server running as a service usually can't read a credential belonging to an
+interactive desktop session. That shows up as:
+
+```
+copilot request failed: session error: execution failed: invalidArg,
+No github oauth token or copilot hmac key provided
+```
+
+`gh_models` resolves a token itself and passes it explicitly, checking in order:
+
+1. `LIFE_AI_GITHUB_TOKEN` — ours, so this app can use a different account
+2. `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN` — what the CLI reads
+3. `gh auth token`, if the GitHub CLI is authenticated
+4. Copilot's editor cache (`%LOCALAPPDATA%\github-copilot\apps.json`), which
+   holds a `ghu_` token if Copilot is set up in VS Code on that machine
+
+Finding none is still valid — the CLI's own keychain login may work. The token is
+passed both to the `CopilotClient` constructor and as `COPILOT_GITHUB_TOKEN` in
+the spawned process's environment, because there are open reports of the SDK's
+constructor-token forwarding not reaching the runtime.
+
+**Token types the Copilot CLI accepts:**
+
+| Prefix | Type | Works? |
+|---|---|---|
+| `gho_` | OAuth, minted by `copilot login` | yes |
+| `ghu_` | GitHub App user-to-server, what editors cache | yes |
+| `github_pat_` | fine-grained PAT | yes — needs the **Copilot Requests** *account* permission, and must be personal, not org-owned |
+| `ghp_` | classic PAT | **no**, whatever scopes it carries |
+
+That last row matters: a leftover `GITHUB_MODELS_TOKEN` is almost certainly a
+classic PAT and will never work here. `gh_models` logs a warning when it finds
+one rather than letting it fail opaquely.
+
+The simplest fix on the Surface is a fine-grained PAT with Copilot Requests,
+dropped into `.env` as `LIFE_AI_GITHUB_TOKEN`. `/api/life/ai/health` reports
+which source the token came from, so you can confirm what's in play.
 
 **Which model.** Copilot's catalog is not OpenAI's, and two things surprise people:
 
@@ -151,7 +188,9 @@ GOOGLE_REDIRECT_URI=https://api.michaelwegter.com/api/life/gcal/callback
 # AI provider — copilot (default) or openai
 LIFE_AI_PROVIDER=copilot
 LIFE_AI_MODEL=gpt-5.4-nano
-# LIFE_AI_GITHUB_TOKEN=      # optional; blank = use the Copilot CLI's login
+# Fine-grained PAT with the "Copilot Requests" account permission.
+# Blank = fall back to env vars / gh / the editor cache / the CLI's own login.
+LIFE_AI_GITHUB_TOKEN=github_pat_xxxxxxxx
 
 # Only for LIFE_AI_PROVIDER=openai:
 # LIFE_AI_API_BASE=https://api.groq.com/openai/v1

@@ -40,10 +40,12 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
 import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -70,8 +72,103 @@ DEFAULT_MODEL = (
 API_BASE = (os.environ.get("LIFE_AI_API_BASE") or "https://api.openai.com/v1").rstrip("/")
 API_KEY = os.environ.get("LIFE_AI_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
 
-# Copilot provider settings.
+# Copilot provider settings. Token resolution lives in _resolve_copilot_token().
 COPILOT_TOKEN = os.environ.get("LIFE_AI_GITHUB_TOKEN") or ""
+
+
+# ── Copilot authentication ────────────────────────────────────────────────────
+# The SDK spawns the Copilot CLI, and that process needs a GitHub token of its
+# own. It reads COPILOT_GITHUB_TOKEN, then GH_TOKEN, then GITHUB_TOKEN, and
+# otherwise falls back to a `copilot login` credential in the OS keychain (or an
+# authenticated `gh`). A server running as a service often can't see that
+# keychain entry — the login belongs to an interactive desktop session — which
+# surfaces as:
+#
+#   session error: execution failed: invalidArg,
+#   No github oauth token or copilot hmac key provided
+#
+# So resolve a token here and hand it over explicitly, rather than hoping the
+# spawned process finds one.
+#
+# Accepted token types (github/copilot-cli):
+#   gho_         OAuth, what `copilot login` mints
+#   ghu_         GitHub App user-to-server, what the editor extensions store
+#   github_pat_  fine-grained PAT — needs the "Copilot Requests" ACCOUNT
+#                permission, and must be personal rather than org-owned
+#   ghp_         CLASSIC PAT — explicitly NOT supported, whatever its scopes
+_COPILOT_TOKEN_ENV_VARS = (
+    "LIFE_AI_GITHUB_TOKEN",   # ours, wins so this app can differ from the rest
+    "COPILOT_GITHUB_TOKEN",   # the CLI's own first choice
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+)
+
+
+def _from_gh_cli():
+    """An authenticated `gh` is a perfectly good token source and is often
+    already set up on a box that deploys with git."""
+    try:
+        out = subprocess.run(["gh", "auth", "token"],
+                             capture_output=True, text=True, timeout=5)
+        return (out.stdout or "").strip() or None
+    except Exception:
+        return None
+
+
+def _from_copilot_apps():
+    """Copilot's editor extensions cache a ghu_ user-to-server token in
+    apps.json. If the Surface has Copilot in VS Code, this is already there."""
+    candidates = [Path.home() / ".config" / "github-copilot" / "apps.json"]
+    for env_var in ("LOCALAPPDATA", "APPDATA", "USERPROFILE"):
+        base = os.environ.get(env_var)
+        if base:
+            candidates.append(Path(base) / "github-copilot" / "apps.json")
+    seen = set()
+    for path in candidates:
+        if str(path) in seen:
+            continue
+        seen.add(str(path))
+        try:
+            if not path.exists():
+                continue
+            apps = json.loads(path.read_text(encoding="utf-8"))
+            entries = list(apps.values()) if isinstance(apps, dict) else []
+            for want_prefix in ("ghu_", "gho_", ""):
+                for entry in entries:
+                    tok = (entry or {}).get("oauth_token") or ""
+                    if tok and tok.startswith(want_prefix) and len(tok) > 10:
+                        return tok
+        except Exception:
+            continue
+    return None
+
+
+def _warn_bad_token_type(token, source):
+    if token.startswith("ghp_"):
+        log.warning(
+            "[life-ai] %s holds a classic PAT (ghp_). Copilot CLI does not "
+            "accept classic PATs at all, whatever scopes they carry. Use a "
+            "fine-grained PAT with the 'Copilot Requests' account permission, "
+            "or run `copilot login`.", source)
+        return False
+    return True
+
+
+def _resolve_copilot_token():
+    """Return (token, source). Either may be None — no token is a valid state
+    when `copilot login` has stored a credential the server process can read."""
+    for var in _COPILOT_TOKEN_ENV_VARS:
+        tok = (os.environ.get(var) or "").strip()
+        if tok:
+            _warn_bad_token_type(tok, var)
+            return tok, var
+    tok = _from_gh_cli()
+    if tok and _warn_bad_token_type(tok, "`gh auth token`"):
+        return tok, "gh-cli"
+    tok = _from_copilot_apps()
+    if tok:
+        return tok, "copilot-apps.json"
+    return None, None
 
 
 class AIProviderError(RuntimeError):
@@ -131,6 +228,7 @@ class _CopilotRuntime:
         self._loop = None
         self._thread = None
         self._client = None
+        self._auth_source = None
         # Set once a pinned model is refused, so the fallback is paid for once
         # per process instead of on every call.
         self._forced_auto = False
@@ -159,7 +257,17 @@ class _CopilotRuntime:
 
     async def _start_client(self):
         CopilotClient, _ = self._import_sdk()
-        kwargs = {"github_token": COPILOT_TOKEN} if COPILOT_TOKEN else {}
+        token, source = _resolve_copilot_token()
+        self._auth_source = source or "copilot-cli-login"
+        kwargs = {}
+        if token:
+            kwargs["github_token"] = token
+            # Belt and braces. The SDK is supposed to forward the constructor
+            # token to the spawned CLI via COPILOT_SDK_AUTH_TOKEN, but there are
+            # open reports of that forwarding not landing, and the CLI reads
+            # COPILOT_GITHUB_TOKEN from its inherited environment regardless.
+            # Setting both costs nothing and closes that gap.
+            os.environ.setdefault("COPILOT_GITHUB_TOKEN", token)
         client = CopilotClient(**kwargs)
         await client.start()
         return client
@@ -222,6 +330,8 @@ class _CopilotRuntime:
             # (Copilot's catalog moves fast), or this is a Copilot Free/Student
             # plan, which only gets auto selection. Neither is worth failing the
             # whole generation over when "auto" will work.
+            if _is_auth_failure(e):
+                raise AIProviderError(_AUTH_HELP) from e
             if model != "auto" and _is_model_rejection(e):
                 log.warning(
                     "[life-ai] Copilot wouldn't accept model %r (%s). Falling "
@@ -240,6 +350,30 @@ class _CopilotRuntime:
                 asyncio.run_coroutine_threadsafe(client.stop(), self._loop).result(timeout=20)
             except Exception:
                 pass
+
+
+_AUTH_HELP = (
+    "Copilot has no usable GitHub token. The SDK spawns the Copilot CLI, which "
+    "needs its own credential and often can't read a `copilot login` stored in "
+    "an interactive desktop session when the server runs as a service.\n"
+    "Fix it by putting a token in the server's .env as LIFE_AI_GITHUB_TOKEN "
+    "(COPILOT_GITHUB_TOKEN, GH_TOKEN and GITHUB_TOKEN also work):\n"
+    "  - a fine-grained PAT with the 'Copilot Requests' ACCOUNT permission, "
+    "owned by you rather than an org (github_pat_...), or\n"
+    "  - the gho_ token that `copilot login` mints.\n"
+    "Classic PATs (ghp_) are never accepted, whatever scopes they carry — that "
+    "includes any old GITHUB_MODELS_TOKEN. Alternatively run `copilot login` as "
+    "the same user the server runs as."
+)
+
+
+def _is_auth_failure(exc):
+    msg = str(exc).lower()
+    return (
+        "no github oauth token" in msg
+        or "copilot hmac key" in msg
+        or ("token" in msg and ("unauthorized" in msg or "not authenticated" in msg))
+    )
 
 
 _MODEL_REJECTION_HINTS = (
@@ -408,6 +542,8 @@ def health():
         sample = chat_completion(
             [{"role": "user", "content": "Reply with the single word: ok"}],
             max_tokens=5, timeout=60)
+        if PROVIDER == "copilot":
+            info["auth"] = _copilot._auth_source or "copilot-cli-login"
         if PROVIDER == "copilot" and _copilot._forced_auto:
             # Say so plainly — otherwise a silent downgrade to auto looks like
             # the pinned model is working.
@@ -415,6 +551,11 @@ def health():
             info["note"] = f"{model} was refused; using auto selection"
         return {**info, "available": True, "sample": (sample or "")[:40]}
     except AIProviderError as e:
+        if PROVIDER == "copilot":
+            tok, src = _resolve_copilot_token()
+            info["auth"] = src or "none (relying on copilot login)"
+            if tok:
+                info["auth_token_prefix"] = tok[:8] + "…"
         return {**info, "available": False, "error": str(e)}
     except Exception as e:
         return {**info, "available": False, "error": f"{e.__class__.__name__}: {e}"}
