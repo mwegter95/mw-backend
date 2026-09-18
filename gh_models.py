@@ -1,48 +1,73 @@
 """
-GitHub Models client for the Life Dashboard's AI smart-reminder feature.
+AI client for the Life Dashboard's smart-reminder feature.
 
-This ports code-genius/src/server/llm.ts to Python. We call the GitHub Models
-inference API (OpenAI-compatible) authenticated with a GitHub token — the same
-"piggyback on your existing GitHub auth, no separate API key" approach.
+Historically this called the GitHub Models inference API. **GitHub Models was
+fully retired on July 30, 2026** — the playground, catalog and inference API all
+went away, and calls now return `410 github_models_retirement_brownout`. Nothing
+about that is temporary despite the word "brownout".
 
-This backend runs on Windows (a Surface Pro 3), so token resolution is
-env-var-first and the macOS-Keychain branch from code-genius is intentionally
-omitted. Token sources, in priority order:
+The module kept its name so the rest of the app didn't have to move, but it is
+now provider-agnostic. Pick with `LIFE_AI_PROVIDER`:
 
-  1. GITHUB_MODELS_TOKEN or GITHUB_TOKEN env var   (recommended on the server)
-  2. `gh auth token`                                (GitHub CLI, if installed)
-  3. GitHub Copilot's apps.json                     (~/.config or %LOCALAPPDATA%)
+  copilot  (default)  the official GitHub Copilot SDK — GA since June 2026 and
+                      covered by any Copilot plan, including Copilot Free. It
+                      drives the Copilot CLI runtime, so it is a supported path
+                      rather than one of the reverse-engineered proxies that put
+                      your Copilot access at risk.
+  openai              any OpenAI-compatible /chat/completions endpoint (OpenAI,
+                      Groq, OpenRouter, Azure Foundry, Ollama, …). Kept as an
+                      escape hatch so switching providers is an env change, not
+                      another rewrite.
 
-Set GITHUB_MODELS_TOKEN to a GitHub personal-access token that has Models
-access. LIFE_AI_MODEL overrides the model (default gpt-4o-mini).
+Environment:
+  LIFE_AI_PROVIDER      "copilot" (default) or "openai"
+  LIFE_AI_MODEL         copilot: "auto" (default), "gpt-5", "claude-sonnet-4.5", …
+                        openai:  whatever that endpoint calls the model
+  LIFE_AI_GITHUB_TOKEN  copilot: optional. Left unset, the SDK uses whoever is
+                        logged in to the Copilot CLI — which is the normal setup
+                        on the server. Do NOT point this at an old
+                        GITHUB_MODELS_TOKEN; that scope is gone.
+  LIFE_AI_API_BASE      openai: base URL, e.g. https://api.groq.com/openai/v1
+  LIFE_AI_API_KEY       openai: bearer key (falls back to OPENAI_API_KEY)
+
+Prerequisite for the copilot provider: `pip install github-copilot-sdk` (Python
+3.11+) and a Copilot CLI runtime — `python -m copilot download-runtime`, or an
+already-authenticated `copilot` on PATH. Verify with GET /api/life/ai/health.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
-import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
-from pathlib import Path
 
-GITHUB_MODELS_API = os.environ.get(
-    "GITHUB_MODELS_API", "https://models.github.ai/inference"
-).rstrip("/")
-# GitHub Models inference uses publisher-prefixed ids (e.g. "openai/gpt-4o-mini").
-# Default is gpt-4o-mini: it's NOT a reasoning model, so it reliably returns JSON
-# (gpt-5-mini burned its whole token budget on reasoning and returned empty
-# content here), and it has higher free-tier limits. Override with LIFE_AI_MODEL;
-# gpt-5.4-mini is Copilot-only and not in this inference catalog. Confirm ids via:
-#   curl -H "Authorization: Bearer <token>" https://models.github.ai/catalog/models
-DEFAULT_MODEL = os.environ.get("LIFE_AI_MODEL", "openai/gpt-4o-mini")
+log = logging.getLogger(__name__)
 
-_TOKEN_CACHE = {"token": None, "ts": 0.0}
-_TOKEN_TTL = 300  # re-resolve at most every 5 minutes
+PROVIDER = (os.environ.get("LIFE_AI_PROVIDER") or "copilot").strip().lower()
+
+# "auto" lets Copilot route to whatever it considers current — the safest default
+# for a tiny classification job, and it survives model-catalog churn without a
+# code change. Pin it if you want predictable latency.
+_DEFAULT_MODEL_BY_PROVIDER = {"copilot": "auto", "openai": "gpt-4o-mini"}
+DEFAULT_MODEL = (
+    os.environ.get("LIFE_AI_MODEL")
+    or _DEFAULT_MODEL_BY_PROVIDER.get(PROVIDER, "auto")
+).strip()
+
+# OpenAI-compatible provider settings.
+API_BASE = (os.environ.get("LIFE_AI_API_BASE") or "https://api.openai.com/v1").rstrip("/")
+API_KEY = os.environ.get("LIFE_AI_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
+
+# Copilot provider settings.
+COPILOT_TOKEN = os.environ.get("LIFE_AI_GITHUB_TOKEN") or ""
 
 
-class GitHubModelsError(RuntimeError):
-    """Raised when the Models API is unreachable, unauthorized, or errors out.
+class AIProviderError(RuntimeError):
+    """The AI provider was unreachable, unauthorized, or returned an error.
     Carries the HTTP status and any Retry-After (seconds) for 429 handling."""
 
     def __init__(self, message, status=None, retry_after=None):
@@ -51,85 +76,192 @@ class GitHubModelsError(RuntimeError):
         self.retry_after = retry_after
 
 
-# ── Token resolution ──────────────────────────────────────────────────────────
-
-def _from_env():
-    return os.environ.get("GITHUB_MODELS_TOKEN") or os.environ.get("GITHUB_TOKEN") or None
+# life_smart.py catches this by name; keep the old spelling working.
+GitHubModelsError = AIProviderError
 
 
-def _from_gh_cli():
-    try:
-        out = subprocess.run(
-            ["gh", "auth", "token"],
-            capture_output=True, text=True, timeout=4,
-        )
-        tok = (out.stdout or "").strip()
-        return tok or None
-    except Exception:
-        return None
+def _model_for_copilot(model):
+    """GitHub Models used publisher-prefixed ids ("openai/gpt-4o-mini"); Copilot
+    does not. A .env left over from the Models era would otherwise fail on every
+    call with an opaque error, so translate it and say so once."""
+    m = (model or "").strip()
+    if "/" in m:
+        log.warning(
+            "[life-ai] LIFE_AI_MODEL=%r is a retired GitHub Models id; Copilot "
+            "doesn't use publisher prefixes. Falling back to 'auto' — set "
+            "LIFE_AI_MODEL to a Copilot model (e.g. gpt-5) to pin it.", m)
+        return "auto"
+    return m or "auto"
 
 
-def _from_copilot_apps():
-    candidates = [Path.home() / ".config" / "github-copilot" / "apps.json"]
-    for env_var in ("LOCALAPPDATA", "APPDATA", "USERPROFILE"):
-        base = os.environ.get(env_var)
-        if base:
-            candidates.append(Path(base) / "github-copilot" / "apps.json")
-    seen = set()
-    for path in candidates:
-        key = str(path)
-        if key in seen:
-            continue
-        seen.add(key)
+# ── Copilot SDK backend ───────────────────────────────────────────────────────
+
+class _CopilotRuntime:
+    """Owns one asyncio loop on a background thread, plus one CopilotClient.
+
+    Two reasons it's shaped this way. The SDK is async while everything calling
+    into it (Flask request threads, the nightly scheduler thread) is not, so
+    coroutines get marshalled onto a loop that belongs to nobody in particular.
+    And starting the client spins up the Copilot CLI runtime as a subprocess —
+    far too slow to pay per batch on a Surface Pro 3 — so it starts once, lazily,
+    and is reused for the life of the process.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._loop = None
+        self._thread = None
+        self._client = None
+
+    def _ensure_loop(self):
+        if self._loop is not None:
+            return
+        loop = asyncio.new_event_loop()
+        t = threading.Thread(
+            target=loop.run_forever, name="life-ai-copilot", daemon=True)
+        t.start()
+        self._loop, self._thread = loop, t
+
+    def _import_sdk(self):
         try:
-            if not path.exists():
-                continue
-            apps = json.loads(path.read_text(encoding="utf-8"))
-            entries = list(apps.values()) if isinstance(apps, dict) else []
-            # Prefer ghu_ tokens (GitHub App user tokens) — they have API access.
-            for entry in entries:
-                tok = (entry or {}).get("oauth_token")
-                if tok and tok.startswith("ghu_"):
-                    return tok
-            for entry in entries:
-                tok = (entry or {}).get("oauth_token")
-                if tok and len(tok) > 10:
-                    return tok
-        except Exception:
+            from copilot import CopilotClient
+            from copilot.session import PermissionHandler
+        except ImportError as e:
+            raise AIProviderError(
+                "The GitHub Copilot SDK isn't installed. Run "
+                "`pip install github-copilot-sdk` and "
+                "`python -m copilot download-runtime` on the server, or set "
+                "LIFE_AI_PROVIDER=openai to use a different provider."
+            ) from e
+        return CopilotClient, PermissionHandler
+
+    async def _start_client(self):
+        CopilotClient, _ = self._import_sdk()
+        kwargs = {"github_token": COPILOT_TOKEN} if COPILOT_TOKEN else {}
+        client = CopilotClient(**kwargs)
+        await client.start()
+        return client
+
+    def _get_client(self):
+        """Start the client on the loop thread, once. Callers hold no lock while
+        awaiting, so a failed start doesn't wedge the next attempt."""
+        with self._lock:
+            self._ensure_loop()
+            if self._client is not None:
+                return self._client
+            fut = asyncio.run_coroutine_threadsafe(self._start_client(), self._loop)
+            try:
+                self._client = fut.result(timeout=120)
+            except AIProviderError:
+                raise
+            except Exception as e:
+                raise AIProviderError(
+                    f"Couldn't start the Copilot runtime: {e.__class__.__name__}: {e}. "
+                    "Check that `copilot --version` works on the server and that "
+                    "the CLI is signed in to a GitHub account with Copilot."
+                ) from e
+            return self._client
+
+    async def _ask(self, prompt, model):
+        client = self._client
+        _, PermissionHandler = self._import_sdk()
+        # No tools are offered, so approve_all can't actually approve anything
+        # interesting — it just keeps a prompt from hanging on a permission ask.
+        async with await client.create_session(
+            on_permission_request=PermissionHandler.approve_all,
+            model=model,
+        ) as session:
+            resp = await session.send_and_wait(prompt)
+            return _response_text(resp)
+
+    def ask(self, prompt, model, timeout):
+        self._get_client()
+        fut = asyncio.run_coroutine_threadsafe(self._ask(prompt, model), self._loop)
+        try:
+            # Grace on top of the caller's budget: the SDK may still be handing
+            # back the last of a stream when the nominal timeout lands.
+            return fut.result(timeout=max(30, timeout) + 20)
+        except AIProviderError:
+            raise
+        except TimeoutError as e:
+            fut.cancel()
+            raise AIProviderError(f"Copilot timed out after {timeout}s") from e
+        except Exception as e:
+            raise AIProviderError(
+                f"Copilot request failed: {e.__class__.__name__}: {e}") from e
+
+    def reset(self):
+        """Drop the cached client so the next call starts a fresh runtime."""
+        with self._lock:
+            client, self._client = self._client, None
+        if client is not None and self._loop is not None:
+            try:
+                asyncio.run_coroutine_threadsafe(client.stop(), self._loop).result(timeout=20)
+            except Exception:
+                pass
+
+
+_copilot = _CopilotRuntime()
+
+
+def _response_text(resp):
+    """Pull the assistant text out of whatever shape send_and_wait returns."""
+    for path in (("data", "content"), ("content",), ("text",)):
+        cur = resp
+        for attr in path:
+            cur = getattr(cur, attr, None)
+            if cur is None:
+                break
+        if isinstance(cur, str) and cur.strip():
+            return cur
+    if isinstance(resp, str):
+        return resp
+    return str(resp or "")
+
+
+def _flatten(messages, json_object):
+    """The SDK takes one prompt string, not a role array. Render the turns
+    plainly and, when JSON is expected, say so — there's no response_format
+    knob to lean on the way the Models API had."""
+    parts = []
+    for m in messages or []:
+        role = (m.get("role") or "user").lower()
+        content = (m.get("content") or "").strip()
+        if not content:
             continue
-    return None
+        if role == "system":
+            parts.append(content)
+        elif role == "assistant":
+            parts.append(f"[your previous reply]\n{content}")
+        else:
+            parts.append(content)
+    prompt = "\n\n".join(parts)
+    if json_object:
+        prompt += (
+            "\n\nRespond with a single raw JSON object and nothing else — no "
+            "prose, no explanation, no markdown code fences."
+        )
+    return prompt
 
 
-def resolve_token(force=False):
-    now = time.time()
-    if not force and _TOKEN_CACHE["token"] and (now - _TOKEN_CACHE["ts"] < _TOKEN_TTL):
-        return _TOKEN_CACHE["token"]
-    token = _from_env() or _from_gh_cli() or _from_copilot_apps()
-    _TOKEN_CACHE["token"] = token
-    _TOKEN_CACHE["ts"] = now
-    return token
-
-
-# ── Chat completion (non-streaming; the generator just needs the final text) ──
+# ── OpenAI-compatible backend ─────────────────────────────────────────────────
 
 def _uses_completion_tokens(model):
     """GPT-5 family + o-series reasoning models use `max_completion_tokens` and
     reject custom `temperature`/`top_p`."""
     m = (model or "").lower()
-    return m.startswith("gpt-5") or "gpt-5" in m or m.startswith(("o1", "o3", "o4"))
+    return "gpt-5" in m or m.startswith(("o1", "o3", "o4"))
 
 
 def _post_chat(body, timeout):
-    token = resolve_token()
-    if not token:
-        raise GitHubModelsError(
-            "No GitHub token available for the Models API. Set GITHUB_MODELS_TOKEN "
-            "(or GITHUB_TOKEN) on the server, or authenticate the GitHub CLI."
-        )
+    if not API_KEY:
+        raise AIProviderError(
+            "No API key for the OpenAI-compatible provider. Set LIFE_AI_API_KEY "
+            "(and LIFE_AI_API_BASE) on the server.")
     req = urllib.request.Request(
-        f"{GITHUB_MODELS_API}/chat/completions",
+        f"{API_BASE}/chat/completions",
         data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {API_KEY}"},
         method="POST",
     )
     try:
@@ -144,51 +276,39 @@ def _post_chat(body, timeout):
                 retry_after = int(float(ra))
         except Exception:
             pass
-        raise GitHubModelsError(f"GitHub Models API {e.code}: {detail}",
-                                status=e.code, retry_after=retry_after)
+        raise AIProviderError(f"AI provider {e.code}: {detail}",
+                              status=e.code, retry_after=retry_after)
     except urllib.error.URLError as e:
-        raise GitHubModelsError(f"GitHub Models API unreachable: {e}")
+        raise AIProviderError(f"AI provider unreachable: {e}")
     choices = payload.get("choices") or [{}]
     return ((choices[0].get("message") or {}).get("content") or "")
 
 
-def chat_completion(
-    messages,
-    model=None,
-    temperature=0.3,
-    max_tokens=2000,
-    json_object=False,
-    timeout=60,
-):
-    """POST to the OpenAI-compatible chat/completions endpoint and return the
-    assistant message text. Adapts params to the model family and falls back to
-    a minimal body if the endpoint rejects an optional parameter."""
-    model = model or DEFAULT_MODEL
+def _chat_openai(messages, model, temperature, max_tokens, json_object, timeout):
     body = {"model": model, "messages": messages, "stream": False}
     if json_object:
         body["response_format"] = {"type": "json_object"}
     if _uses_completion_tokens(model):
-        body["max_completion_tokens"] = max_tokens   # GPT-5 / reasoning family
+        body["max_completion_tokens"] = max_tokens
     else:
         body["max_tokens"] = max_tokens
         body["temperature"] = temperature
         body["top_p"] = 1
 
-    # Up to 2 retries on 429 (free-tier rate limit). Respect Retry-After when
-    # it's short; if it's long (a daily quota) don't block — raise so the caller
-    # can surface it.
+    # Up to 2 retries on 429. Respect Retry-After when it's short; if it's long
+    # (a daily quota) raise instead of blocking a request thread on it.
     for attempt in range(3):
         try:
             return _post_chat(body, timeout)
-        except GitHubModelsError as e:
+        except AIProviderError as e:
             if e.status == 429 and attempt < 2:
                 wait = e.retry_after if e.retry_after is not None else 5 * (attempt + 1)
                 if wait > 60:
-                    raise          # long/daily limit — pointless to sleep on it
+                    raise
                 time.sleep(wait)
                 continue
             msg = str(e).lower()
-            # Some deployments reject specific params — retry once, stripped down.
+            # Some endpoints reject specific params — retry once, stripped down.
             param_err = "400" in msg and any(
                 k in msg for k in (
                     "temperature", "top_p", "max_tokens", "max_completion_tokens",
@@ -202,14 +322,38 @@ def chat_completion(
             return _post_chat(minimal, timeout)
 
 
+# ── Public interface ──────────────────────────────────────────────────────────
+
+def chat_completion(
+    messages,
+    model=None,
+    temperature=0.3,
+    max_tokens=2000,
+    json_object=False,
+    timeout=60,
+):
+    """Send a chat-style exchange and return the assistant's message text.
+
+    `temperature` and `max_tokens` apply to the OpenAI-compatible provider only;
+    the Copilot SDK exposes no equivalent and ignores them."""
+    model = model or DEFAULT_MODEL
+    if PROVIDER == "copilot":
+        return _copilot.ask(_flatten(messages, json_object),
+                            _model_for_copilot(model), timeout)
+    return _chat_openai(messages, model, temperature, max_tokens, json_object, timeout)
+
+
 def health():
-    """Quick check used by /api/life/ai/health so the token can be verified on
-    the Surface without running a full generation."""
-    token = resolve_token(force=True)
-    if not token:
-        return {"available": False, "model": DEFAULT_MODEL, "error": "No GitHub token found"}
+    """Verify the provider actually answers. Used by GET /api/life/ai/health so
+    the setup can be checked on the server without running a full generation."""
+    model = _model_for_copilot(DEFAULT_MODEL) if PROVIDER == "copilot" else DEFAULT_MODEL
+    info = {"provider": PROVIDER, "model": model}
     try:
-        sample = chat_completion([{"role": "user", "content": "ping"}], max_tokens=5, timeout=30)
-        return {"available": True, "model": DEFAULT_MODEL, "sample": sample[:40]}
-    except GitHubModelsError as e:
-        return {"available": False, "model": DEFAULT_MODEL, "error": str(e)}
+        sample = chat_completion(
+            [{"role": "user", "content": "Reply with the single word: ok"}],
+            max_tokens=5, timeout=60)
+        return {**info, "available": True, "sample": (sample or "")[:40]}
+    except AIProviderError as e:
+        return {**info, "available": False, "error": str(e)}
+    except Exception as e:
+        return {**info, "available": False, "error": f"{e.__class__.__name__}: {e}"}

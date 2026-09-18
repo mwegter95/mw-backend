@@ -19,7 +19,15 @@ open3d>=0.18
 trimesh>=4.4
 pygltflib>=1.16
 scipy>=1.13
-# Life Dashboard — Google Calendar integration (+ AI smart reminders via GitHub Models)
+# Life Dashboard — AI smart reminders.
+# GitHub Models was retired 2026-07-30; the engine now runs on the official
+# GitHub Copilot SDK (covered by any Copilot plan, incl. Copilot Free).
+# Needs Python 3.11+ and a Copilot CLI runtime:
+#   python -m copilot download-runtime
+# Set LIFE_AI_PROVIDER=openai instead to use any OpenAI-compatible endpoint,
+# in which case this dependency is unused.
+github-copilot-sdk>=1.0
+# Life Dashboard — Google Calendar integration
 google-auth>=2.30
 google-auth-oauthlib>=1.2
 google-api-python-client>=2.140

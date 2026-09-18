@@ -7,8 +7,9 @@ holiday planning, and real deadlines. Generation runs on connect and then daily
 via the in-process scheduler.
 
 ## Files
-- `gh_models.py` — GitHub Models client: token resolution, chat call, model-specific
-  request handling, and JSON/transport fallback behavior.
+- `gh_models.py` — AI client (name kept for continuity). GitHub Models was retired
+  2026-07-30; this now talks to the GitHub Copilot SDK by default, with an
+  OpenAI-compatible HTTP path as an escape hatch. See "AI provider" below.
 - `life_gcal.py` — Google OAuth and event listing; delegates task generation to
   `life_smart`.
 - `life_smart.py` — smart-tasking engine: composes compact prompt, calls model,
@@ -66,6 +67,58 @@ overflow. Keep the markdown skills and compact prompt builder in sync.
 - `GET  /api/life/gcal/events?days=90` — normalized upcoming events.
 - `POST /api/life/smart-tasks/generate` — run generation now.
 
+## AI provider
+
+**GitHub Models was fully retired on July 30, 2026** — playground, catalog and
+inference API all gone. Calls return `410 github_models_retirement_brownout`;
+the word "brownout" is misleading, nothing comes back. Anything still setting
+`GITHUB_MODELS_TOKEN` / `GITHUB_MODELS_API` / a publisher-prefixed
+`LIFE_AI_MODEL` like `openai/gpt-4o-mini` is configured for a dead service.
+
+`gh_models.py` is now provider-agnostic, selected with `LIFE_AI_PROVIDER`:
+
+### `copilot` (default)
+
+The official **GitHub Copilot SDK**, GA since June 2026 and covered by any
+Copilot plan including Copilot Free. It drives the Copilot CLI runtime, which is
+what makes it a supported path — unlike the reverse-engineered
+`api.githubcopilot.com` proxies floating around, which risk your Copilot access.
+
+Server setup:
+
+```
+pip install github-copilot-sdk        # Python 3.11+
+python -m copilot download-runtime    # or have an authenticated `copilot` on PATH
+copilot --version                     # sanity check
+```
+
+The CLI must be signed in to a GitHub account with Copilot. Leave
+`LIFE_AI_GITHUB_TOKEN` unset and the SDK uses that logged-in identity — the
+normal arrangement. Set it only if the server needs a different account.
+
+Caveats worth knowing:
+
+- **No JSON mode.** The Models API had `response_format: {"type":"json_object"}`;
+  the SDK has no equivalent, so `gh_models` appends an explicit
+  "raw JSON object only" instruction and `life_smart._parse_json` still strips
+  code fences and does a repair round-trip. Expect slightly more repair retries.
+- **No temperature / max_tokens.** Those arguments are accepted and ignored for
+  this provider.
+- **Startup cost.** Creating the client spawns the CLI runtime, so
+  `gh_models` starts it once, lazily, on a dedicated event-loop thread and
+  reuses it for the process lifetime. The first generation after a restart is
+  slower than the rest.
+
+### `openai`
+
+Any OpenAI-compatible `/chat/completions` endpoint — OpenAI, Groq, OpenRouter,
+Azure Foundry, a local Ollama. Set `LIFE_AI_PROVIDER=openai`,
+`LIFE_AI_API_BASE`, `LIFE_AI_API_KEY` and `LIFE_AI_MODEL`. This path keeps JSON
+mode, the 429/Retry-After handling and the reduced-parameter retry.
+
+Either way, check it with `GET /api/life/ai/health`, which reports the provider,
+the resolved model, and a one-word sample response.
+
 ## Environment variables
 `start.sh` auto-loads `mw-backend/.env`, so add these there:
 
@@ -73,15 +126,28 @@ overflow. Keep the markdown skills and compact prompt builder in sync.
 GOOGLE_CLIENT_ID=xxxxxxxx.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=xxxxxxxx
 GOOGLE_REDIRECT_URI=https://api.michaelwegter.com/api/life/gcal/callback
-GITHUB_MODELS_TOKEN=ghp_or_fine_grained_pat_with_models_access
-LIFE_AI_MODEL=openai/gpt-4o-mini
-GITHUB_MODELS_API=https://models.github.ai/inference
+
+# AI provider — copilot (default) or openai
+LIFE_AI_PROVIDER=copilot
+LIFE_AI_MODEL=auto
+# LIFE_AI_GITHUB_TOKEN=      # optional; blank = use the Copilot CLI's login
+
+# Only for LIFE_AI_PROVIDER=openai:
+# LIFE_AI_API_BASE=https://api.groq.com/openai/v1
+# LIFE_AI_API_KEY=xxxxxxxx
+
 LIFE_DASHBOARD_URL=https://mwegter95.github.io/life-dashboard/
 LIFE_SCHEDULER=1
 ```
 
-Use whichever model your token can call reliably. Prefer a model that returns
-strict JSON consistently for this small classification task.
+**Delete any `GITHUB_MODELS_TOKEN` / `GITHUB_MODELS_API` lines** — they point at
+a retired service. A leftover publisher-prefixed `LIFE_AI_MODEL` is handled
+defensively (it logs a warning and falls back to `auto`) but should be fixed.
+
+`auto` lets Copilot route to whatever it considers current, which is the right
+default for a small classification job and survives catalog churn. Pin a
+specific model (`gpt-5`, `claude-sonnet-4.5`, …) if you want predictable
+latency.
 
 ## Google Cloud setup
 1. Google Cloud Console → create/select project.
@@ -90,12 +156,6 @@ strict JSON consistently for this small classification task.
 4. Credentials → Create OAuth client ID → Web application.
 5. Authorized redirect URI: `https://api.michaelwegter.com/api/life/gcal/callback`.
 6. Copy Client ID and Secret into `.env`.
-
-## GitHub token
-The GitHub Models API needs a token with Models access. Put it in
-`GITHUB_MODELS_TOKEN`. Use a fine-grained PAT with Models read access or a classic
-PAT that works for your account. Verify callable model ids with the GitHub Models
-catalog endpoint, then set `LIFE_AI_MODEL` to a supported id.
 
 ## Deploy
 ```

@@ -4,7 +4,7 @@ Google Calendar integration + AI smart-task generation for the Life Dashboard.
 Kept separate from server.py so the Google client libraries stay isolated (and
 so server.py still imports if they're absent). This module is pure logic:
 OAuth URL building / code exchange, event listing, and turning events into
-smart-reminder dicts via gh_models (GitHub Models). All DB access, refresh-token
+smart-reminder dicts via gh_models (GitHub Copilot SDK). All DB access, refresh-token
 encryption, and Flask wiring live in server.py.
 
 Env:
