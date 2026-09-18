@@ -96,6 +96,27 @@ The CLI must be signed in to a GitHub account with Copilot. Leave
 `LIFE_AI_GITHUB_TOKEN` unset and the SDK uses that logged-in identity — the
 normal arrangement. Set it only if the server needs a different account.
 
+**Which model.** Copilot's catalog is not OpenAI's, and two things surprise people:
+
+- **`gpt-4o-mini` can't be selected.** Copilot still runs GPT-4o and GPT-4o mini
+  internally to power background features, but neither appears in the model
+  picker or the API. Asking for one fails.
+- **Copilot Free and Student get auto selection only** — no model choice at all.
+
+The default is therefore `gpt-5.4-nano`, the cheapest model Copilot does expose
+($0.20 / $1.25 per 1M tokens in / out as of 2026-09; MAI-Code-1.1-Flash and
+GPT-5.6 Luna are within a rounding error of it). For this workload — a handful of
+short event titles classified once a day — that lands around **five cents a
+month**, so model choice matters far less than it feels like it should. Pin
+something else with `LIFE_AI_MODEL` if you want better phrasing.
+
+If Copilot refuses the pinned model, for either reason above, `gh_models` logs a
+warning and falls back to `auto` for the rest of the process rather than failing
+the generation. `/api/life/ai/health` reports when that has happened.
+
+List what your account can actually select with the Copilot CLI (`/model` inside
+an interactive session) — the catalog moves fast, and these ids will drift.
+
 Caveats worth knowing:
 
 - **No JSON mode.** The Models API had `response_format: {"type":"json_object"}`;
@@ -129,7 +150,7 @@ GOOGLE_REDIRECT_URI=https://api.michaelwegter.com/api/life/gcal/callback
 
 # AI provider — copilot (default) or openai
 LIFE_AI_PROVIDER=copilot
-LIFE_AI_MODEL=auto
+LIFE_AI_MODEL=gpt-5.4-nano
 # LIFE_AI_GITHUB_TOKEN=      # optional; blank = use the Copilot CLI's login
 
 # Only for LIFE_AI_PROVIDER=openai:
@@ -144,10 +165,9 @@ LIFE_SCHEDULER=1
 a retired service. A leftover publisher-prefixed `LIFE_AI_MODEL` is handled
 defensively (it logs a warning and falls back to `auto`) but should be fixed.
 
-`auto` lets Copilot route to whatever it considers current, which is the right
-default for a small classification job and survives catalog churn. Pin a
-specific model (`gpt-5`, `claude-sonnet-4.5`, …) if you want predictable
-latency.
+`gpt-5.4-nano` is the cheapest selectable Copilot model; `auto` lets Copilot
+route for you and is the only option on Free/Student plans. Note that
+`gpt-4o-mini` is **not** selectable — see "Which model" above.
 
 ## Google Cloud setup
 1. Google Cloud Console → create/select project.

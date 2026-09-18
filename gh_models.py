@@ -49,10 +49,18 @@ log = logging.getLogger(__name__)
 
 PROVIDER = (os.environ.get("LIFE_AI_PROVIDER") or "copilot").strip().lower()
 
-# "auto" lets Copilot route to whatever it considers current — the safest default
-# for a tiny classification job, and it survives model-catalog churn without a
-# code change. Pin it if you want predictable latency.
-_DEFAULT_MODEL_BY_PROVIDER = {"copilot": "auto", "openai": "gpt-4o-mini"}
+# Cheapest selectable model in Copilot's catalog as of 2026-09 ($0.20 / $1.25 per
+# 1M tokens in / out), which is what this job wants: it classifies a handful of
+# short calendar-event titles once a day. Note that gpt-4o-mini is NOT an option
+# here — Copilot runs it only as an internal utility model and won't let you
+# select it — and that Copilot Free and Student plans get auto selection only.
+# Both cases are handled by the fallback in _CopilotRuntime.ask.
+COPILOT_DEFAULT_MODEL = "gpt-5.4-nano"
+_DEFAULT_MODEL_BY_PROVIDER = {"copilot": COPILOT_DEFAULT_MODEL, "openai": "gpt-4o-mini"}
+
+# Ids that can't be selected in Copilot: retired GitHub Models spellings, and
+# OpenAI models Copilot only uses internally. Asking for one fails, so translate.
+_COPILOT_UNSELECTABLE = {"gpt-4o-mini", "gpt-4o", "o1-mini", "o3-mini", "gpt-4", "gpt-4-turbo"}
 DEFAULT_MODEL = (
     os.environ.get("LIFE_AI_MODEL")
     or _DEFAULT_MODEL_BY_PROVIDER.get(PROVIDER, "auto")
@@ -81,17 +89,28 @@ GitHubModelsError = AIProviderError
 
 
 def _model_for_copilot(model):
-    """GitHub Models used publisher-prefixed ids ("openai/gpt-4o-mini"); Copilot
-    does not. A .env left over from the Models era would otherwise fail on every
-    call with an opaque error, so translate it and say so once."""
+    """Normalise a configured model id to something Copilot will actually take.
+
+    GitHub Models used publisher-prefixed ids ("openai/gpt-4o-mini"); Copilot
+    does not. And gpt-4o/gpt-4o-mini are not selectable in Copilot at all — they
+    power background features internally. Either would otherwise fail on every
+    call with an opaque error, so translate and say so."""
     m = (model or "").strip()
+    if not m:
+        return COPILOT_DEFAULT_MODEL
+    bare = m.split("/", 1)[1] if "/" in m else m
+    if bare.lower() in _COPILOT_UNSELECTABLE:
+        log.warning(
+            "[life-ai] LIFE_AI_MODEL=%r isn't selectable in Copilot (it's a "
+            "retired GitHub Models id or an internal-only model). Using %s "
+            "instead — the cheapest model Copilot does expose.",
+            m, COPILOT_DEFAULT_MODEL)
+        return COPILOT_DEFAULT_MODEL
     if "/" in m:
         log.warning(
-            "[life-ai] LIFE_AI_MODEL=%r is a retired GitHub Models id; Copilot "
-            "doesn't use publisher prefixes. Falling back to 'auto' — set "
-            "LIFE_AI_MODEL to a Copilot model (e.g. gpt-5) to pin it.", m)
-        return "auto"
-    return m or "auto"
+            "[life-ai] LIFE_AI_MODEL=%r carries a publisher prefix; Copilot "
+            "doesn't use those. Trying %r.", m, bare)
+    return bare
 
 
 # ── Copilot SDK backend ───────────────────────────────────────────────────────
@@ -112,6 +131,9 @@ class _CopilotRuntime:
         self._loop = None
         self._thread = None
         self._client = None
+        # Set once a pinned model is refused, so the fallback is paid for once
+        # per process instead of on every call.
+        self._forced_auto = False
 
     def _ensure_loop(self):
         if self._loop is not None:
@@ -174,7 +196,7 @@ class _CopilotRuntime:
             resp = await session.send_and_wait(prompt)
             return _response_text(resp)
 
-    def ask(self, prompt, model, timeout):
+    def _ask_sync(self, prompt, model, timeout):
         self._get_client()
         fut = asyncio.run_coroutine_threadsafe(self._ask(prompt, model), self._loop)
         try:
@@ -190,6 +212,25 @@ class _CopilotRuntime:
             raise AIProviderError(
                 f"Copilot request failed: {e.__class__.__name__}: {e}") from e
 
+    def ask(self, prompt, model, timeout):
+        if self._forced_auto:
+            model = "auto"
+        try:
+            return self._ask_sync(prompt, model, timeout)
+        except AIProviderError as e:
+            # Two plausible reasons a pinned model is refused: the id is wrong
+            # (Copilot's catalog moves fast), or this is a Copilot Free/Student
+            # plan, which only gets auto selection. Neither is worth failing the
+            # whole generation over when "auto" will work.
+            if model != "auto" and _is_model_rejection(e):
+                log.warning(
+                    "[life-ai] Copilot wouldn't accept model %r (%s). Falling "
+                    "back to auto selection for the rest of this process.",
+                    model, str(e)[:160])
+                self._forced_auto = True
+                return self._ask_sync(prompt, "auto", timeout)
+            raise
+
     def reset(self):
         """Drop the cached client so the next call starts a fresh runtime."""
         with self._lock:
@@ -199,6 +240,21 @@ class _CopilotRuntime:
                 asyncio.run_coroutine_threadsafe(client.stop(), self._loop).result(timeout=20)
             except Exception:
                 pass
+
+
+_MODEL_REJECTION_HINTS = (
+    "model", "not found", "unknown", "unavailable", "not supported",
+    "unsupported", "invalid", "no access", "not entitled", "not enabled",
+)
+
+
+def _is_model_rejection(exc):
+    """Does this error read like 'that model isn't available to you'?
+
+    Deliberately broad. Guessing wrong costs one extra request on auto; guessing
+    too narrowly costs the whole night's generation."""
+    msg = str(exc).lower()
+    return "model" in msg and any(h in msg for h in _MODEL_REJECTION_HINTS if h != "model")
 
 
 _copilot = _CopilotRuntime()
@@ -352,6 +408,11 @@ def health():
         sample = chat_completion(
             [{"role": "user", "content": "Reply with the single word: ok"}],
             max_tokens=5, timeout=60)
+        if PROVIDER == "copilot" and _copilot._forced_auto:
+            # Say so plainly — otherwise a silent downgrade to auto looks like
+            # the pinned model is working.
+            info["model"] = "auto"
+            info["note"] = f"{model} was refused; using auto selection"
         return {**info, "available": True, "sample": (sample or "")[:40]}
     except AIProviderError as e:
         return {**info, "available": False, "error": str(e)}
