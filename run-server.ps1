@@ -3,7 +3,10 @@
 .SYNOPSIS
     Persistent mw-backend launcher for Windows.
     - Starts Flask server + Cloudflare named tunnel
-    - Prevents sleep and hibernate while running
+    - Prevents SYSTEM sleep and hibernate while running (ES_SYSTEM_REQUIRED).
+      It does NOT set ES_DISPLAY_REQUIRED, so the display should still turn off
+      on its idle timer. If the screen is staying lit, run `powercfg /requests`
+      in an elevated prompt — something else is holding a DISPLAY request.
     - Blocks Windows shutdown/restart until stopped (Windows will prompt first)
     - Auto-restarts either process if it crashes
     - Safe to run from VS Code -- detects and relaunches in a standalone window
@@ -156,6 +159,18 @@ if (-not (Test-Path $DataDir)) { New-Item -ItemType Directory -Path $DataDir -Fo
 
 $script:managed      = @{}   # name -> Process (for cleanup)
 $script:svcLastStart = @{}   # name -> last launch time (debounce)
+$script:svcFails     = @{}   # name -> consecutive failures to come up
+$script:svcParked    = @{}   # name -> $true once we stop retrying (logged once)
+
+# A service that can never bind its port used to be relaunched every 20s
+# forever, logging a cheerful "started" line each time, because Start-Process
+# succeeding was treated as the service working. For a `docker run` the thing
+# that "started" is the docker CLI, which exits immediately whether or not the
+# container came up. Back off instead, and give up out loud.
+$SVC_RETRY_BASE_SECONDS = 20
+$SVC_RETRY_MAX_SECONDS  = 600
+$SVC_MAX_FAILS          = 6
+$SVC_PORT_GRACE_SECONDS = 8
 
 function Read-Services {
     if (-not (Test-Path $ServicesFile)) { return @() }
@@ -277,21 +292,79 @@ function Start-ManagedService($svc) {
              -WorkingDirectory $cwd -WindowStyle Hidden -PassThru -ErrorAction Stop `
              -RedirectStandardOutput $out -RedirectStandardError $errl
         $script:managed[$name] = $p
-        Write-Host "$(Get-Date -f 'HH:mm:ss')  service '$name' started (PID $($p.Id)) -> port $svcPort" -ForegroundColor Green
+
+        # Did it actually come up? Launching is not the same as listening, and
+        # for a containerised service the launcher exits either way. Wait for
+        # the port before claiming success.
+        $up = $false
+        if ($svcPort -gt 0) {
+            for ($i = 0; $i -lt $SVC_PORT_GRACE_SECONDS; $i++) {
+                Start-Sleep -Seconds 1
+                if (Test-Port $svcPort) { $up = $true; break }
+            }
+        } else {
+            $up = -not $p.HasExited
+        }
+
+        if ($up) {
+            $script:svcFails[$name] = 0
+            Write-Host "$(Get-Date -f 'HH:mm:ss')  service '$name' started (PID $($p.Id)) -> port $svcPort" -ForegroundColor Green
+        } else {
+            $script:svcFails[$name] = [int]$script:svcFails[$name] + 1
+            $n = $script:svcFails[$name]
+            $tail = ''
+            foreach ($logPath in @($errl, $out)) {
+                if (Test-Path $logPath) {
+                    $lines = @(Get-Content $logPath -Tail 3 -ErrorAction SilentlyContinue |
+                               Where-Object { $_ -and $_.Trim() })
+                    if ($lines.Count) { $tail = ($lines -join ' | '); break }
+                }
+            }
+            Write-Host "$(Get-Date -f 'HH:mm:ss')  service '$name' did not reach port $svcPort (attempt $n/$SVC_MAX_FAILS)" -ForegroundColor Yellow
+            if ($tail) { Write-Host "      last output: $tail" -ForegroundColor DarkGray }
+        }
     } catch {
+        $script:svcFails[$name] = [int]$script:svcFails[$name] + 1
         Write-Host "$(Get-Date -f 'HH:mm:ss')  service '$name' failed to start: $($_.Exception.Message)" -ForegroundColor Red
     } finally {
         $env:PORT = $savedPort; $env:NEST_PORT = $savedNest
     }
 }
 
-# Start anything in the manifest that is not already listening (debounced 20s).
+# Start anything in the manifest that is not already listening, backing off
+# after each failure and parking the service once it's clearly not coming up.
 function Ensure-Services {
     foreach ($svc in Read-Services) {
         if (-not $svc.name -or -not $svc.port) { continue }
-        if (Test-Port $svc.port) { continue }
-        $last = $script:svcLastStart[[string]$svc.name]
-        if ($last -and ((Get-Date) - $last).TotalSeconds -lt 20) { continue }
+        $name = [string]$svc.name
+
+        if (Test-Port $svc.port) {
+            # Recovered on its own (or someone started it by hand) — un-park it
+            # so a later crash gets a fresh set of retries.
+            if ($script:svcParked[$name]) {
+                Write-Host "$(Get-Date -f 'HH:mm:ss')  service '$name' is up again; resuming supervision" -ForegroundColor Green
+            }
+            $script:svcFails[$name]  = 0
+            $script:svcParked[$name] = $false
+            continue
+        }
+
+        if ($script:svcParked[$name]) { continue }   # already gave up, said so once
+
+        $fails = [int]$script:svcFails[$name]
+        if ($fails -ge $SVC_MAX_FAILS) {
+            $script:svcParked[$name] = $true
+            Write-Host "$(Get-Date -f 'HH:mm:ss')  service '$name' gave up after $fails attempts — not retrying." -ForegroundColor Red
+            Write-Host "      Check $DataDir\$name.err.log, then remove it from $ServicesFile or fix it and restart this script." -ForegroundColor DarkGray
+            continue
+        }
+
+        # 20s, 40s, 80s ... capped. Quiet enough to read the log, quick enough
+        # to recover from a genuine blip.
+        $wait = [math]::Min($SVC_RETRY_BASE_SECONDS * [math]::Pow(2, $fails), $SVC_RETRY_MAX_SECONDS)
+        $last = $script:svcLastStart[$name]
+        if ($last -and ((Get-Date) - $last).TotalSeconds -lt $wait) { continue }
+
         Start-ManagedService $svc
     }
 }
