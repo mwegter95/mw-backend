@@ -361,6 +361,14 @@ app.register_blueprint(orschell_ecommerce_bp)
 from bowling_blueprint import bowling_bp
 app.register_blueprint(bowling_bp)
 
+# ─── PC gaming activity dashboard ────────────────────────────
+# Tracks play sessions published by the agent on the gaming PC and serves the
+# owner-only dashboard at michaelwegter.com/apps/gaming-dashboard. Needs
+# GAMING_AGENT_SECRET in .env for the agent endpoints; see the setup guide in
+# pc-gaming-activity-dashboard/docs/SETUP.md.
+from gaming_blueprint import gaming_bp
+app.register_blueprint(gaming_bp)
+
 from yard_seed import seed_for_owner as _yard_seed_for_owner
 from yard_seed_v2 import seed_v2_for_owner as _yard_seed_v2_for_owner
 
