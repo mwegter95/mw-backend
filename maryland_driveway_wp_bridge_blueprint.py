@@ -5,9 +5,14 @@ running at 127.0.0.1:8081.
 
 Registered in server.py as mdr_wp_bridge_bp.
 """
+import logging
 import urllib.request
 import urllib.error
 from flask import Blueprint, request, Response
+
+from bridge_offline import offline_response
+
+log = logging.getLogger("mw-backend")
 
 PREFIX   = "demos/maryland-driveway-restore"
 UPSTREAM = "http://127.0.0.1:8081"
@@ -59,10 +64,10 @@ def _proxy(path):
         raw = e.headers.items() if e.headers else []
         headers = [(k, v) for k, v in raw if k.lower() not in _HOP]
     except Exception as e:
-        return Response(
-            f"MDR bridge upstream error: {e}",
-            status=502,
-            mimetype="text/plain"
-        )
+        # The upstream service isn't running. These URLs are linked from the
+        # work-samples page, so answer with a presentable page rather than a
+        # raw ConnectionRefusedError.
+        log.warning("[bridge] Maryland Driveway Restore upstream unreachable: %s", e)
+        return offline_response("Maryland Driveway Restore")
 
     return Response(body, status=status, headers=headers)

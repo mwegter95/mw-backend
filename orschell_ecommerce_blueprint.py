@@ -3,9 +3,14 @@ Bridge blueprint — Orschell E-Commerce API demo.
 Proxies /demos/orschell-excavating-e-commerce-full/api/* to the
 orschell-ecommerce-api Node.js service on 127.0.0.1:3742.
 """
+import logging
 import urllib.request
 import urllib.error
 from flask import Blueprint, request, Response
+
+from bridge_offline import offline_response
+
+log = logging.getLogger("mw-backend")
 
 PREFIX   = "demos/orschell-excavating-e-commerce-full/api"
 UPSTREAM = "http://127.0.0.1:3742"
@@ -44,6 +49,10 @@ def _proxy(path):
         raw = e.headers.items() if e.headers else []
         headers = [(k, v) for k, v in raw if k.lower() not in _HOP]
     except Exception as e:
-        return Response(f"bridge upstream error: {e}", status=502, mimetype="text/plain")
+        # The upstream service isn't running. These URLs are linked from the
+        # work-samples page, so answer with a presentable page rather than a
+        # raw ConnectionRefusedError.
+        log.warning("[bridge] Orschell Excavating upstream unreachable: %s", e)
+        return offline_response("Orschell Excavating")
 
     return Response(body, status=status, headers=headers)

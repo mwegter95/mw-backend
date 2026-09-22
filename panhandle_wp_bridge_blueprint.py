@@ -5,9 +5,14 @@ running at 127.0.0.1:8090.
 
 Registered in server.py as panhandle_wp_bridge_bp.
 """
+import logging
 import urllib.request
 import urllib.error
 from flask import Blueprint, request, Response
+
+from bridge_offline import offline_response
+
+log = logging.getLogger("mw-backend")
 
 PREFIX   = "demos/panhandle-garage-door-company"
 UPSTREAM = "http://127.0.0.1:8090"
@@ -59,10 +64,10 @@ def _proxy(path):
         raw = e.headers.items() if e.headers else []
         headers = [(k, v) for k, v in raw if k.lower() not in _HOP]
     except Exception as e:
-        return Response(
-            f"Panhandle bridge upstream error: {e}",
-            status=502,
-            mimetype="text/plain"
-        )
+        # The upstream service isn't running. These URLs are linked from the
+        # work-samples page, so answer with a presentable page rather than a
+        # raw ConnectionRefusedError.
+        log.warning("[bridge] Panhandle Garage Door Company upstream unreachable: %s", e)
+        return offline_response("Panhandle Garage Door Company")
 
     return Response(body, status=status, headers=headers)

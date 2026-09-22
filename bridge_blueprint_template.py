@@ -25,9 +25,14 @@ NOTES
   - CORS is applied at the app level in server.py, so it covers these routes.
   - Stdlib only (urllib); no new dependencies.
 """
+import logging
 import urllib.request
 import urllib.error
 from flask import Blueprint, request, Response
+
+from bridge_offline import offline_response
+
+log = logging.getLogger("mw-backend")
 
 # ---- configure these two -------------------------------------------------
 PREFIX = "myfeature"                 # public path  -> /myfeature/...
@@ -69,6 +74,10 @@ def _proxy(path):
         raw = e.headers.items() if e.headers else []
         headers = [(k, v) for k, v in raw if k.lower() not in _HOP]
     except Exception as e:
-        return Response(f"bridge upstream error: {e}", status=502, mimetype="text/plain")
+        # The upstream service isn't running. These URLs are linked from the
+        # work-samples page, so answer with a presentable page rather than a
+        # raw ConnectionRefusedError.
+        log.warning("[bridge] DEMO_NAME upstream unreachable: %s", e)
+        return offline_response("DEMO_NAME")
 
     return Response(body, status=status, headers=headers)
