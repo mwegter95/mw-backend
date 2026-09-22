@@ -311,3 +311,18 @@ docker info --format "{{.ServerVersion}}"   # engine reachable?
 docker ps -a                                 # containers present? running?
 docker logs --tail 40 panhandle-wp           # why did it not answer?
 ```
+
+### Changing run-server.ps1 itself
+
+PowerShell loads a script once. Auto-deploy pulling a new `run-server.ps1` and
+restarting Flask leaves the **old launcher** running — so any change to the
+supervisor appears to do nothing, silently.
+
+It now detects that `run-server.ps1` was among the changed files, parse-checks
+the new copy, stops its children and relaunches itself in a fresh window. If the
+new copy has a syntax error it stays on the running version and says so rather
+than handing off to a script that won't start.
+
+The startup banner lists every registered service and whether its port is
+listening, so "no output" is never ambiguous — a silent supervisor with
+everything already up looks identical to one that isn't running.

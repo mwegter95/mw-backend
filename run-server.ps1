@@ -599,6 +599,25 @@ if (@(Read-Services | Where-Object { [string]$_.type -eq 'container' }).Count -g
 }
 Ensure-Services
 
+# Say what is registered and where each one stands. The supervisor is silent
+# when everything is already listening, which is correct but indistinguishable
+# from it not running at all — as happened when a pulled launcher sat inert
+# because PowerShell had the old script in memory.
+$svcAll = @(Read-Services)
+if ($svcAll.Count -eq 0) {
+    Write-Host "  Managed services:         none registered" -ForegroundColor DarkGray
+} else {
+    Write-Host "  Managed services:" -ForegroundColor Green
+    foreach ($s in $svcAll) {
+        $kind = if ([string]$s.type -eq 'container') { 'container' } else { 'process' }
+        if (Test-Port $s.port) {
+            Write-Host ("    - {0,-24} {1,-10} port {2,-6} listening" -f $s.name, $kind, $s.port) -ForegroundColor Green
+        } else {
+            Write-Host ("    - {0,-24} {1,-10} port {2,-6} not up yet" -f $s.name, $kind, $s.port) -ForegroundColor Yellow
+        }
+    }
+}
+
 Write-Host ""
 Write-Host "✓ Running. Press Ctrl+C to stop cleanly." -ForegroundColor Green
 Write-Host "  Health: https://api.michaelwegter.com/health" -ForegroundColor DarkGray
@@ -629,6 +648,34 @@ function Invoke-AutoDeploy {
             Sync-ServiceManifest
             if ($changed -match 'services/orschell-ecommerce|services\.manifest\.json') {
                 Build-OrschellService
+            }
+
+            # A change to THIS file needs more than a Flask restart. PowerShell
+            # loads the script once; everything below is the version that was on
+            # disk when the window opened, so pulling a new launcher and
+            # restarting Flask leaves the old supervisor running and the new
+            # code inert — silently, which is worse than failing.
+            if ($changed -match 'run-server\.ps1') {
+                # Don't hand the baton to a script that won't parse; a syntax
+                # error here would take the server down with nothing left
+                # running to notice.
+                $parseErrors = $null
+                [void][System.Management.Automation.Language.Parser]::ParseFile(
+                    $PSCommandPath, [ref]$null, [ref]$parseErrors)
+                if ($parseErrors -and $parseErrors.Count -gt 0) {
+                    Write-Host "  run-server.ps1 changed but has $($parseErrors.Count) syntax error(s) — staying on the running version." -ForegroundColor Red
+                    foreach ($pe in $parseErrors | Select-Object -First 3) {
+                        Write-Host "      line $($pe.Extent.StartLineNumber): $($pe.Message)" -ForegroundColor DarkGray
+                    }
+                } else {
+                    Write-Host "  run-server.ps1 changed -- relaunching the launcher itself..." -ForegroundColor Cyan
+                    Stop-All
+                    Start-Process powershell -ArgumentList @(
+                        '-NoExit', '-ExecutionPolicy', 'Bypass',
+                        '-File', "`"$PSCommandPath`"", '-Relaunched'
+                    )
+                    exit 0
+                }
             }
             Write-Host "  Restarting server in this window (window stays open)..." -ForegroundColor Yellow
             if ($script:flaskProc -and -not $script:flaskProc.HasExited) { try { $script:flaskProc.Kill() } catch {} }
