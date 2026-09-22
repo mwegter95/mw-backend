@@ -254,10 +254,12 @@ When you're ready, add SEO-specific routes to `mw-backend/server.py` (reports, s
 Two work-sample demos are WordPress running in Docker on the Surface, reverse-
 proxied by Flask:
 
-| Demo | Container | Port | Bridge |
+| Demo | Containers (in start order) | Port | Bridge |
 |---|---|---|---|
-| Panhandle Garage Door Company | `panhandle-wp` | 8090 | `panhandle_wp_bridge_blueprint.py` |
-| Maryland Driveway Restore | `mdr-wordpress-docker` | 8081 | `maryland_driveway_wp_bridge_blueprint.py` |
+| Panhandle Garage Door Company | `panhandle-mysql` → `panhandle-wp` | 8090 | `panhandle_wp_bridge_blueprint.py` |
+| Maryland Driveway Restore | `mdr-mysql` → `mdr-wordpress-docker` | 8081 | `maryland_driveway_wp_bridge_blueprint.py` |
+
+Each is a two-container stack: `mysql:8.0` plus the WordPress site.
 
 They are registered in `services.manifest.json` with `"type": "container"`, which
 `run-server.ps1` handles differently from a process service: instead of
@@ -281,8 +283,21 @@ and in Docker Desktop → Settings → General, enable **Start Docker Desktop wh
 you sign in**. Without that, nothing has started the engine before
 `run-server.ps1` runs, and every boot depends on the script's own retry loop.
 
-If a demo's site and database are separate containers, give the service
-`"containers": ["<db>", "<site>"]` instead of `"container"`, in dependency order.
+**Order matters, and so does readiness.** A service lists
+`"containers": ["<db>", "<site>"]` in dependency order. Every container but the
+last is treated as a dependency: it is started, then *waited on* before the next
+one starts. `docker start` returns when a container is running, which is not the
+same as ready — MySQL 8 spends a while on crash recovery before it listens, and
+WordPress started against a database that isn't accepting connections yet either
+exits or serves "Error establishing a database connection" until something
+restarts it.
+
+Readiness is decided in this order: the container's own `HEALTHCHECK` if it
+declares one; otherwise `mysqladmin ping` inside the container (an *Access
+denied* reply still proves it is listening, which is all we need to know); and
+otherwise simply being `running`. If a dependency never becomes ready, the site
+container is deliberately **not** started — a stack that fails cleanly is easier
+to diagnose than one that half-starts.
 
 **When a demo is down**, the bridges return a styled "temporarily offline" page
 (`bridge_offline.py`) rather than a raw `ConnectionRefusedError`, so the

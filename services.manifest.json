@@ -9,15 +9,15 @@
   {
     "name": "panhandle-wp",
     "type": "container",
-    "container": "panhandle-wp",
+    "containers": ["panhandle-mysql", "panhandle-wp"],
     "port": 8090,
-    "note": "WordPress demo proxied by panhandle_wp_bridge_blueprint.py. If the site has a separate database container, replace \"container\" with \"containers\": [\"panhandle-db\", \"panhandle-wp\"] in dependency order."
+    "note": "WordPress demo proxied by panhandle_wp_bridge_blueprint.py. Order matters: every container but the last is treated as a dependency and is waited on before the next starts."
   },
   {
     "name": "mdr-wordpress-docker",
     "type": "container",
-    "container": "mdr-wordpress-docker",
+    "containers": ["mdr-mysql", "mdr-wordpress-docker"],
     "port": 8081,
-    "note": "WordPress demo proxied by maryland_driveway_wp_bridge_blueprint.py. Same note about a database container applies."
+    "note": "WordPress demo proxied by maryland_driveway_wp_bridge_blueprint.py. mysql:8.0 is slow to accept connections from cold, so it is started and waited on first."
   }
 ]

@@ -406,6 +406,41 @@ function Start-ManagedService($svc) {
     }
 }
 
+# `docker start` returns once the container is RUNNING, which is not the same as
+# ready. MySQL 8 spends a while on crash recovery before it listens, and a
+# WordPress container started against a database that isn't accepting
+# connections yet either exits or serves "Error establishing a database
+# connection" until something restarts it. So wait on each dependency.
+function Wait-ContainerReady($c, $timeoutSeconds = 120) {
+    for ($i = 0; $i -lt $timeoutSeconds; $i++) {
+        $state = (& docker inspect -f '{{.State.Status}}' $c 2>$null)
+        if ($LASTEXITCODE -ne 0) { return $false }        # container is gone
+        if ("$state".Trim() -ne 'running') { Start-Sleep -Seconds 1; continue }
+
+        # Prefer the container's own healthcheck when it declares one.
+        $health = (& docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' $c 2>$null)
+        $health = "$health".Trim()
+        if ($health) {
+            if ($health -eq 'healthy')   { return $true }
+            if ($health -eq 'unhealthy') { return $false }
+            Start-Sleep -Seconds 1; continue
+        }
+
+        # No healthcheck declared. Probe for a database; anything else that is
+        # running is taken as ready.
+        $probe = & docker exec $c sh -c 'command -v mysqladmin >/dev/null 2>&1 && mysqladmin ping --silent 2>&1' 2>&1
+        $probeText = "$probe"
+        if ($LASTEXITCODE -eq 0)                   { return $true }   # answered the ping
+        if (-not $probeText.Trim())                { return $true }   # no mysqladmin: not a DB
+        # "Access denied" means it handshook with us — it is listening, which is
+        # all WordPress needs from us here.
+        if ($probeText -match 'Access denied')     { return $true }
+        if ($probeText -match 'exec failed|not found|no such|OCI runtime') { return $true }
+        Start-Sleep -Seconds 1
+    }
+    return $false
+}
+
 # Container-backed services. `docker start` is idempotent, so this is safe to
 # call on an already-running container, and `docker update --restart
 # unless-stopped` means Docker brings it back by itself after a reboot without
@@ -422,6 +457,7 @@ function Start-ContainerService($svc) {
     elseif ($svc.container) { $containers = @([string]$svc.container) }
     else { $containers = @($name) }
 
+    $last = $containers[-1]
     foreach ($c in $containers) {
         $out = & docker start $c 2>&1
         if ($LASTEXITCODE -ne 0) {
@@ -431,6 +467,21 @@ function Start-ContainerService($svc) {
         }
         # Make Docker responsible for keeping it alive across reboots.
         & docker update --restart unless-stopped $c 2>&1 | Out-Null
+
+        # Every container but the last is a dependency (the database). Let it
+        # finish coming up before starting what needs it; the last one's
+        # readiness is the port check below.
+        if ($c -ne $last) {
+            if (Wait-ContainerReady $c) {
+                Write-Host "$(Get-Date -f 'HH:mm:ss')  dependency '$c' ready" -ForegroundColor DarkGray
+            } else {
+                $script:svcFails[$name] = [int]$script:svcFails[$name] + 1
+                Write-Host "$(Get-Date -f 'HH:mm:ss')  dependency '$c' never became ready — not starting '$last' against it" -ForegroundColor Yellow
+                $dlogs = & docker logs --tail 3 $c 2>&1
+                if ($dlogs) { Write-Host "      docker logs ${c}: $($dlogs -join ' | ')" -ForegroundColor DarkGray }
+                return
+            }
+        }
     }
 
     $up = $true
@@ -448,7 +499,7 @@ function Start-ContainerService($svc) {
     } else {
         $script:svcFails[$name] = [int]$script:svcFails[$name] + 1
         $n = $script:svcFails[$name]
-        $logs = & docker logs --tail 3 $containers[-1] 2>&1
+        $logs = & docker logs --tail 3 $last 2>&1
         Write-Host "$(Get-Date -f 'HH:mm:ss')  service '$name' started but port $svcPort never opened (attempt $n/$SVC_MAX_FAILS)" -ForegroundColor Yellow
         if ($logs) { Write-Host "      docker logs: $($logs -join ' | ')" -ForegroundColor DarkGray }
     }
