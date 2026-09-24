@@ -5,5 +5,19 @@
     "args": "dist/index.js",
     "cwd": "services/orschell-ecommerce",
     "port": 3742
+  },
+  {
+    "name": "panhandle-wp",
+    "type": "container",
+    "containers": ["panhandle-mysql", "panhandle-wp"],
+    "port": 8090,
+    "note": "WordPress demo proxied by panhandle_wp_bridge_blueprint.py. Order matters: every container but the last is treated as a dependency and is waited on before the next starts."
+  },
+  {
+    "name": "mdr-wordpress-docker",
+    "type": "container",
+    "containers": ["mdr-mysql", "mdr-wordpress-docker"],
+    "port": 8081,
+    "note": "WordPress demo proxied by maryland_driveway_wp_bridge_blueprint.py. mysql:8.0 is slow to accept connections from cold, so it is started and waited on first."
   }
 ]

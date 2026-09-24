@@ -3,7 +3,10 @@
 .SYNOPSIS
     Persistent mw-backend launcher for Windows.
     - Starts Flask server + Cloudflare named tunnel
-    - Prevents sleep and hibernate while running
+    - Prevents SYSTEM sleep and hibernate while running (ES_SYSTEM_REQUIRED).
+      It does NOT set ES_DISPLAY_REQUIRED, so the display should still turn off
+      on its idle timer. If the screen is staying lit, run `powercfg /requests`
+      in an elevated prompt — something else is holding a DISPLAY request.
     - Blocks Windows shutdown/restart until stopped (Windows will prompt first)
     - Auto-restarts either process if it crashes
     - Safe to run from VS Code -- detects and relaunches in a standalone window
@@ -156,6 +159,96 @@ if (-not (Test-Path $DataDir)) { New-Item -ItemType Directory -Path $DataDir -Fo
 
 $script:managed      = @{}   # name -> Process (for cleanup)
 $script:svcLastStart = @{}   # name -> last launch time (debounce)
+$script:svcFails     = @{}   # name -> consecutive failures to come up
+$script:svcParked    = @{}   # name -> $true once we stop retrying (logged once)
+
+# A service that can never bind its port used to be relaunched every 20s
+# forever, logging a cheerful "started" line each time, because Start-Process
+# succeeding was treated as the service working. For a `docker run` the thing
+# that "started" is the docker CLI, which exits immediately whether or not the
+# container came up. Back off instead, and give up out loud.
+$SVC_RETRY_BASE_SECONDS = 20
+$SVC_RETRY_MAX_SECONDS  = 600
+$SVC_MAX_FAILS          = 6
+$SVC_PORT_GRACE_SECONDS = 8
+
+# ── Docker engine (for container-backed services) ─────────────────────────────
+# A service entry may be `"type": "container"`, meaning it is a Docker container
+# this script starts rather than a process it launches. Those need the engine
+# up, which is two separate things on Windows: com.docker.service (the
+# privileged helper) and Docker Desktop itself, which hosts the actual engine in
+# its WSL2/Hyper-V VM. The service alone is not enough.
+$script:dockerLastTry = $null
+$script:dockerFails   = 0
+$script:dockerParked  = $false
+$DOCKER_RETRY_SECONDS = 60
+# Docker Desktop on 2014 hardware can take several minutes to bring WSL2 and the
+# engine up from cold, so give it ten one-minute attempts before easing off.
+$DOCKER_MAX_FAILS     = 10
+$DOCKER_DESKTOP_EXE   = 'C:\Program Files\Docker\Docker\Docker Desktop.exe'
+
+
+function Test-DockerEngine {
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { return $false }
+    try {
+        $null = & docker info --format '{{.ServerVersion}}' 2>$null
+        return ($LASTEXITCODE -eq 0)
+    } catch { return $false }
+}
+
+function Start-DockerEngine {
+    $svc = Get-Service com.docker.service -ErrorAction SilentlyContinue
+    if ($svc -and $svc.Status -ne 'Running') {
+        try {
+            Start-Service com.docker.service -ErrorAction Stop
+            Write-Host "$(Get-Date -f 'HH:mm:ss')  started com.docker.service" -ForegroundColor Green
+        } catch {
+            Write-Host "$(Get-Date -f 'HH:mm:ss')  couldn't start com.docker.service — run this script as Administrator, or set it to Automatic once: Set-Service com.docker.service -StartupType Automatic" -ForegroundColor Yellow
+        }
+    }
+    # The helper service does not host the engine. Docker Desktop does.
+    if (-not (Get-Process 'Docker Desktop' -ErrorAction SilentlyContinue)) {
+        if (Test-Path $DOCKER_DESKTOP_EXE) {
+            try {
+                Start-Process -FilePath $DOCKER_DESKTOP_EXE -WindowStyle Minimized -ErrorAction Stop
+                Write-Host "$(Get-Date -f 'HH:mm:ss')  launching Docker Desktop (engine takes a minute or two on this hardware)" -ForegroundColor Yellow
+            } catch {
+                Write-Host "$(Get-Date -f 'HH:mm:ss')  couldn't launch Docker Desktop: $($_.Exception.Message)" -ForegroundColor Red
+            }
+        } else {
+            Write-Host "$(Get-Date -f 'HH:mm:ss')  Docker Desktop not found at $DOCKER_DESKTOP_EXE" -ForegroundColor Red
+        }
+    }
+}
+
+# True when the engine is usable. Never blocks the monitor loop: it kicks off a
+# start attempt at most once a minute and lets later ticks find the engine up.
+function Ensure-DockerEngine {
+    # Test BEFORE the park check, always. Parking means "stop trying to launch
+    # it", not "stop noticing it" — otherwise an engine that comes up late, or
+    # that Michael starts by hand, would be ignored for the rest of the run.
+    if (Test-DockerEngine) {
+        if ($script:dockerParked -or $script:dockerFails -gt 0) {
+            Write-Host "$(Get-Date -f 'HH:mm:ss')  docker engine is up" -ForegroundColor Green
+        }
+        $script:dockerFails  = 0
+        $script:dockerParked = $false
+        return $true
+    }
+    if ($script:dockerParked) { return $false }
+    $last = $script:dockerLastTry
+    if ($last -and ((Get-Date) - $last).TotalSeconds -lt $DOCKER_RETRY_SECONDS) { return $false }
+    $script:dockerLastTry = Get-Date
+    $script:dockerFails++
+    if ($script:dockerFails -gt $DOCKER_MAX_FAILS) {
+        $script:dockerParked = $true
+        Write-Host "$(Get-Date -f 'HH:mm:ss')  docker engine never came up after $DOCKER_MAX_FAILS attempts — no longer trying to launch it. Start Docker Desktop by hand and this picks it up on the next tick." -ForegroundColor Red
+        return $false
+    }
+    Write-Host "$(Get-Date -f 'HH:mm:ss')  docker engine not reachable — starting it (attempt $($script:dockerFails)/$DOCKER_MAX_FAILS)" -ForegroundColor Yellow
+    Start-DockerEngine
+    return $false
+}
 
 function Read-Services {
     if (-not (Test-Path $ServicesFile)) { return @() }
@@ -180,19 +273,16 @@ function Sync-ServiceManifest {
     try {
         $entries = @((Get-Content $manifest -Raw | ConvertFrom-Json))
         $byName = @{}
+        # Copy every field through. An earlier version rebuilt each entry from
+        # a fixed list of properties, which silently dropped anything new —
+        # `type` and `container` would have been erased on the next sync.
         foreach ($e in Read-Services) {
             if (-not $e.name) { continue }
-            $byName[[string]$e.name] = [pscustomobject]@{
-                name = [string]$e.name; cmd = [string]$e.cmd; args = [string]$e.args
-                cwd = [string]$e.cwd; port = [int]$e.port
-            }
+            $byName[[string]$e.name] = $e
         }
         foreach ($e in $entries) {
             if (-not $e.name) { continue }
-            $byName[[string]$e.name] = [pscustomobject]@{
-                name = [string]$e.name; cmd = [string]$e.cmd; args = [string]$e.args
-                cwd = [string]$e.cwd; port = [int]$e.port
-            }
+            $byName[[string]$e.name] = $e
         }
         @($byName.Values) | ConvertTo-Json -Depth 5 | Set-Content -Path $ServicesFile
     } catch {
@@ -277,22 +367,186 @@ function Start-ManagedService($svc) {
              -WorkingDirectory $cwd -WindowStyle Hidden -PassThru -ErrorAction Stop `
              -RedirectStandardOutput $out -RedirectStandardError $errl
         $script:managed[$name] = $p
-        Write-Host "$(Get-Date -f 'HH:mm:ss')  service '$name' started (PID $($p.Id)) -> port $svcPort" -ForegroundColor Green
+
+        # Did it actually come up? Launching is not the same as listening, and
+        # for a containerised service the launcher exits either way. Wait for
+        # the port before claiming success.
+        $up = $false
+        if ($svcPort -gt 0) {
+            for ($i = 0; $i -lt $SVC_PORT_GRACE_SECONDS; $i++) {
+                Start-Sleep -Seconds 1
+                if (Test-Port $svcPort) { $up = $true; break }
+            }
+        } else {
+            $up = -not $p.HasExited
+        }
+
+        if ($up) {
+            $script:svcFails[$name] = 0
+            Write-Host "$(Get-Date -f 'HH:mm:ss')  service '$name' started (PID $($p.Id)) -> port $svcPort" -ForegroundColor Green
+        } else {
+            $script:svcFails[$name] = [int]$script:svcFails[$name] + 1
+            $n = $script:svcFails[$name]
+            $tail = ''
+            foreach ($logPath in @($errl, $out)) {
+                if (Test-Path $logPath) {
+                    $lines = @(Get-Content $logPath -Tail 3 -ErrorAction SilentlyContinue |
+                               Where-Object { $_ -and $_.Trim() })
+                    if ($lines.Count) { $tail = ($lines -join ' | '); break }
+                }
+            }
+            Write-Host "$(Get-Date -f 'HH:mm:ss')  service '$name' did not reach port $svcPort (attempt $n/$SVC_MAX_FAILS)" -ForegroundColor Yellow
+            if ($tail) { Write-Host "      last output: $tail" -ForegroundColor DarkGray }
+        }
     } catch {
+        $script:svcFails[$name] = [int]$script:svcFails[$name] + 1
         Write-Host "$(Get-Date -f 'HH:mm:ss')  service '$name' failed to start: $($_.Exception.Message)" -ForegroundColor Red
     } finally {
         $env:PORT = $savedPort; $env:NEST_PORT = $savedNest
     }
 }
 
-# Start anything in the manifest that is not already listening (debounced 20s).
+# `docker start` returns once the container is RUNNING, which is not the same as
+# ready. MySQL 8 spends a while on crash recovery before it listens, and a
+# WordPress container started against a database that isn't accepting
+# connections yet either exits or serves "Error establishing a database
+# connection" until something restarts it. So wait on each dependency.
+function Wait-ContainerReady($c, $timeoutSeconds = 120) {
+    for ($i = 0; $i -lt $timeoutSeconds; $i++) {
+        $state = (& docker inspect -f '{{.State.Status}}' $c 2>$null)
+        if ($LASTEXITCODE -ne 0) { return $false }        # container is gone
+        if ("$state".Trim() -ne 'running') { Start-Sleep -Seconds 1; continue }
+
+        # Prefer the container's own healthcheck when it declares one.
+        $health = (& docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' $c 2>$null)
+        $health = "$health".Trim()
+        if ($health) {
+            if ($health -eq 'healthy')   { return $true }
+            if ($health -eq 'unhealthy') { return $false }
+            Start-Sleep -Seconds 1; continue
+        }
+
+        # No healthcheck declared. Probe for a database; anything else that is
+        # running is taken as ready.
+        $probe = & docker exec $c sh -c 'command -v mysqladmin >/dev/null 2>&1 && mysqladmin ping --silent 2>&1' 2>&1
+        $probeText = "$probe"
+        if ($LASTEXITCODE -eq 0)                   { return $true }   # answered the ping
+        if (-not $probeText.Trim())                { return $true }   # no mysqladmin: not a DB
+        # "Access denied" means it handshook with us — it is listening, which is
+        # all WordPress needs from us here.
+        if ($probeText -match 'Access denied')     { return $true }
+        if ($probeText -match 'exec failed|not found|no such|OCI runtime') { return $true }
+        Start-Sleep -Seconds 1
+    }
+    return $false
+}
+
+# Container-backed services. `docker start` is idempotent, so this is safe to
+# call on an already-running container, and `docker update --restart
+# unless-stopped` means Docker brings it back by itself after a reboot without
+# this script being involved at all — belt and braces.
+function Start-ContainerService($svc) {
+    $name = [string]$svc.name
+    $svcPort = 0; [void][int]::TryParse([string]$svc.port, [ref]$svcPort)
+    $script:svcLastStart[$name] = Get-Date
+
+    # A WordPress demo is usually a pair (the site plus its database), so a
+    # service may name several containers. They start in the order listed.
+    $containers = @()
+    if ($svc.containers) { $containers = @($svc.containers | ForEach-Object { [string]$_ }) }
+    elseif ($svc.container) { $containers = @([string]$svc.container) }
+    else { $containers = @($name) }
+
+    $last = $containers[-1]
+    foreach ($c in $containers) {
+        $out = & docker start $c 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $script:svcFails[$name] = [int]$script:svcFails[$name] + 1
+            Write-Host "$(Get-Date -f 'HH:mm:ss')  container '$c' failed to start: $out" -ForegroundColor Red
+            return
+        }
+        # Make Docker responsible for keeping it alive across reboots.
+        & docker update --restart unless-stopped $c 2>&1 | Out-Null
+
+        # Every container but the last is a dependency (the database). Let it
+        # finish coming up before starting what needs it; the last one's
+        # readiness is the port check below.
+        if ($c -ne $last) {
+            if (Wait-ContainerReady $c) {
+                Write-Host "$(Get-Date -f 'HH:mm:ss')  dependency '$c' ready" -ForegroundColor DarkGray
+            } else {
+                $script:svcFails[$name] = [int]$script:svcFails[$name] + 1
+                Write-Host "$(Get-Date -f 'HH:mm:ss')  dependency '$c' never became ready — not starting '$last' against it" -ForegroundColor Yellow
+                $dlogs = & docker logs --tail 3 $c 2>&1
+                if ($dlogs) { Write-Host "      docker logs ${c}: $($dlogs -join ' | ')" -ForegroundColor DarkGray }
+                return
+            }
+        }
+    }
+
+    $up = $true
+    if ($svcPort -gt 0) {
+        $up = $false
+        # WordPress needs longer than a Node process to answer its first request.
+        for ($i = 0; $i -lt 30; $i++) {
+            Start-Sleep -Seconds 1
+            if (Test-Port $svcPort) { $up = $true; break }
+        }
+    }
+    if ($up) {
+        $script:svcFails[$name] = 0
+        Write-Host "$(Get-Date -f 'HH:mm:ss')  service '$name' container(s) up -> port $svcPort" -ForegroundColor Green
+    } else {
+        $script:svcFails[$name] = [int]$script:svcFails[$name] + 1
+        $n = $script:svcFails[$name]
+        $logs = & docker logs --tail 3 $last 2>&1
+        Write-Host "$(Get-Date -f 'HH:mm:ss')  service '$name' started but port $svcPort never opened (attempt $n/$SVC_MAX_FAILS)" -ForegroundColor Yellow
+        if ($logs) { Write-Host "      docker logs: $($logs -join ' | ')" -ForegroundColor DarkGray }
+    }
+}
+
+# Start anything in the manifest that is not already listening, backing off
+# after each failure and parking the service once it's clearly not coming up.
 function Ensure-Services {
     foreach ($svc in Read-Services) {
         if (-not $svc.name -or -not $svc.port) { continue }
-        if (Test-Port $svc.port) { continue }
-        $last = $script:svcLastStart[[string]$svc.name]
-        if ($last -and ((Get-Date) - $last).TotalSeconds -lt 20) { continue }
-        Start-ManagedService $svc
+        $name = [string]$svc.name
+
+        if (Test-Port $svc.port) {
+            # Recovered on its own (or someone started it by hand) — un-park it
+            # so a later crash gets a fresh set of retries.
+            if ($script:svcParked[$name]) {
+                Write-Host "$(Get-Date -f 'HH:mm:ss')  service '$name' is up again; resuming supervision" -ForegroundColor Green
+            }
+            $script:svcFails[$name]  = 0
+            $script:svcParked[$name] = $false
+            continue
+        }
+
+        if ($script:svcParked[$name]) { continue }   # already gave up, said so once
+
+        $fails = [int]$script:svcFails[$name]
+        if ($fails -ge $SVC_MAX_FAILS) {
+            $script:svcParked[$name] = $true
+            Write-Host "$(Get-Date -f 'HH:mm:ss')  service '$name' gave up after $fails attempts — not retrying." -ForegroundColor Red
+            Write-Host "      Check $DataDir\$name.err.log, then remove it from $ServicesFile or fix it and restart this script." -ForegroundColor DarkGray
+            continue
+        }
+
+        # 20s, 40s, 80s ... capped. Quiet enough to read the log, quick enough
+        # to recover from a genuine blip.
+        $wait = [math]::Min($SVC_RETRY_BASE_SECONDS * [math]::Pow(2, $fails), $SVC_RETRY_MAX_SECONDS)
+        $last = $script:svcLastStart[$name]
+        if ($last -and ((Get-Date) - $last).TotalSeconds -lt $wait) { continue }
+
+        if ([string]$svc.type -eq 'container') {
+            # A slow or absent engine is the engine's problem, not this
+            # service's — don't burn its retry budget waiting for Docker.
+            if (-not (Ensure-DockerEngine)) { continue }
+            Start-ContainerService $svc
+        } else {
+            Start-ManagedService $svc
+        }
     }
 }
 
@@ -338,7 +592,31 @@ $script:tunnelProc = Start-Tunnel
 Write-Host "-> Managed services from data/services.json..."
 Sync-ServiceManifest
 Ensure-OrschellBuilt
+# Kick the engine early so it warms while Flask and the tunnel come up; the
+# monitor loop starts the containers once it answers.
+if (@(Read-Services | Where-Object { [string]$_.type -eq 'container' }).Count -gt 0) {
+    [void](Ensure-DockerEngine)
+}
 Ensure-Services
+
+# Say what is registered and where each one stands. The supervisor is silent
+# when everything is already listening, which is correct but indistinguishable
+# from it not running at all — as happened when a pulled launcher sat inert
+# because PowerShell had the old script in memory.
+$svcAll = @(Read-Services)
+if ($svcAll.Count -eq 0) {
+    Write-Host "  Managed services:         none registered" -ForegroundColor DarkGray
+} else {
+    Write-Host "  Managed services:" -ForegroundColor Green
+    foreach ($s in $svcAll) {
+        $kind = if ([string]$s.type -eq 'container') { 'container' } else { 'process' }
+        if (Test-Port $s.port) {
+            Write-Host ("    - {0,-24} {1,-10} port {2,-6} listening" -f $s.name, $kind, $s.port) -ForegroundColor Green
+        } else {
+            Write-Host ("    - {0,-24} {1,-10} port {2,-6} not up yet" -f $s.name, $kind, $s.port) -ForegroundColor Yellow
+        }
+    }
+}
 
 Write-Host ""
 Write-Host "✓ Running. Press Ctrl+C to stop cleanly." -ForegroundColor Green
@@ -370,6 +648,34 @@ function Invoke-AutoDeploy {
             Sync-ServiceManifest
             if ($changed -match 'services/orschell-ecommerce|services\.manifest\.json') {
                 Build-OrschellService
+            }
+
+            # A change to THIS file needs more than a Flask restart. PowerShell
+            # loads the script once; everything below is the version that was on
+            # disk when the window opened, so pulling a new launcher and
+            # restarting Flask leaves the old supervisor running and the new
+            # code inert — silently, which is worse than failing.
+            if ($changed -match 'run-server\.ps1') {
+                # Don't hand the baton to a script that won't parse; a syntax
+                # error here would take the server down with nothing left
+                # running to notice.
+                $parseErrors = $null
+                [void][System.Management.Automation.Language.Parser]::ParseFile(
+                    $PSCommandPath, [ref]$null, [ref]$parseErrors)
+                if ($parseErrors -and $parseErrors.Count -gt 0) {
+                    Write-Host "  run-server.ps1 changed but has $($parseErrors.Count) syntax error(s) — staying on the running version." -ForegroundColor Red
+                    foreach ($pe in $parseErrors | Select-Object -First 3) {
+                        Write-Host "      line $($pe.Extent.StartLineNumber): $($pe.Message)" -ForegroundColor DarkGray
+                    }
+                } else {
+                    Write-Host "  run-server.ps1 changed -- relaunching the launcher itself..." -ForegroundColor Cyan
+                    Stop-All
+                    Start-Process powershell -ArgumentList @(
+                        '-NoExit', '-ExecutionPolicy', 'Bypass',
+                        '-File', "`"$PSCommandPath`"", '-Relaunched'
+                    )
+                    exit 0
+                }
             }
             Write-Host "  Restarting server in this window (window stays open)..." -ForegroundColor Yellow
             if ($script:flaskProc -and -not $script:flaskProc.HasExited) { try { $script:flaskProc.Kill() } catch {} }

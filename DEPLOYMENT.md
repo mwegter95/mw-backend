@@ -248,3 +248,81 @@ cp -r ~/Projects/mw-backend/data ~/Backups/mw-backend-$(date +%Y%m%d)
 ## Adding the SEO Analyzer to mw-backend (future)
 
 When you're ready, add SEO-specific routes to `mw-backend/server.py` (reports, settings, etc.) and update the SEO analyzer frontend to use `VITE_API_URL` + auth headers. The auth system is already in place — no changes needed there.
+
+## Container-backed demos (the WordPress sites)
+
+Two work-sample demos are WordPress running in Docker on the Surface, reverse-
+proxied by Flask:
+
+| Demo | Containers (in start order) | Port | Bridge |
+|---|---|---|---|
+| Panhandle Garage Door Company | `panhandle-mysql` → `panhandle-wp` | 8090 | `panhandle_wp_bridge_blueprint.py` |
+| Maryland Driveway Restore | `mdr-mysql` → `mdr-wordpress-docker` | 8081 | `maryland_driveway_wp_bridge_blueprint.py` |
+
+Each is a two-container stack: `mysql:8.0` plus the WordPress site.
+
+They are registered in `services.manifest.json` with `"type": "container"`, which
+`run-server.ps1` handles differently from a process service: instead of
+`Start-Process`, it runs `docker start`, then `docker update --restart
+unless-stopped` so Docker itself brings the container back after a reboot.
+
+**The engine is two things on Windows.** `com.docker.service` is only the
+privileged helper; the actual engine runs inside the VM that Docker Desktop
+hosts. Starting the service alone is not enough, which is the trap that took
+these demos down. `run-server.ps1` starts both, and waits — Docker Desktop on
+this hardware can take minutes from cold.
+
+One-time setup on the Surface:
+
+```powershell
+# elevated, once
+Set-Service com.docker.service -StartupType Automatic
+```
+
+and in Docker Desktop → Settings → General, enable **Start Docker Desktop when
+you sign in**. Without that, nothing has started the engine before
+`run-server.ps1` runs, and every boot depends on the script's own retry loop.
+
+**Order matters, and so does readiness.** A service lists
+`"containers": ["<db>", "<site>"]` in dependency order. Every container but the
+last is treated as a dependency: it is started, then *waited on* before the next
+one starts. `docker start` returns when a container is running, which is not the
+same as ready — MySQL 8 spends a while on crash recovery before it listens, and
+WordPress started against a database that isn't accepting connections yet either
+exits or serves "Error establishing a database connection" until something
+restarts it.
+
+Readiness is decided in this order: the container's own `HEALTHCHECK` if it
+declares one; otherwise `mysqladmin ping` inside the container (an *Access
+denied* reply still proves it is listening, which is all we need to know); and
+otherwise simply being `running`. If a dependency never becomes ready, the site
+container is deliberately **not** started — a stack that fails cleanly is easier
+to diagnose than one that half-starts.
+
+**When a demo is down**, the bridges return a styled "temporarily offline" page
+(`bridge_offline.py`) rather than a raw `ConnectionRefusedError`, so the
+work-samples links never show a stack trace to a visitor. The real error goes to
+the server log.
+
+Diagnostics:
+
+```powershell
+docker info --format "{{.ServerVersion}}"   # engine reachable?
+docker ps -a                                 # containers present? running?
+docker logs --tail 40 panhandle-wp           # why did it not answer?
+```
+
+### Changing run-server.ps1 itself
+
+PowerShell loads a script once. Auto-deploy pulling a new `run-server.ps1` and
+restarting Flask leaves the **old launcher** running — so any change to the
+supervisor appears to do nothing, silently.
+
+It now detects that `run-server.ps1` was among the changed files, parse-checks
+the new copy, stops its children and relaunches itself in a fresh window. If the
+new copy has a syntax error it stays on the running version and says so rather
+than handing off to a script that won't start.
+
+The startup banner lists every registered service and whether its port is
+listening, so "no output" is never ambiguous — a silent supervisor with
+everything already up looks identical to one that isn't running.
