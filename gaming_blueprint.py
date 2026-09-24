@@ -665,12 +665,18 @@ def stats():
         games = {r["slug"]: _game_row_to_dict(r)
                  for r in conn.execute("SELECT * FROM gaming_games")}
 
+        # Every number below is ACTIVE time: wall clock minus the stretches with
+        # no keyboard or mouse input. A game left sitting on the menu must not
+        # out-weigh an evening of actually playing, so idle reaches no total, no
+        # average, no chart and no streak. Wall clock is reported once, as
+        # `wall_seconds`, and per session in the sessions list.
         totals = conn.execute(
             """SELECT COUNT(*) AS sessions,
-                      COALESCE(SUM(duration_seconds),0) AS seconds,
-                      COALESCE(SUM(active_seconds),0)   AS active_seconds,
+                      COALESCE(SUM(active_seconds),0)   AS seconds,
+                      COALESCE(SUM(duration_seconds),0) AS wall_seconds,
                       COALESCE(SUM(idle_seconds),0)     AS idle_seconds,
-                      COUNT(DISTINCT local_date)        AS days_played
+                      COUNT(DISTINCT CASE WHEN active_seconds > 0
+                                          THEN local_date END) AS days_played
                FROM gaming_sessions
                WHERE local_date >= ? AND local_date <= ?""",
             (frm, to),
@@ -679,10 +685,10 @@ def stats():
         by_game = conn.execute(
             """SELECT game_slug, game_name,
                       COUNT(*) AS sessions,
-                      COALESCE(SUM(duration_seconds),0) AS seconds,
-                      COALESCE(SUM(active_seconds),0)   AS active_seconds,
-                      COALESCE(MAX(duration_seconds),0) AS longest_session,
-                      MAX(started_at)                   AS last_played
+                      COALESCE(SUM(active_seconds),0) AS seconds,
+                      COALESCE(SUM(active_seconds),0) AS active_seconds,
+                      COALESCE(MAX(active_seconds),0) AS longest_session,
+                      MAX(started_at)                 AS last_played
                FROM gaming_sessions
                WHERE local_date >= ? AND local_date <= ?
                GROUP BY game_slug ORDER BY seconds DESC""",
@@ -691,7 +697,7 @@ def stats():
 
         by_day_rows = conn.execute(
             """SELECT local_date, game_slug,
-                      COALESCE(SUM(duration_seconds),0) AS seconds,
+                      COALESCE(SUM(active_seconds),0) AS seconds,
                       COUNT(*) AS sessions
                FROM gaming_sessions
                WHERE local_date >= ? AND local_date <= ?
@@ -701,7 +707,7 @@ def stats():
 
         by_hour = conn.execute(
             """SELECT local_start_hour AS hour,
-                      COALESCE(SUM(duration_seconds),0) AS seconds,
+                      COALESCE(SUM(active_seconds),0) AS seconds,
                       COUNT(*) AS sessions
                FROM gaming_sessions
                WHERE local_date >= ? AND local_date <= ?
@@ -711,7 +717,7 @@ def stats():
 
         by_weekday = conn.execute(
             """SELECT local_weekday AS weekday,
-                      COALESCE(SUM(duration_seconds),0) AS seconds,
+                      COALESCE(SUM(active_seconds),0) AS seconds,
                       COUNT(*) AS sessions
                FROM gaming_sessions
                WHERE local_date >= ? AND local_date <= ?
@@ -728,14 +734,16 @@ def stats():
 
         # Streaks are computed over ALL history, not the selected window — a
         # 40-day streak shouldn't read as 30 just because you're looking at a month.
+        # A day you merely left a game running is not a day you played, so it
+        # neither counts nor keeps a streak alive.
         all_days = [r["local_date"] for r in conn.execute(
             "SELECT DISTINCT local_date FROM gaming_sessions "
-            "WHERE local_date != '' ORDER BY local_date"
+            "WHERE local_date != '' AND active_seconds > 0 ORDER BY local_date"
         )]
         lifetime = conn.execute(
             """SELECT COUNT(*) AS sessions,
-                      COALESCE(SUM(duration_seconds),0) AS seconds,
-                      MIN(local_date) AS first_day
+                      COALESCE(SUM(active_seconds),0) AS seconds,
+                      MIN(CASE WHEN active_seconds > 0 THEN local_date END) AS first_day
                FROM gaming_sessions"""
         ).fetchone()
     finally:
@@ -775,8 +783,9 @@ def stats():
         "range": {"from": frm, "to": to, "days": span_days},
         "totals": {
             "sessions": totals["sessions"],
-            "seconds": totals["seconds"],
-            "active_seconds": totals["active_seconds"],
+            "seconds": totals["seconds"],             # played
+            "active_seconds": totals["seconds"],      # the same figure, named plainly
+            "wall_seconds": totals["wall_seconds"],   # games open, idle included
             "idle_seconds": totals["idle_seconds"],
             "days_played": totals["days_played"],
             "avg_seconds_per_day": round(totals["seconds"] / span_days) if span_days else 0,
