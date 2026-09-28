@@ -1,0 +1,46 @@
+{
+ "absolute_url": "https://www.jamf.com/about/careers/jobs/?gh_jid=6188569004&gh_jid=6188569004",
+ "internal_job_id": 5213185004,
+ "location": {
+  "name": "US Remote"
+ },
+ "metadata": null,
+ "id": 6188569004,
+ "updated_at": "2026-09-14T11:52:38-04:00",
+ "requisition_id": "2589",
+ "title": "Account Executive | HCLS",
+ "pay_input_ranges": [
+  {
+   "min_cents": 5810000,
+   "max_cents": 13320000,
+   "currency_type": "USD",
+   "title": "National Pay Transparency Range",
+   "blurb": "<p>The national pay transparency range below represents all U.S. locations and accounts for geographic differences in pay, resulting in a broader range.&nbsp;</p>"
+  }
+ ],
+ "company_name": "Jamf",
+ "first_published": "2026-09-14T11:52:38-04:00",
+ "language": "en",
+ "application_deadline": null,
+ "content": "&lt;div class=&quot;content-intro&quot;&gt;&lt;p class=&quot;p1&quot;&gt;At Jamf, we believe in an open, flexible culture based on respect and trust. Our track record and thriving work environment all stem from the freedom we grant ourselves to get the job done right. We take pride in helping tens of thousands of customers around the globe succeed with Apple.&lt;/p&gt;\n&lt;p&gt;The secret to our success lies in our connectivity, while operating with a high degree of flexibility. Work-life balance remains our priority while feeling connected is important to maintain our strong culture, achieve ",
+ "departments": [
+  {
+   "id": 4019581004,
+   "name": "Sales",
+   "child_ids": [],
+   "parent_id": 4019580004
+  }
+ ],
+ "offices": [
+  {
+   "id": 4010219004,
+   "name": "US Remote",
+   "location": null,
+   "child_ids": [],
+   "parent_id": 4010185004
+  }
+ ],
+ "ai_disclaimer": "<p>We use Greenhouse’s AI-powered Talent Matching tool to compare your application against our job requirements. Our human recruiters and hiring managers review all output from Talent Matching and make the final decision with respect to each application. Jamf respects your right to opt-out of the Talent Matching process at any time without adverse impact to your application. By proceeding with your application, you acknowledge that you have been informed about our use of Talent Matching in our hiring process.&nbsp;Click here to learn more about how we process your data for this purpose, including your rights.</p>",
+ "include_ai_disclaimer": true,
+ "ai_opt_out_request_url": "http://app4.greenhouse.io/ai_opt_out_request/job_post/6188569004/ai_opt_out"
+}

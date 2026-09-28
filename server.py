@@ -60,6 +60,15 @@ FRONTEND_BASE     = os.environ.get("FRONTEND_URL", "https://mwegter95.github.io"
 LIFE_DASHBOARD_URL     = os.environ.get("LIFE_DASHBOARD_URL", "https://mwegter95.github.io/life-dashboard/")
 LIFE_SCHEDULER_ENABLED = os.environ.get("LIFE_SCHEDULER", "1") != "0"
 
+# Which job this instance does. "primary" (the Surface) serves api.michaelwegter.com through the
+# Cloudflare tunnel and runs every scheduler. "ai-worker" (wegter-pc) only runs the Job Scout AI
+# worker: it listens on 127.0.0.1, starts no schedulers and must never join the tunnel — Cloudflare
+# sends traffic to every connector on a tunnel, so a second connector would split the API across
+# two databases. See JOBSCOUT_SETUP.md.
+MW_ROLE = (os.environ.get("MW_ROLE") or "primary").strip().lower()
+if MW_ROLE not in ("primary", "ai-worker"):
+    raise SystemExit(f"MW_ROLE must be 'primary' or 'ai-worker', got {MW_ROLE!r}")
+
 # Allowed frontend origins (add Netlify URL once deployed)
 _CORS_ORIGINS = list({o for o in [
     "http://localhost:5173",
@@ -368,6 +377,12 @@ app.register_blueprint(bowling_bp)
 # pc-gaming-activity-dashboard/docs/SETUP.md.
 from gaming_blueprint import gaming_bp
 app.register_blueprint(gaming_bp)
+
+# ─── Job Scout: direct-from-employer job search (mounted at /jobs) ───────────
+# Discovers local employers, reads their careers systems, and queues AI scoring
+# for the ai-worker instance. See jobscout/ and JOBSCOUT_SETUP.md.
+from jobscout_blueprint import jobscout_bp, start_jobscout
+app.register_blueprint(jobscout_bp)
 
 from yard_seed import seed_for_owner as _yard_seed_for_owner
 from yard_seed_v2 import seed_v2_for_owner as _yard_seed_v2_for_owner
@@ -3900,9 +3915,30 @@ def start_life_scheduler():
 
 # ─── Startup ──────────────────────────────────────────────────────────────────
 
+def _cloudflared_running():
+    """True if a cloudflared process is running on this machine (used to guard the ai-worker)."""
+    try:
+        if os.name == "nt":
+            out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq cloudflared.exe", "/NH"],
+                                 capture_output=True, text=True, timeout=10).stdout
+            return "cloudflared.exe" in out.lower()
+        return subprocess.run(["pgrep", "-x", "cloudflared"], capture_output=True, timeout=10).returncode == 0
+    except Exception:
+        return False
+
+
 if __name__ == "__main__":
+    log.info("[startup] MW_ROLE=%s", MW_ROLE)
+    if MW_ROLE == "ai-worker" and _cloudflared_running():
+        log.error("[startup] MW_ROLE=ai-worker but cloudflared is running on this machine. "
+                  "Stop it: a second tunnel connector splits api.michaelwegter.com across two databases.")
+        sys.exit(2)
     init_db()
-    start_life_scheduler()
+    if MW_ROLE == "primary":
+        start_life_scheduler()
+    else:
+        log.info("[life] smart-task scheduler not started (MW_ROLE=%s)", MW_ROLE)
+    start_jobscout(MW_ROLE)
     # Clean up any .status files left in "processing" state from a previous server
     # run whose worker threads/processes were killed when the server restarted.
     _walls_dir = UPLOADS_DIR / "walls"
@@ -3960,4 +3996,5 @@ if __name__ == "__main__":
 
     log.info("✓ mw-backend starting on http://0.0.0.0:%s", PORT)
     from waitress import serve
-    serve(app, host="0.0.0.0", port=PORT)
+    # The ai-worker is never reachable from outside this machine.
+    serve(app, host=("127.0.0.1" if MW_ROLE == "ai-worker" else "0.0.0.0"), port=PORT)

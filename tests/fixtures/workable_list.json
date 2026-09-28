@@ -1,0 +1,67 @@
+{
+ "total": 5,
+ "results": [
+  {
+   "id": 6080039,
+   "shortcode": "408C5DD671",
+   "title": "Float Direct Support Professional - South Metro, MN - $1,500 Sign-on Bonus",
+   "remote": false,
+   "location": {
+    "country": "United States",
+    "countryCode": "US",
+    "city": "Apple Valley",
+    "region": "Minnesota"
+   },
+   "locations": [
+    {
+     "country": "United States",
+     "countryCode": "US",
+     "city": "Apple Valley",
+     "region": "Minnesota",
+     "hidden": false
+    }
+   ],
+   "state": "published",
+   "isInternal": false,
+   "code": "",
+   "published": "2026-09-25T00:00:00.000Z",
+   "type": "full",
+   "language": "en",
+   "department": [],
+   "accountUid": "76c4a895-6664-45db-90a4-de572f0c80f8",
+   "approvalStatus": "approved",
+   "workplace": "on_site"
+  },
+  {
+   "id": 6026247,
+   "shortcode": "9D9462DFCE",
+   "title": "Direct Support Professional - Shoreview, MN - $1,500 Sign-On Bonus",
+   "remote": false,
+   "location": {
+    "country": "United States",
+    "countryCode": "US",
+    "city": "Shoreview",
+    "region": "Minnesota"
+   },
+   "locations": [
+    {
+     "country": "United States",
+     "countryCode": "US",
+     "city": "Shoreview",
+     "region": "Minnesota",
+     "hidden": false
+    }
+   ],
+   "state": "published",
+   "isInternal": false,
+   "code": "",
+   "published": "2026-09-22T00:00:00.000Z",
+   "type": "full",
+   "language": "en",
+   "department": [],
+   "accountUid": "76c4a895-6664-45db-90a4-de572f0c80f8",
+   "approvalStatus": "approved",
+   "workplace": "on_site"
+  }
+ ]
+}

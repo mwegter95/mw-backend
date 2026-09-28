@@ -1,0 +1,162 @@
+{
+ "items": [
+  {
+   "Id": "122617",
+   "Title": "Labor Communications Principal Consultant",
+   "Category": "Communications",
+   "RequisitionType": "All Other Positions",
+   "JobGrade": null,
+   "RequisitionId": 300001211328639,
+   "ExternalPostedStartDate": "2026-09-01T17:18:38+00:00",
+   "JobLevel": null,
+   "JobSchedule": null,
+   "JobShift": null,
+   "StudyLevel": null,
+   "InternationalTravelRequired": null,
+   "ExternalContactName": null,
+   "ExternalContactEmail": null,
+   "ContractType": null,
+   "ExternalPostedEndDate": null,
+   "JobFamilyId": 300000028217790,
+   "GeographyId": 300000009088669,
+   "GeographyNodeId": 100010031414294,
+   "ExternalDescriptionStr": "<p>HealthPartners is hiring for a full-time Labor Communications Principal Consultant.</p><p>&nbsp;</p><p><span style=\"font-size: 11pt;\">POSITION SUMMARY STATEMENT:</span><br><span style=\"font-size: 11pt;\">Principal Communications Consultants drive strategy planning and project oversight on large and</span><br><span style=\"font-size: 11pt;\">complex projects, often with focused areas of specialized expertise. They have deep, specialized</span><br><span style=\"font-size: 11pt;\">knowledge and experience in their area of communications and are able to apply this expertise</span><br><span style=\"font-size: 11pt;\">across one of more areas of the business. Principal Communications Consultants are strategic</span><br><span style=\"font-size: 11pt;\">advisors and influencers, capable of assessing needs and identifying opportunities that strengthen</span><br><span style=\"font-size: 11pt;\">and grow our business.</span></p><p><br><span style=\"font-size: 11pt;\">MINIMUM QUALIFICATIONS:</span><br><span style=\"font-size: 11pt;\">• Education, Experience or Equivalent Combination:</span><br><span style=\"font-size: 11pt;\">o Bachelor's degree or 4+ equivalent years of job-related experience</span><br><sp",
+   "CorporateDescriptionStr": "",
+   "OrganizationDescriptionStr": "",
+   "ShortDescriptionStr": "",
+   "ContentLocale": "en",
+   "PrimaryLocation": "Bloomington, MN, United States",
+   "PrimaryLocationCountry": "US",
+   "ObjectVerNumberProfile": null,
+   "ApplyWhenNotPostedFlag": null,
+   "ExternalQualificationsStr": "",
+   "InternalQualificationsStr": "",
+   "InternalResponsibilitiesStr": "",
+   "ExternalResponsibilitiesStr": "",
+   "JobFunctionCode": "HP_JFC_8",
+   "HotJobFlag": false,
+   "TrendingFlag": false,
+   "BeFirstToApplyFlag": false,
+   "WorkplaceTypeCode": null,
+   "WorkplaceType": "",
+   "OtherRequisitionTitle": null,
+   "NumberOfOpenings": null,
+   "HiringManager": null,
+   "Organization": null,
+   "BusinessUnitId": 300000009056847,
+   "LegalEmployerId": 300000013136909,
+   "OrganizationId": 300000133247738,
+   "WorkerType": null,
+   "JobType": null,
+   "WorkMonths": null,
+   "WorkYears": null,
+   "WorkHours": null,
+   "WorkDays": null,
+   "LegalEmployer": null,
+   "BusinessUnit": null,
+   "Department": null,
+   "DomesticTravelRequired": null,
+   "JobFunction": "Marketing and Communications",
+   "secondaryLocations": [],
+   "media": [],
+   "workLocation": [
+    {
+     "LocationId": null,
+     "LocationName": null,
+     "AddressLine1": null,
+     "AddressLine2": null,
+     "AddressLine3": null,
+     "AddressLine4": null,
+     "Building": null,
+     "TownOrCity": null,
+     "PostalCode": null,
+     "Country": null,
+     "Region1": null,
+     "Region2": null,
+     "Region3": null,
+     "Longitude": "",
+     "Latitude": ""
+    }
+   ],
+   "otherWorkLocations": [],
+   "requisitionFlexFields": [
+    {
+     "Prompt": "Work Schedule",
+     "Value": "Monday-Friday: business hours \nHyrbid work schedule.",
+     "ControlType": "TextArea",
+     "SequenceNumber": 1
+    },
+    {
+     "Prompt": "Hours Per Week/FTE",
+     "Value": "40 hrs weekly / 1.0 FTE",
+     "ControlType": "SingleChoiceList",
+     "SequenceNumber": 2
+    },
+    {
+     "Prompt": "Job Shift",
+     "Value": "Day",
+     "ControlType": "SingleChoiceList",
+     "SequenceNumber": 6
+    },
+    {
+     "Prompt": "Position Type",
+     "Value": "Full-time regular",
+     "ControlType": "SingleChoiceList",
+     "SequenceNumber": 7
+    },
+    {
+     "Prompt": "Job Category",
+     "Value": "Communications",
+     "ControlType": "SingleChoiceList",
+     "SequenceNumber": 11
+    },
+    {
+     "Prompt": "Department",
+     "Value": "Corporate Communications",
+     "ControlType": "SingleChoiceList",
+     "SequenceNumber": 12
+    },
+    {
+     "Prompt": "Pay Range",
+     "Value": "$46.06 - $69.10 hourly",
+     "ControlType": "TextArea",
+     "SequenceNumber": 13
+    },
+    {
+     "Prompt": "Pay Range Statement",
+     "Value": "Compensation is based on the level and requirements of the role. Pay within our ranges may also be determined by education, experience, knowledge, skills, location, and abilities as well as internal equity.  Hired candidates may be eligible to receive additional compensation based on role (e.g., shift differential, bonus, sales incentive, productivity pay, etc.).",
+     "ControlType": "TextArea",
+     "SequenceNumber": 14
+    },
+    {
+     "Prompt": "Overtime Eligibility Status",
+     "Value": "Exempt",
+     "ControlType": "TextArea",
+     "SequenceNumber": 15
+    }
+   ],
+   "primaryLocationCoordinates": [
+    {
+     "GeographyNodeId": 100010031414294,
+     "GeographyId": 300000009088669,
+     "Latitude": "44.82135",
+     "Longitude": "-93.30524",
+     "CountryCode": "US"
+    }
+   ],
+   "skills": []
+  }
+ ],
+ "count": 1,
+ "hasMore": false,
+ "limit": 499,
+ "offset": 0,
+ "links": [
+  {
+   "rel": "self",
+   "href": "https://fa-etnv-saasfaprod1.fa.ocs.oraclecloud.com:443/hcmRestApi/resources/11.13.18.05/recruitingCEJobRequisitionDetails",
+   "name": "recruitingCEJobRequisitionDetails",
+   "kind": "collection"
+  }
+ ]
+}

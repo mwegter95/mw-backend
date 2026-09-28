@@ -1,0 +1,28 @@
+{
+ "offers": [
+  {
+   "id": 101,
+   "slug": "brand-manager",
+   "title": "Brand Manager",
+   "description": "<p>Own the brand.</p>",
+   "requirements": "<ul><li>5 years</li></ul>",
+   "location": "Hudson, WI, United States",
+   "city": "Hudson",
+   "state_code": "WI",
+   "country_code": "US",
+   "remote": false,
+   "hybrid": true,
+   "on_site": false,
+   "employment_type_code": "fulltime",
+   "careers_url": "https://acme.recruitee.com/o/brand-manager",
+   "careers_apply_url": "https://acme.recruitee.com/o/brand-manager/c/new",
+   "published_at": "2026-09-20 10:00:00 UTC",
+   "salary": {
+    "min": "85000",
+    "max": "100000",
+    "period": "year",
+    "currency": "USD"
+   }
+  }
+ ]
+}

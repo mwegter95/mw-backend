@@ -31,3 +31,5 @@ github-copilot-sdk>=1.0
 google-auth>=2.30
 google-auth-oauthlib>=1.2
 google-api-python-client>=2.140
+# Job Scout — HTTP client for careers systems, geocoding and the AI worker
+requests>=2.31

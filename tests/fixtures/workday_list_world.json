@@ -1,0 +1,165 @@
+{
+ "total": 257,
+ "jobPostings": [
+  {
+   "title": "Shopper Marketer",
+   "externalPath": "/job/IN-Bangalore-Kar/Shopper-Marketer_R01161292",
+   "locationsText": "IN, Bangalore Kar",
+   "postedOn": "Posted 30+ Days Ago",
+   "remoteType": "On-site",
+   "bulletFields": [
+    "R01161292"
+   ]
+  },
+  {
+   "title": "Shopper Marketer",
+   "externalPath": "/job/IN-Bangalore-Kar/Shopper-Marketer_R01164174",
+   "locationsText": "IN, Bangalore Kar",
+   "postedOn": "Posted 30+ Days Ago",
+   "remoteType": "On-site",
+   "bulletFields": [
+    "R01164174"
+   ]
+  },
+  {
+   "title": "Shopper Marketer",
+   "externalPath": "/job/TH-Bangkok/Shopper-Marketer_R01164982",
+   "locationsText": "TH, Bangkok",
+   "postedOn": "Posted 30+ Days Ago",
+   "remoteType": "On-site",
+   "bulletFields": [
+    "R01164982"
+   ]
+  }
+ ],
+ "facets": [
+  {
+   "facetParameter": "Location_Country",
+   "descriptor": "Geography/Country",
+   "values": [
+    {
+     "descriptor": "United States of America",
+     "id": "bc33aa3152ec42d4995f4791a106ed09",
+     "count": 76
+    },
+    {
+     "descriptor": "India",
+     "id": "c4f78be1a8f14da0ab49ce1162348a5e",
+     "count": 54
+    },
+    {
+     "descriptor": "Philippines",
+     "id": "e56f1daf83e04bacae794ba5c5593560",
+     "count": 33
+    }
+   ]
+  },
+  {
+   "facetParameter": "remoteType",
+   "descriptor": "Remote Work Options",
+   "values": [
+    {
+     "descriptor": "On-site",
+     "id": "1244ed47f9a110032e2c39b51b9b0000",
+     "count": 205
+    },
+    {
+     "descriptor": "Remote",
+     "id": "1244ed47f9a110032e2c39b51b9b0001",
+     "count": 50
+    },
+    {
+     "descriptor": "Hybrid",
+     "id": "1244ed47f9a110032e2c3919cf420000",
+     "count": 2
+    }
+   ]
+  },
+  {
+   "facetParameter": "startDate",
+   "descriptor": "Date Posted",
+   "values": [
+    {
+     "descriptor": "1 Week",
+     "id": "29d7affdc34a10001f8fca3a631900f8",
+     "count": 44
+    },
+    {
+     "descriptor": "2-4 Weeks",
+     "id": "29d7affdc34a10001f8fca432d1900f9",
+     "count": 82
+    },
+    {
+     "descriptor": "5-8 Weeks",
+     "id": "29d7affdc34a10001f8fca4bdfa900fa",
+     "count": 58
+    }
+   ]
+  },
+  {
+   "facetParameter": "Location_Region_State_Province",
+   "descriptor": "State / Province / Region",
+   "values": [
+    {
+     "descriptor": "Minnesota",
+     "id": "02f3984b69ba450080e456fe733f6741",
+     "count": 56
+    },
+    {
+     "descriptor": "Shanghai",
+     "id": "12022932d53e4131959783deec185438",
+     "count": 16
+    },
+    {
+     "descriptor": "Texas",
+     "id": "fc77e3a1ab36487f9646d14f7242dd77",
+     "count": 14
+    }
+   ]
+  },
+  {
+   "facetParameter": "jobFamilyGroup",
+   "descriptor": "Job Category",
+   "values": [
+    {
+     "descriptor": "Sales",
+     "id": "e937e224196b1066cb4687a9d7f89eb4",
+     "count": 93
+    },
+    {
+     "descriptor": "Marketing",
+     "id": "e937e224196b1066cb4686b070a89ea8",
+     "count": 45
+    },
+    {
+     "descriptor": "Customer Service",
+     "id": "e937e224196b1066cb4683b9e9ce9e8a",
+     "count": 21
+    }
+   ]
+  },
+  {
+   "facetParameter": "workerSubType",
+   "descriptor": "Job Type",
+   "values": [
+    {
+     "descriptor": "Regular",
+     "id": "e937e224196b10667704cc6cf6782bae",
+     "count": 257
+    }
+   ]
+  },
+  {
+   "facetParameter": "timeType",
+   "descriptor": "Time Type",
+   "values": [
+    {
+     "descriptor": "Full time",
+     "id": "dc2aabcc4311104e776cfce2b8c6007d",
+     "count": 257
+    }
+   ]
+  }
+ ],
+ "userAuthenticated": false
+}

@@ -75,3 +75,6 @@ data/runner-workspace/
 services/**/node_modules/
 services/**/dist/
 services/**/.turbo/
+
+# Job Scout ships its offline gazetteer (jobscout/data/places.json); jobscout.db stays in data/
+!jobscout/data/

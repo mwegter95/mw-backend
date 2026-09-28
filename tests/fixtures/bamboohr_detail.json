@@ -1,0 +1,34 @@
+{
+ "meta": {},
+ "result": {
+  "jobOpening": {
+   "jobOpeningShareUrl": "https://collectivemeasures.bamboohr.com/careers/214",
+   "jobOpeningName": "Future Interest Application",
+   "jobOpeningStatus": "Open",
+   "jobCategoryId": null,
+   "departmentId": null,
+   "departmentLabel": "",
+   "employmentStatusLabel": "Full time",
+   "employmentType": null,
+   "location": {
+    "city": "Minneapolis",
+    "state": "Minnesota",
+    "postalCode": "55402",
+    "addressCountry": "United States"
+   },
+   "atsLocation": {
+    "country": null,
+    "countryId": null,
+    "state": null,
+    "city": null
+   },
+   "description": "<p><span>If you are interested in joining our team but don't see the right job posted, please fill out this Future Interest Application. Collective Measures is a growing agency, and we add new positions often! We may reach out to you if a job comes along that would be a good fit.</span></p>\n<p><br></p>\n<p><span>We offer great benefits for our full time employees including 100% paid healthcare and dental premium plan options, hybrid work model, flexible work schedules, and more.</span></p>\n<p><br></p>\n<p><span>_ ABOUT COLLECTIVE MEASURES<br></span></p>\n<p><span>We are 100% employee-owned, so we have good reason to create a place people want to work. We value curiosity and integrity. We hire p",
+   "compensation": null,
+   "datePosted": "2023-07-25",
+   "minimumExperience": null,
+   "locationType": "2",
+   "seekPromoted": false,
+   "aiProcessingDisclosureEnabled": false
+  }
+ }
+}

@@ -1,0 +1,65 @@
+{
+ "elements": [
+  {
+   "type": "node",
+   "id": 1,
+   "lat": 44.97,
+   "lon": -92.96,
+   "tags": {
+    "name": "North Star Molding",
+    "website": "https://www.northstarmolding.example/",
+    "industrial": "plastics",
+    "addr:city": "Oakdale",
+    "addr:state": "MN",
+    "addr:street": "Industrial Blvd",
+    "addr:housenumber": "1200"
+   }
+  },
+  {
+   "type": "way",
+   "id": 2,
+   "center": {
+    "lat": 45.05,
+    "lon": -92.8
+   },
+   "tags": {
+    "name": "Lakeside Precast",
+    "contact:website": "lakesideprecast.example",
+    "industrial": "concrete",
+    "addr:city": "Stillwater"
+   }
+  },
+  {
+   "type": "node",
+   "id": 3,
+   "lat": 45.0,
+   "lon": -93.0,
+   "tags": {
+    "name": "No Website Co",
+    "office": "company"
+   }
+  },
+  {
+   "type": "node",
+   "id": 4,
+   "lat": 45.0,
+   "lon": -93.0,
+   "tags": {
+    "name": "Yelp listing",
+    "website": "https://www.yelp.com/biz/x",
+    "office": "company"
+   }
+  },
+  {
+   "type": "node",
+   "id": 5,
+   "lat": 45.0,
+   "lon": -93.0,
+   "tags": {
+    "name": "City Hall",
+    "website": "https://www.ci.oakdale.mn.us",
+    "office": "government"
+   }
+  }
+ ]
+}

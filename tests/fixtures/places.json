@@ -1,0 +1,31 @@
+{
+ "places": [
+  {
+   "displayName": {
+    "text": "Birch Building Products"
+   },
+   "websiteUri": "https://birchbp.example/",
+   "formattedAddress": "500 Hadley Ave N, Oakdale, MN 55128, USA",
+   "location": {
+    "latitude": 44.98,
+    "longitude": -92.97
+   },
+   "primaryType": "manufacturer",
+   "types": [
+    "manufacturer"
+   ]
+  },
+  {
+   "displayName": {
+    "text": "Home Depot"
+   },
+   "websiteUri": "https://www.homedepot.com/l/Oakdale",
+   "formattedAddress": "Oakdale, MN 55128, USA",
+   "location": {
+    "latitude": 44.99,
+    "longitude": -92.96
+   },
+   "primaryType": "hardware_store"
+  }
+ ]
+}

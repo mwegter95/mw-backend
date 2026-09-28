@@ -3,6 +3,9 @@
 .SYNOPSIS
     Persistent mw-backend launcher for Windows.
     - Starts Flask server + Cloudflare named tunnel
+    - MW_ROLE=ai-worker (in .env, e.g. on wegter-pc): runs Flask only, bound to
+      127.0.0.1 for the Job Scout AI worker -- no tunnel, no managed services,
+      no sleep/shutdown blocking. See JOBSCOUT_SETUP.md.
     - Prevents SYSTEM sleep and hibernate while running (ES_SYSTEM_REQUIRED).
       It does NOT set ES_DISPLAY_REQUIRED, so the display should still turn off
       on its idle timer. If the screen is staying lit, run `powercfg /requests`
@@ -72,6 +75,12 @@ if (Test-Path $envFile) {
     }
 }
 $port = if ($env:PORT) { $env:PORT } else { '5050' }
+
+# ── Role: primary (Surface, serves api.michaelwegter.com) or ai-worker (wegter-pc) ──
+# The ai-worker must never start cloudflared: Cloudflare sends traffic to every
+# connector on a tunnel, so a second one would split the API across two databases.
+$role = if ($env:MW_ROLE) { $env:MW_ROLE.Trim().ToLower() } else { 'primary' }
+$isWorker = ($role -eq 'ai-worker')
 
 # Kill whatever is LISTENING on a port (used to reclaim Flask's port from a
 # squatter — e.g. a managed demo service that bound 5050 by mistake).
@@ -577,7 +586,12 @@ Write-Host ""
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host "  mw-backend  --  persistent launcher" -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
-Enable-Prevention
+Write-Host "  Role:                     $role" -ForegroundColor Green
+if ($isWorker) {
+    Write-Host "  Sleep / shutdown:         allowed (ai-worker; queued work waits)" -ForegroundColor DarkGray
+} else {
+    Enable-Prevention
+}
 Write-Host "  Auto-restart on crash:    ON" -ForegroundColor Green
 Write-Host ""
 
@@ -585,42 +599,51 @@ Write-Host ""
 Write-Host "-> Waitress server on port $port..."
 $script:flaskProc = Start-Flask
 
-Write-Host "-> Cloudflare Tunnel (mw-backend -> api.michaelwegter.com)..."
-Normalize-TunnelConfig
-$script:tunnelProc = Start-Tunnel
-
-Write-Host "-> Managed services from data/services.json..."
-Sync-ServiceManifest
-Ensure-OrschellBuilt
-# Kick the engine early so it warms while Flask and the tunnel come up; the
-# monitor loop starts the containers once it answers.
-if (@(Read-Services | Where-Object { [string]$_.type -eq 'container' }).Count -gt 0) {
-    [void](Ensure-DockerEngine)
-}
-Ensure-Services
-
-# Say what is registered and where each one stands. The supervisor is silent
-# when everything is already listening, which is correct but indistinguishable
-# from it not running at all — as happened when a pulled launcher sat inert
-# because PowerShell had the old script in memory.
-$svcAll = @(Read-Services)
-if ($svcAll.Count -eq 0) {
-    Write-Host "  Managed services:         none registered" -ForegroundColor DarkGray
+if ($isWorker) {
+    Write-Host "-> Cloudflare Tunnel:       skipped (ai-worker never joins the tunnel)" -ForegroundColor DarkGray
+    Write-Host "-> Managed services:        skipped (ai-worker)" -ForegroundColor DarkGray
 } else {
-    Write-Host "  Managed services:" -ForegroundColor Green
-    foreach ($s in $svcAll) {
-        $kind = if ([string]$s.type -eq 'container') { 'container' } else { 'process' }
-        if (Test-Port $s.port) {
-            Write-Host ("    - {0,-24} {1,-10} port {2,-6} listening" -f $s.name, $kind, $s.port) -ForegroundColor Green
-        } else {
-            Write-Host ("    - {0,-24} {1,-10} port {2,-6} not up yet" -f $s.name, $kind, $s.port) -ForegroundColor Yellow
+    Write-Host "-> Cloudflare Tunnel (mw-backend -> api.michaelwegter.com)..."
+    Normalize-TunnelConfig
+    $script:tunnelProc = Start-Tunnel
+
+    Write-Host "-> Managed services from data/services.json..."
+    Sync-ServiceManifest
+    Ensure-OrschellBuilt
+    # Kick the engine early so it warms while Flask and the tunnel come up; the
+    # monitor loop starts the containers once it answers.
+    if (@(Read-Services | Where-Object { [string]$_.type -eq 'container' }).Count -gt 0) {
+        [void](Ensure-DockerEngine)
+    }
+    Ensure-Services
+
+    # Say what is registered and where each one stands. The supervisor is silent
+    # when everything is already listening, which is correct but indistinguishable
+    # from it not running at all — as happened when a pulled launcher sat inert
+    # because PowerShell had the old script in memory.
+    $svcAll = @(Read-Services)
+    if ($svcAll.Count -eq 0) {
+        Write-Host "  Managed services:         none registered" -ForegroundColor DarkGray
+    } else {
+        Write-Host "  Managed services:" -ForegroundColor Green
+        foreach ($s in $svcAll) {
+            $kind = if ([string]$s.type -eq 'container') { 'container' } else { 'process' }
+            if (Test-Port $s.port) {
+                Write-Host ("    - {0,-24} {1,-10} port {2,-6} listening" -f $s.name, $kind, $s.port) -ForegroundColor Green
+            } else {
+                Write-Host ("    - {0,-24} {1,-10} port {2,-6} not up yet" -f $s.name, $kind, $s.port) -ForegroundColor Yellow
+            }
         }
     }
 }
 
 Write-Host ""
 Write-Host "✓ Running. Press Ctrl+C to stop cleanly." -ForegroundColor Green
-Write-Host "  Health: https://api.michaelwegter.com/health" -ForegroundColor DarkGray
+if ($isWorker) {
+    Write-Host "  Health: http://127.0.0.1:$port/jobs/health (local only)" -ForegroundColor DarkGray
+} else {
+    Write-Host "  Health: https://api.michaelwegter.com/health" -ForegroundColor DarkGray
+}
 
 # ── Auto-deploy: poll git; on a new commit, pull + restart the server IN THIS ──
 # ── window (the Python child is replaced; this window never closes).          ──
@@ -645,9 +668,11 @@ function Invoke-AutoDeploy {
                 Write-Host "  requirements.txt changed -- installing deps..." -ForegroundColor Yellow
                 & $PythonExe -m pip install -r (Join-Path $ScriptDir 'requirements.txt') 2>&1 | Write-Host
             }
-            Sync-ServiceManifest
-            if ($changed -match 'services/orschell-ecommerce|services\.manifest\.json') {
-                Build-OrschellService
+            if (-not $isWorker) {
+                Sync-ServiceManifest
+                if ($changed -match 'services/orschell-ecommerce|services\.manifest\.json') {
+                    Build-OrschellService
+                }
             }
 
             # A change to THIS file needs more than a Flask restart. PowerShell
@@ -693,19 +718,19 @@ function Invoke-AutoDeploy {
 while ($true) {
     Start-Sleep -Seconds 10
 
-    Normalize-TunnelConfig   # self-heal if a deploy script corrupted the config
+    if (-not $isWorker) { Normalize-TunnelConfig }   # self-heal if a deploy script corrupted the config
 
     if ($script:flaskProc.HasExited) {
         Write-Host "$(Get-Date -f 'HH:mm:ss')  Server exited (code $($script:flaskProc.ExitCode)) -- restarting..." -ForegroundColor Yellow
         $script:flaskProc = Start-Flask
     }
 
-    if ($script:tunnelProc.HasExited) {
+    if ($script:tunnelProc -and $script:tunnelProc.HasExited) {
         Write-Host "$(Get-Date -f 'HH:mm:ss')  Tunnel exited (code $($script:tunnelProc.ExitCode)) -- restarting..." -ForegroundColor Yellow
         $script:tunnelProc = Start-Tunnel
     }
 
-    Ensure-Services
+    if (-not $isWorker) { Ensure-Services }
 
     if (((Get-Date) - $lastPoll).TotalSeconds -ge $pollEvery) {
         Invoke-AutoDeploy

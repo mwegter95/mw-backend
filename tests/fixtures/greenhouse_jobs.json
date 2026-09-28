@@ -1,0 +1,294 @@
+{
+ "jobs": [
+  {
+   "absolute_url": "https://www.jamf.com/about/careers/jobs/?gh_jid=6188569004&gh_jid=6188569004",
+   "internal_job_id": 5213185004,
+   "location": {
+    "name": "US Remote"
+   },
+   "metadata": null,
+   "id": 6188569004,
+   "updated_at": "2026-09-14T11:52:38-04:00",
+   "requisition_id": "2589",
+   "title": "Account Executive | HCLS",
+   "company_name": "Jamf",
+   "first_published": "2026-09-14T11:52:38-04:00",
+   "language": "en",
+   "application_deadline": null,
+   "content": "&lt;div class=&quot;content-intro&quot;&gt;&lt;p class=&quot;p1&quot;&gt;At Jamf, we believe in an open, flexible culture based on respect and trust. Our track record and thriving work environment all stem from the freedom we grant ourselves to get the job done right. We take pride in helping tens of thousands of customers around the globe succeed with Apple.&lt;/p&gt;\n&lt;p&gt;The secret to our success lies in our connectivity, while operating with a high degree of flexibility. Work-life balance remains our priority while feeling connected is important to maintain our strong culture, achieve our goals, and thrive as #OneJamf.&lt;/p&gt;\n&lt;p&gt;&amp;nbsp;&lt;/p&gt;&lt;/div&gt;&lt;p data-renderer-start-pos=&quot;1303&quot;&gt;&lt;strong data-renderer-mark=&quot;true&quot;&gt;What you’ll do",
+   "departments": [
+    {
+     "id": 4019581004,
+     "name": "Sales",
+     "child_ids": [],
+     "parent_id": 4019580004
+    }
+   ],
+   "offices": [
+    {
+     "id": 4010219004,
+     "name": "US Remote",
+     "location": null,
+     "child_ids": [],
+     "parent_id": 4010185004
+    }
+   ],
+   "ai_disclaimer": "<p>We use Greenhouse’s AI-powered Talent Matching tool to compare your application against our job requirements. Our human recruiters and hiring managers review all output from Talent Matching and make the final decision with respect to each application. Jamf respects your right to opt-out of the Talent Matching process at any time without adverse impact to your application. By proceeding with your application, you acknowledge that you have been informed about our use of Talent Matching in our hiring process.&nbsp;Click here to learn more about how we process your data for this purpose, including your rights.</p>",
+   "include_ai_disclaimer": true,
+   "ai_opt_out_request_url": "http://app4.greenhouse.io/ai_opt_out_request/job_post/6188569004/ai_opt_out"
+  },
+  {
+   "absolute_url": "https://www.jamf.com/about/careers/jobs/?gh_jid=5705348004&gh_jid=5705348004",
+   "internal_job_id": 5005115004,
+   "location": {
+    "name": "Austin, TX; Eau Claire, WI; Minneapolis, MN"
+   },
+   "metadata": null,
+   "id": 5705348004,
+   "updated_at": "2026-09-14T17:03:19-04:00",
+   "requisition_id": "2232",
+   "title": "Account Executive | SMB | New Logo",
+   "company_name": "Jamf",
+   "first_published": "2025-11-13T09:01:08-05:00",
+   "language": "en",
+   "application_deadline": null,
+   "content": "&lt;div class=&quot;content-intro&quot;&gt;&lt;p class=&quot;p1&quot;&gt;At Jamf, we believe in an open, flexible culture based on respect and trust. Our track record and thriving work environment all stem from the freedom we grant ourselves to get the job done right. We take pride in helping tens of thousands of customers around the globe succeed with Apple.&lt;/p&gt;\n&lt;p&gt;The secret to our success lies in our connectivity, while operating with a high degree of flexibility. Work-life balance remains our priority while feeling connected is important to maintain our strong culture, achieve our goals, and thrive as #OneJamf.&lt;/p&gt;\n&lt;p&gt;&amp;nbsp;&lt;/p&gt;&lt;/div&gt;&lt;p data-renderer-start-pos=&quot;1303&quot;&gt;&lt;strong data-renderer-mark=&quot;true&quot;&gt;What you’ll do",
+   "departments": [
+    {
+     "id": 4019581004,
+     "name": "Sales",
+     "child_ids": [],
+     "parent_id": 4019580004
+    }
+   ],
+   "offices": [
+    {
+     "id": 4010222004,
+     "name": "Austin, TX",
+     "location": null,
+     "child_ids": [],
+     "parent_id": 4010185004
+    },
+    {
+     "id": 4010207004,
+     "name": "Eau Claire, WI",
+     "location": null,
+     "child_ids": [],
+     "parent_id": 4010185004
+    },
+    {
+     "id": 4010206004,
+     "name": "Minneapolis, MN",
+     "location": null,
+     "child_ids": [],
+     "parent_id": 4010185004
+    }
+   ],
+   "ai_disclaimer": "<p>We use Greenhouse’s AI-powered Talent Matching tool to compare your application against our job requirements. Our human recruiters and hiring managers review all output from Talent Matching and make the final decision with respect to each application. Jamf respects your right to opt-out of the Talent Matching process at any time without adverse impact to your application. By proceeding with your application, you acknowledge that you have been informed about our use of Talent Matching in our hiring process.&nbsp;Click here to learn more about how we process your data for this purpose, including your rights.</p>",
+   "include_ai_disclaimer": true,
+   "ai_opt_out_request_url": "http://app4.greenhouse.io/ai_opt_out_request/job_post/5705348004/ai_opt_out"
+  },
+  {
+   "absolute_url": "https://www.jamf.com/about/careers/jobs/?gh_jid=6093747004&gh_jid=6093747004",
+   "internal_job_id": 5005115004,
+   "location": {
+    "name": "Minneapolis, MN"
+   },
+   "metadata": null,
+   "id": 6093747004,
+   "updated_at": "2026-09-14T17:03:42-04:00",
+   "requisition_id": "2232",
+   "title": "Account Executive | SMB | New Logo",
+   "company_name": "Jamf",
+   "first_published": "2026-06-18T12:00:57-04:00",
+   "language": "en",
+   "application_deadline": null,
+   "content": "&lt;div class=&quot;content-intro&quot;&gt;&lt;p class=&quot;p1&quot;&gt;At Jamf, we believe in an open, flexible culture based on respect and trust. Our track record and thriving work environment all stem from the freedom we grant ourselves to get the job done right. We take pride in helping tens of thousands of customers around the globe succeed with Apple.&lt;/p&gt;\n&lt;p&gt;The secret to our success lies in our connectivity, while operating with a high degree of flexibility. Work-life balance remains our priority while feeling connected is important to maintain our strong culture, achieve our goals, and thrive as #OneJamf.&lt;/p&gt;\n&lt;p&gt;&amp;nbsp;&lt;/p&gt;&lt;/div&gt;&lt;p data-renderer-start-pos=&quot;1303&quot;&gt;&lt;strong data-renderer-mark=&quot;true&quot;&gt;What you’ll do",
+   "departments": [
+    {
+     "id": 4019581004,
+     "name": "Sales",
+     "child_ids": [],
+     "parent_id": 4019580004
+    }
+   ],
+   "offices": [
+    {
+     "id": 4010222004,
+     "name": "Austin, TX",
+     "location": null,
+     "child_ids": [],
+     "parent_id": 4010185004
+    },
+    {
+     "id": 4010207004,
+     "name": "Eau Claire, WI",
+     "location": null,
+     "child_ids": [],
+     "parent_id": 4010185004
+    },
+    {
+     "id": 4010206004,
+     "name": "Minneapolis, MN",
+     "location": null,
+     "child_ids": [],
+     "parent_id": 4010185004
+    }
+   ],
+   "ai_disclaimer": "<p>We use Greenhouse’s AI-powered Talent Matching tool to compare your application against our job requirements. Our human recruiters and hiring managers review all output from Talent Matching and make the final decision with respect to each application. Jamf respects your right to opt-out of the Talent Matching process at any time without adverse impact to your application. By proceeding with your application, you acknowledge that you have been informed about our use of Talent Matching in our hiring process.&nbsp;Click here to learn more about how we process your data for this purpose, including your rights.</p>",
+   "include_ai_disclaimer": true,
+   "ai_opt_out_request_url": "http://app4.greenhouse.io/ai_opt_out_request/job_post/6093747004/ai_opt_out"
+  },
+  {
+   "absolute_url": "https://www.jamf.com/about/careers/jobs/?gh_jid=6201368004&gh_jid=6201368004",
+   "internal_job_id": 5220254004,
+   "location": {
+    "name": "US Remote"
+   },
+   "metadata": null,
+   "id": 6201368004,
+   "updated_at": "2026-09-18T17:55:19-04:00",
+   "requisition_id": "2593",
+   "title": "Digital Success Engineer",
+   "company_name": "Jamf",
+   "first_published": "2026-09-18T17:55:19-04:00",
+   "language": "en",
+   "application_deadline": null,
+   "content": "&lt;div class=&quot;content-intro&quot;&gt;&lt;p class=&quot;p1&quot;&gt;At Jamf, we believe in an open, flexible culture based on respect and trust. Our track record and thriving work environment all stem from the freedom we grant ourselves to get the job done right. We take pride in helping tens of thousands of customers around the globe succeed with Apple.&lt;/p&gt;\n&lt;p&gt;The secret to our success lies in our connectivity, while operating with a high degree of flexibility. Work-life balance remains our priority while feeling connected is important to maintain our strong culture, achieve our goals, and thrive as #OneJamf.&lt;/p&gt;\n&lt;p&gt;&amp;nbsp;&lt;/p&gt;&lt;/div&gt;&lt;p&gt;&lt;strong&gt;What you&#39;ll do at Jamf&lt;/strong&gt;&lt;/p&gt;\n&lt;p&gt;The Digital Success Engineer b",
+   "departments": [
+    {
+     "id": 4019598004,
+     "name": "Customer Success",
+     "child_ids": [],
+     "parent_id": 4019597004
+    }
+   ],
+   "offices": [
+    {
+     "id": 4010219004,
+     "name": "US Remote",
+     "location": null,
+     "child_ids": [],
+     "parent_id": 4010185004
+    }
+   ],
+   "ai_disclaimer": "<p>We use Greenhouse’s AI-powered Talent Matching tool to compare your application against our job requirements. Our human recruiters and hiring managers review all output from Talent Matching and make the final decision with respect to each application. Jamf respects your right to opt-out of the Talent Matching process at any time without adverse impact to your application. By proceeding with your application, you acknowledge that you have been informed about our use of Talent Matching in our hiring process.&nbsp;Click here to learn more about how we process your data for this purpose, including your rights.</p>",
+   "include_ai_disclaimer": true,
+   "ai_opt_out_request_url": "http://app4.greenhouse.io/ai_opt_out_request/job_post/6201368004/ai_opt_out"
+  },
+  {
+   "absolute_url": "https://www.jamf.com/about/careers/jobs/?gh_jid=6138831004&gh_jid=6138831004",
+   "internal_job_id": 5197750004,
+   "location": {
+    "name": "US Remote"
+   },
+   "metadata": null,
+   "id": 6138831004,
+   "updated_at": "2026-09-03T11:43:27-04:00",
+   "requisition_id": "2564",
+   "title": " Digital Success Strategy Manager",
+   "company_name": "Jamf",
+   "first_published": "2026-08-14T14:21:32-04:00",
+   "language": "en",
+   "application_deadline": null,
+   "content": "&lt;div class=&quot;content-intro&quot;&gt;&lt;p class=&quot;p1&quot;&gt;At Jamf, we believe in an open, flexible culture based on respect and trust. Our track record and thriving work environment all stem from the freedom we grant ourselves to get the job done right. We take pride in helping tens of thousands of customers around the globe succeed with Apple.&lt;/p&gt;\n&lt;p&gt;The secret to our success lies in our connectivity, while operating with a high degree of flexibility. Work-life balance remains our priority while feeling connected is important to maintain our strong culture, achieve our goals, and thrive as #OneJamf.&lt;/p&gt;\n&lt;p&gt;&amp;nbsp;&lt;/p&gt;&lt;/div&gt;&lt;p&gt;&lt;strong&gt;What you&#39;ll do at Jamf&lt;/strong&gt;&lt;/p&gt;\n&lt;p&gt;At Jamf, we empower people to ",
+   "departments": [
+    {
+     "id": 4019598004,
+     "name": "Customer Success",
+     "child_ids": [],
+     "parent_id": 4019597004
+    }
+   ],
+   "offices": [
+    {
+     "id": 4010219004,
+     "name": "US Remote",
+     "location": null,
+     "child_ids": [],
+     "parent_id": 4010185004
+    }
+   ],
+   "ai_disclaimer": "<p>We use Greenhouse’s AI-powered Talent Matching tool to compare your application against our job requirements. Our human recruiters and hiring managers review all output from Talent Matching and make the final decision with respect to each application. Jamf respects your right to opt-out of the Talent Matching process at any time without adverse impact to your application. By proceeding with your application, you acknowledge that you have been informed about our use of Talent Matching in our hiring process.&nbsp;Click here to learn more about how we process your data for this purpose, including your rights.</p>",
+   "include_ai_disclaimer": true,
+   "ai_opt_out_request_url": "http://app4.greenhouse.io/ai_opt_out_request/job_post/6138831004/ai_opt_out"
+  },
+  {
+   "absolute_url": "https://www.jamf.com/about/careers/jobs/?gh_jid=6202302004&gh_jid=6202302004",
+   "internal_job_id": 5220947004,
+   "location": {
+    "name": "Bangalore, India"
+   },
+   "metadata": null,
+   "id": 6202302004,
+   "updated_at": "2026-09-22T03:12:58-04:00",
+   "requisition_id": "2595",
+   "title": "Distribution Channel Manager | India",
+   "company_name": "Jamf",
+   "first_published": "2026-09-22T03:12:58-04:00",
+   "language": "en",
+   "application_deadline": null,
+   "content": "&lt;div class=&quot;content-intro&quot;&gt;&lt;p class=&quot;p1&quot;&gt;At Jamf, we believe in an open, flexible culture based on respect and trust. Our track record and thriving work environment all stem from the freedom we grant ourselves to get the job done right. We take pride in helping tens of thousands of customers around the globe succeed with Apple.&lt;/p&gt;\n&lt;p&gt;The secret to our success lies in our connectivity, while operating with a high degree of flexibility. Work-life balance remains our priority while feeling connected is important to maintain our strong culture, achieve our goals, and thrive as #OneJamf.&lt;/p&gt;\n&lt;p&gt;&amp;nbsp;&lt;/p&gt;&lt;/div&gt;&lt;p style=&quot;text-align: justify;&quot;&gt;&lt;strong&gt;What you’ll do at Jamf:&lt;/strong&gt;&lt;/p&gt;\n&lt",
+   "departments": [
+    {
+     "id": 4019581004,
+     "name": "Sales",
+     "child_ids": [],
+     "parent_id": 4019580004
+    }
+   ],
+   "offices": [
+    {
+     "id": 4039494004,
+     "name": "Bangalore, India",
+     "location": null,
+     "child_ids": [],
+     "parent_id": 4010196004
+    }
+   ],
+   "ai_disclaimer": "<p>We use Greenhouse’s AI-powered Talent Matching tool to compare your application against our job requirements. Our human recruiters and hiring managers review all output from Talent Matching and make the final decision with respect to each application. Jamf respects your right to opt-out of the Talent Matching process at any time without adverse impact to your application. By proceeding with your application, you acknowledge that you have been informed about our use of Talent Matching in our hiring process.&nbsp;Click here to learn more about how we process your data for this purpose, including your rights.</p>",
+   "include_ai_disclaimer": true,
+   "ai_opt_out_request_url": "http://app4.greenhouse.io/ai_opt_out_request/job_post/6202302004/ai_opt_out"
+  },
+  {
+   "absolute_url": "https://www.jamf.com/about/careers/jobs/?gh_jid=6188569004&gh_jid=6188569004",
+   "internal_job_id": 5213185004,
+   "location": {
+    "name": "Minneapolis, MN"
+   },
+   "metadata": null,
+   "id": 999000001,
+   "updated_at": "2026-09-14T11:52:38-04:00",
+   "requisition_id": "2589",
+   "title": "Senior Marketing Manager, Brand",
+   "company_name": "Jamf",
+   "first_published": "2026-09-14T11:52:38-04:00",
+   "language": "en",
+   "application_deadline": null,
+   "content": "&lt;div class=&quot;content-intro&quot;&gt;&lt;p class=&quot;p1&quot;&gt;At Jamf, we believe in an open, flexible culture based on respect and trust. Our track record and thriving work environment all stem from the freedom we grant ourselves to get the job done right. We take pride in helping tens of thousands of customers around the globe succeed with Apple.&lt;/p&gt;\n&lt;p&gt;The secret to our success lies in our connectivity, while operating with a high degree of flexibility. Work-life balance remains our priority while feeling connected is important to maintain our strong culture, achieve our goals, and thrive as #OneJamf.&lt;/p&gt;\n&lt;p&gt;&amp;nbsp;&lt;/p&gt;&lt;/div&gt;&lt;p data-renderer-start-pos=&quot;1303&quot;&gt;&lt;strong data-renderer-mark=&quot;true&quot;&gt;What you’ll do",
+   "departments": [
+    {
+     "id": 4019581004,
+     "name": "Sales",
+     "child_ids": [],
+     "parent_id": 4019580004
+    }
+   ],
+   "offices": [
+    {
+     "id": 4010219004,
+     "name": "US Remote",
+     "location": null,
+     "child_ids": [],
+     "parent_id": 4010185004
+    }
+   ],
+   "ai_disclaimer": "<p>We use Greenhouse’s AI-powered Talent Matching tool to compare your application against our job requirements. Our human recruiters and hiring managers review all output from Talent Matching and make the final decision with respect to each application. Jamf respects your right to opt-out of the Talent Matching process at any time without adverse impact to your application. By proceeding with your application, you acknowledge that you have been informed about our use of Talent Matching in our hiring process.&nbsp;Click here to learn more about how we process your data for this purpose, including your rights.</p>",
+   "include_ai_disclaimer": true,
+   "ai_opt_out_request_url": "http://app4.greenhouse.io/ai_opt_out_request/job_post/6188569004/ai_opt_out"
+  }
+ ],
+ "meta": {
+  "total": 7
+ }
+}

@@ -1,0 +1,87 @@
+{
+ "meta": {
+  "totalCount": 4
+ },
+ "result": [
+  {
+   "id": "214",
+   "jobOpeningName": "Future Interest Application",
+   "departmentId": null,
+   "departmentLabel": null,
+   "employmentStatusLabel": "Full time",
+   "employmentType": null,
+   "location": {
+    "city": "Minneapolis",
+    "state": "Minnesota"
+   },
+   "atsLocation": {
+    "country": null,
+    "state": null,
+    "province": null,
+    "city": null
+   },
+   "isRemote": null,
+   "locationType": "2"
+  },
+  {
+   "id": "312",
+   "jobOpeningName": "Performance Media Planner - Paid Search + Paid Social",
+   "departmentId": "18246",
+   "departmentLabel": "Performance Media",
+   "employmentStatusLabel": "Full time",
+   "employmentType": null,
+   "location": {
+    "city": "Minneapolis",
+    "state": "Minnesota"
+   },
+   "atsLocation": {
+    "country": null,
+    "state": null,
+    "province": null,
+    "city": null
+   },
+   "isRemote": null,
+   "locationType": "2"
+  },
+  {
+   "id": "313",
+   "jobOpeningName": "Associate Performance Media Planner - Paid Search + Paid Social",
+   "departmentId": "18246",
+   "departmentLabel": "Performance Media",
+   "employmentStatusLabel": "Full time",
+   "employmentType": null,
+   "location": {
+    "city": "Minneapolis",
+    "state": "Minnesota"
+   },
+   "atsLocation": {
+    "country": null,
+    "state": null,
+    "province": null,
+    "city": null
+   },
+   "isRemote": null,
+   "locationType": "2"
+  },
+  {
+   "id": "314",
+   "jobOpeningName": "Associate Performance Media Manager - Paid Search + Paid Social",
+   "departmentId": "18246",
+   "departmentLabel": "Performance Media",
+   "employmentStatusLabel": "Full time",
+   "employmentType": null,
+   "location": {
+    "city": "Minneapolis",
+    "state": "Minnesota"
+   },
+   "atsLocation": {
+    "country": null,
+    "state": null,
+    "province": null,
+    "city": null
+   },
+   "isRemote": null,
+   "locationType": "2"
+  }
+ ]
+}

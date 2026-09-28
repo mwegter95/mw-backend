@@ -1,0 +1,13 @@
+[
+ {"name": "3M", "domain": "3m.com", "homepage_url": "https://www.3m.com", "hq_city": "Maplewood", "hq_state": "MN",
+  "industry": "mfg_chemicals_coatings", "sub_industry": "Diversified industrial science", "products": ["abrasives", "adhesives", "films"],
+  "summary": "Diversified science company headquartered in Maplewood.", "ownership": "public", "employee_band": "5000+",
+  "founded_year": 1902, "well_known": true, "careers_url": "https://3m.wd1.myworkdayjobs.com/Search", "sources": ["live test"]},
+ {"name": "HealthPartners", "domain": "healthpartners.com", "hq_city": "Bloomington", "hq_state": "MN", "industry": "healthcare",
+  "summary": "Integrated nonprofit health care provider and insurer.", "ownership": "nonprofit", "employee_band": "5000+",
+  "well_known": true, "careers_url": "https://fa-etnv-saasfaprod1.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/healthpartners"},
+ {"name": "Jamf", "domain": "jamf.com", "hq_city": "Minneapolis", "hq_state": "MN", "industry": "tech_software",
+  "careers_url": "https://job-boards.greenhouse.io/jamf"},
+ {"name": "Collective Measures", "domain": "collectivemeasures.com", "hq_city": "Minneapolis", "hq_state": "MN",
+  "industry": "agency_marketing", "careers_url": "https://collectivemeasures.bamboohr.com/careers"}
+]

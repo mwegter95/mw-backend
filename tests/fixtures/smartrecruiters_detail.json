@@ -1,0 +1,114 @@
+{
+ "id": "744000148454651",
+ "name": "Data Operations Consultant ",
+ "uuid": "f4a3d5b9-5fa9-48af-ba55-30669c9c3e81",
+ "jobId": "77d771c2-3c32-4eec-b9a1-9b7cd6684a16",
+ "jobAdId": "f9fbb59b-d9db-4c26-a4c9-959f920b370a",
+ "defaultJobAd": true,
+ "refNumber": "REF2025N",
+ "company": {
+  "name": "SmartRecruiters Inc",
+  "identifier": "smartrecruiters"
+ },
+ "location": {
+  "city": "Poland",
+  "region": "Remote",
+  "country": "pl",
+  "remote": true,
+  "hybrid": false,
+  "fullLocation": "Poland, Remote, Poland"
+ },
+ "customField": [
+  {
+   "fieldId": "58b7e4d6e4b0885c92cd98ee",
+   "fieldLabel": "Department",
+   "valueId": "5408931",
+   "valueLabel": "Technical Services"
+  },
+  {
+   "fieldId": "68f89f37181dbd53b2d51cc1",
+   "fieldLabel": "SAP Cost Center",
+   "valueId": "ccc63762-5f8e-43c3-b3e1-05a5ce9b24e1",
+   "valueLabel": "545000309"
+  },
+  {
+   "fieldId": "COUNTRY",
+   "fieldLabel": "Country/Region",
+   "valueId": "pl",
+   "valueLabel": "Poland"
+  },
+  {
+   "fieldId": "58b7e4d6e4b0885c92cd98eb",
+   "fieldLabel": "Brands",
+   "valueId": "default",
+   "valueLabel": "SmartRecruiters Inc"
+  },
+  {
+   "fieldId": "617043f52193e5503b7715c3",
+   "fieldLabel": "SR Cost Center",
+   "valueId": "e5f0ae46-b6d3-46ed-9607-12414b4c048e",
+   "valueLabel": "3.06 COGS Technical Services"
+  },
+  {
+   "fieldId": "627035b6330a2b4d25aa0882",
+   "fieldLabel": "Career Site Department Labels",
+   "valueId": "694b6ffd-b262-41ff-b6f7-18cc9c2354bd",
+   "valueLabel": "Technology"
+  }
+ ],
+ "releasedDate": "2026-09-09T09:43:26.403Z",
+ "creator": {
+  "name": "",
+  "avatarUrl": ""
+ },
+ "postingUrl": "https://jobs.smartrecruiters.com/smartrecruiters/744000148454651-data-operations-consultant-",
+ "applyUrl": "https://jobs.smartrecruiters.com/smartrecruiters/744000148454651-data-operations-consultant-?oga=true",
+ "referralUrl": "https://jobs.smartrecruiters.com/external-referrals/company/smartrecruiters/publication/f4a3d5b9-5fa9-48af-ba55-30669c9c3e81?dcr_ci=smartrecruiters",
+ "jobAd": {
+  "sections": {
+   "companyDescription": {
+    "title": "Company Description",
+    "text": "<p>SmartRecruiters is the Recruiting AI Company that transforms hiring for the world’s leading enterprises. Built for global scale, SmartRecruiters, an SAP company, delivers an AI-powered hiring platform that automates and optimizes the entire talent acquisition process, ensuring faster and smarter hiring decisions. More than 4,000 companies, including Amazon, Visa, and McDonald's, rely on SmartRecruiters to build winning teams. In 2025, SmartRecruiters joined SAP, the global leader in enterpris"
+   },
+   "jobDescription": {
+    "title": "Job Description",
+    "text": "<p><strong>Contract Type: 12-Month Fixed-Term Contract</strong></p><p>We're looking for a technical engineer to support our customers' needs in an area of data migrations, integrations, custom reports, and automating&#xa0;manual processes for our teams.&#xa0;Our team stays ahead of challenging tasks of automating&#xa0;our current processes and helping our implementation team to automate theirs.&#xa0;</p><p>If you are looking for the place where you can have a real&#xa0;impact on the shape of bus"
+   },
+   "qualifications": {
+    "title": "Qualifications",
+    "text": "<p><strong>Qualifications</strong></p><p>At least 2 years of experience with ETL tools (Talend preferred)</p><ul><li>At least 1 years of experience in professional programming (Python: pandas, requests, fastAPI, flask)</li><li>Experience with databases (SQL, NoSQL)</li><li>Experience with Git/Github, http(s) protocol, web applications security</li><li>Experience in building integrations between different web applications</li><li>Knowledge of different aspects of building RESTful web services</li"
+   },
+   "additionalInformation": {
+    "title": "Additional Information",
+    "text": "<p>SmartRecruiters is proud to be an Equal Employment Opportunity and Affirmative Action employer. We do not discriminate based upon race, religion, color, national origin, gender (including pregnancy, childbirth, or related medical conditions), sexual orientation, gender identity, gender expression, age, status as a protected veteran, status as an individual with a disability, or other applicable legally protected characteristics. your information will be kept confidential according to EEO guid"
+   }
+  }
+ },
+ "active": true,
+ "visibility": "PUBLIC",
+ "industry": {
+  "id": "computer_software",
+  "label": "Computer Software"
+ },
+ "function": {
+  "id": "information_technology",
+  "label": "Information Technology"
+ },
+ "department": {
+  "id": 5408931,
+  "label": "Technical Services"
+ },
+ "experienceLevel": {
+  "id": "associate",
+  "label": "Associate"
+ },
+ "typeOfEmployment": {
+  "id": "contract",
+  "label": "Contract"
+ },
+ "language": {
+  "code": "en",
+  "label": "English",
+  "labelNative": "English (US)"
+ }
+}
