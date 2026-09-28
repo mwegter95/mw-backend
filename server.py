@@ -381,8 +381,15 @@ app.register_blueprint(gaming_bp)
 # ─── Job Scout: direct-from-employer job search (mounted at /jobs) ───────────
 # Discovers local employers, reads their careers systems, and queues AI scoring
 # for the ai-worker instance. See jobscout/ and JOBSCOUT_SETUP.md.
-from jobscout_blueprint import jobscout_bp, start_jobscout
-app.register_blueprint(jobscout_bp)
+# Isolated like life_gcal below: a Job Scout import problem must not take the rest of the API down.
+try:
+    from jobscout_blueprint import jobscout_bp, start_jobscout
+    app.register_blueprint(jobscout_bp)
+except Exception as _jobs_import_err:  # pragma: no cover
+    log.error("[jobs] Job Scout disabled — import failed: %s", _jobs_import_err)
+
+    def start_jobscout(role):
+        log.error("[jobs] not started (import failed at boot)")
 
 from yard_seed import seed_for_owner as _yard_seed_for_owner
 from yard_seed_v2 import seed_v2_for_owner as _yard_seed_v2_for_owner
