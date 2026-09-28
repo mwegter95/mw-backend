@@ -90,7 +90,7 @@ def get(client, url, user=1):
 
 def test_health_is_open(app_env):
     body = app_env.get("/jobs/health").get_json()
-    assert body["ok"] and body["protocol"] == 1 and body["role"] == "primary" and body["commit"]
+    assert body["ok"] and body["protocol"] == 1 and body["role"] == "jobscout" and body["commit"]
 
 
 def test_auth_paths(app_env):
@@ -273,7 +273,7 @@ def test_status_and_discovery_plan(seeded):
     counts = status["counts"]
     assert counts["companies"] == 2 and counts["companies_by_status"]["ignored"] == 1 and counts["hidden_gems"] == 1
     assert counts["jobs_open"] == 4 and counts["jobs_matching"] == 3 and counts["unscored"] == 3  # ignored co. excluded
-    assert status["queue"] == {"queued": 0, "leased": 0, "failed": 0} and status["instances"][0]["role"] == "primary"
+    assert status["queue"] == {"queued": 0, "leased": 0, "failed": 0} and status["instances"][0]["role"] == "jobscout"
     assert status["next_sweep_at"].endswith("Z")
     plan = get(client, "/jobs/api/discovery/plan?keywords=precast%20concrete&sources=maps&max_queries=5")[1]
     assert plan["total"] == 5 and plan["queries"][0] == {"source": "maps", "query": "precast concrete company",

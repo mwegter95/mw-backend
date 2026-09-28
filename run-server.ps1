@@ -3,9 +3,10 @@
 .SYNOPSIS
     Persistent mw-backend launcher for Windows.
     - Starts Flask server + Cloudflare named tunnel
-    - MW_ROLE=ai-worker (in .env, e.g. on wegter-pc): runs Flask only, bound to
-      127.0.0.1 for the Job Scout AI worker -- no tunnel, no managed services,
-      no sleep/shutdown blocking. See JOBSCOUT_SETUP.md.
+    - MW_ROLE=jobscout (in .env, on wegter-pc): runs jobscout_server.py (Job Scout
+      only) instead of server.py. Its Cloudflare tunnel is a separate one installed
+      as a Windows service, so the launcher starts no tunnel and no managed
+      services there. See JOBSCOUT_SETUP.md.
     - Prevents SYSTEM sleep and hibernate while running (ES_SYSTEM_REQUIRED).
       It does NOT set ES_DISPLAY_REQUIRED, so the display should still turn off
       on its idle timer. If the screen is staying lit, run `powercfg /requests`
@@ -76,11 +77,14 @@ if (Test-Path $envFile) {
 }
 $port = if ($env:PORT) { $env:PORT } else { '5050' }
 
-# ── Role: primary (Surface, serves api.michaelwegter.com) or ai-worker (wegter-pc) ──
-# The ai-worker must never start cloudflared: Cloudflare sends traffic to every
-# connector on a tunnel, so a second one would split the API across two databases.
+# ── Role: primary (Surface: server.py + the mw-backend tunnel) or jobscout (wegter-pc) ──
+# jobscout runs jobscout_server.py. Its tunnel is its own (a Windows service), never
+# the mw-backend tunnel: Cloudflare sends traffic to every connector on a tunnel, so
+# running mw-backend's on a second machine would split api.michaelwegter.com.
 $role = if ($env:MW_ROLE) { $env:MW_ROLE.Trim().ToLower() } else { 'primary' }
-$isWorker = ($role -eq 'ai-worker')
+$isJobScout = ($role -eq 'jobscout')
+$ServerScript = if ($isJobScout) { 'jobscout_server.py' } else { 'server.py' }
+$RequirementsFile = if ($isJobScout) { 'requirements.jobscout.txt' } else { 'requirements.txt' }
 
 # Kill whatever is LISTENING on a port (used to reclaim Flask's port from a
 # squatter — e.g. a managed demo service that bound 5050 by mistake).
@@ -100,7 +104,7 @@ function Free-Port($p) {
 # ── Process starters (UseShellExecute=$false -- logs appear in this window) ────
 function Start-Flask {
     Free-Port $port   # GUARANTEE Flask owns its port; evict any squatter first
-    $psi = [System.Diagnostics.ProcessStartInfo]::new($PythonExe, 'server.py')
+    $psi = [System.Diagnostics.ProcessStartInfo]::new($PythonExe, $ServerScript)
     $psi.WorkingDirectory = $ScriptDir
     $psi.UseShellExecute  = $false
     $p = [System.Diagnostics.Process]::Start($psi)
@@ -586,12 +590,8 @@ Write-Host ""
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host "  mw-backend  --  persistent launcher" -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
-Write-Host "  Role:                     $role" -ForegroundColor Green
-if ($isWorker) {
-    Write-Host "  Sleep / shutdown:         allowed (ai-worker; queued work waits)" -ForegroundColor DarkGray
-} else {
-    Enable-Prevention
-}
+Write-Host "  Role:                     $role ($ServerScript)" -ForegroundColor Green
+Enable-Prevention
 Write-Host "  Auto-restart on crash:    ON" -ForegroundColor Green
 Write-Host ""
 
@@ -599,9 +599,20 @@ Write-Host ""
 Write-Host "-> Waitress server on port $port..."
 $script:flaskProc = Start-Flask
 
-if ($isWorker) {
-    Write-Host "-> Cloudflare Tunnel:       skipped (ai-worker never joins the tunnel)" -ForegroundColor DarkGray
-    Write-Host "-> Managed services:        skipped (ai-worker)" -ForegroundColor DarkGray
+if ($isJobScout) {
+    # The jobs.michaelwegter.com tunnel runs as the "cloudflared" Windows service.
+    $cf = Get-Service -Name 'cloudflared' -ErrorAction SilentlyContinue
+    if ($cf -and $cf.Status -eq 'Running') {
+        Write-Host "-> Cloudflare Tunnel:       cloudflared service running" -ForegroundColor Green
+    } elseif ($cf) {
+        Write-Host "-> Cloudflare Tunnel:       cloudflared service is $($cf.Status) -- starting it" -ForegroundColor Yellow
+        try { Start-Service -Name 'cloudflared' -ErrorAction Stop } catch {
+            Write-Host "   could not start it: $_ (run as admin: Start-Service cloudflared)" -ForegroundColor Red
+        }
+    } else {
+        Write-Host "-> Cloudflare Tunnel:       cloudflared service NOT installed -- see JOBSCOUT_SETUP.md" -ForegroundColor Red
+    }
+    Write-Host "-> Managed services:        skipped (jobscout)" -ForegroundColor DarkGray
 } else {
     Write-Host "-> Cloudflare Tunnel (mw-backend -> api.michaelwegter.com)..."
     Normalize-TunnelConfig
@@ -639,8 +650,8 @@ if ($isWorker) {
 
 Write-Host ""
 Write-Host "✓ Running. Press Ctrl+C to stop cleanly." -ForegroundColor Green
-if ($isWorker) {
-    Write-Host "  Health: http://127.0.0.1:$port/jobs/health (local only)" -ForegroundColor DarkGray
+if ($isJobScout) {
+    Write-Host "  Health: https://jobs.michaelwegter.com/jobs/health  (local: http://127.0.0.1:$port/jobs/health)" -ForegroundColor DarkGray
 } else {
     Write-Host "  Health: https://api.michaelwegter.com/health" -ForegroundColor DarkGray
 }
@@ -664,11 +675,11 @@ function Invoke-AutoDeploy {
             Write-Host "$(Get-Date -f 'HH:mm:ss')  New commit on origin/$script:branch -- pulling..." -ForegroundColor Cyan
             $changed = (git -C $ScriptDir diff --name-only HEAD "origin/$script:branch" 2>$null)
             git -C $ScriptDir pull --ff-only 2>&1 | Write-Host
-            if ($changed -match 'requirements\.txt') {
-                Write-Host "  requirements.txt changed -- installing deps..." -ForegroundColor Yellow
-                & $PythonExe -m pip install -r (Join-Path $ScriptDir 'requirements.txt') 2>&1 | Write-Host
+            if ($changed -match [regex]::Escape($RequirementsFile)) {
+                Write-Host "  $RequirementsFile changed -- installing deps..." -ForegroundColor Yellow
+                & $PythonExe -m pip install -r (Join-Path $ScriptDir $RequirementsFile) 2>&1 | Write-Host
             }
-            if (-not $isWorker) {
+            if (-not $isJobScout) {
                 Sync-ServiceManifest
                 if ($changed -match 'services/orschell-ecommerce|services\.manifest\.json') {
                     Build-OrschellService
@@ -718,7 +729,7 @@ function Invoke-AutoDeploy {
 while ($true) {
     Start-Sleep -Seconds 10
 
-    if (-not $isWorker) { Normalize-TunnelConfig }   # self-heal if a deploy script corrupted the config
+    if (-not $isJobScout) { Normalize-TunnelConfig }   # self-heal if a deploy script corrupted the config
 
     if ($script:flaskProc.HasExited) {
         Write-Host "$(Get-Date -f 'HH:mm:ss')  Server exited (code $($script:flaskProc.ExitCode)) -- restarting..." -ForegroundColor Yellow
@@ -730,7 +741,7 @@ while ($true) {
         $script:tunnelProc = Start-Tunnel
     }
 
-    if (-not $isWorker) { Ensure-Services }
+    if (-not $isJobScout) { Ensure-Services }
 
     if (((Get-Date) - $lastPoll).TotalSeconds -ge $pollEvery) {
         Invoke-AutoDeploy

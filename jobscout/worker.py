@@ -1,4 +1,6 @@
-"""AI worker loop (MW_ROLE=ai-worker on wegter-pc, or in-process with JOBS_AI_LOCAL=1).
+"""AI worker loop. Normally runs inside the Job Scout server (jobscout_server.py on wegter-pc, next to
+LM Studio). It can also run on another machine and pull tasks over HTTPS: set JOBS_AI_LOCAL=0 on the
+server plus JOBS_WORKER_TOKEN on both, then `python -m jobscout.worker` with MW_PRIMARY_URL.
 
 Every 5 s while busy (30 s when idle): heartbeat → if LM Studio answers, claim up to 4 tasks →
 run each through ai.chat_json → complete/fail. A protocol mismatch stops claiming (heartbeats
@@ -27,7 +29,7 @@ class ProtocolMismatch(Exception):
 
 
 class RemoteTransport:
-    """Talks to the primary over HTTPS with X-Worker-Token."""
+    """Talks to the Job Scout server over HTTPS with X-Worker-Token."""
 
     def __init__(self, base=None, token=None, session=None):
         self.base = (base or config.primary_url()).rstrip("/")
@@ -57,7 +59,7 @@ class RemoteTransport:
 
 
 class LocalTransport:
-    """Same operations directly against the local database (primary with JOBS_AI_LOCAL=1, CLI)."""
+    """Same operations directly against the local database (the in-process worker, CLI)."""
 
     def heartbeat(self, info):
         with db.session() as conn:
@@ -91,9 +93,10 @@ def record_heartbeat(conn, info):
 
 
 class Worker:
-    def __init__(self, transport, worker_id=None, ai_session=None):
+    def __init__(self, transport, worker_id=None, ai_session=None, role="ai-worker"):
         self.transport = transport
         self.worker_id = worker_id or config.instance()
+        self.role = role  # "local-ai" inside the Job Scout server, "ai-worker" on another machine
         self.ai_session = ai_session
         self.mismatch_logged = False
 
@@ -104,7 +107,7 @@ class Worker:
         stats = {"lmstudio_ok": ok, "claimed": 0, "done": 0, "failed": 0, "protocol_mismatch": False}
         info = {"worker_id": self.worker_id, "instance": config.instance(), "model": model, "lmstudio_ok": ok,
                 "commit": config.commit_sha(), "protocol": config.PROTOCOL,
-                "role": "ai-worker" if config.role() == "ai-worker" else "ai-worker-local"}
+                "role": self.role}
         try:
             self.transport.heartbeat(info)
         except (requests.RequestException, ValueError) as exc:
@@ -116,7 +119,7 @@ class Worker:
             claimed = self.transport.claim(self.worker_id, KINDS, BATCH)
         except ProtocolMismatch as exc:
             if not self.mismatch_logged:
-                log.error("worker: protocol mismatch (primary %s, worker %s) — git pull + restart needed",
+                log.error("worker: protocol mismatch (server %s, worker %s) — git pull + restart needed",
                           exc, config.PROTOCOL)
                 self.mismatch_logged = True
             stats["protocol_mismatch"] = True
@@ -166,7 +169,8 @@ def start_worker_thread(local=False):
         return _thread
     transport = LocalTransport() if local else RemoteTransport()
     worker_id = f"{config.instance()}-local" if local else config.instance()
-    _thread = threading.Thread(target=Worker(transport, worker_id).loop, name="jobs-ai-worker", daemon=True)
+    worker = Worker(transport, worker_id, role="local-ai" if local else "ai-worker")
+    _thread = threading.Thread(target=worker.loop, name="jobs-ai-worker", daemon=True)
     _thread.start()
     return _thread
 
@@ -180,7 +184,8 @@ def main(argv=None):
     if args.local:
         db.init()
     worker = Worker(LocalTransport() if args.local else RemoteTransport(),
-                    f"{config.instance()}-local" if args.local else None)
+                    f"{config.instance()}-local" if args.local else None,
+                    role="local-ai" if args.local else "ai-worker")
     if args.once:
         print(worker.run_once())
     else:

@@ -9,7 +9,7 @@ import subprocess
 from functools import lru_cache
 from pathlib import Path
 
-PROTOCOL = 1  # worker ⇄ primary protocol version; bump on incompatible changes
+PROTOCOL = 1  # version of the optional remote AI-worker protocol; bump on incompatible changes
 
 PKG_DIR = Path(__file__).resolve().parent
 BACKEND_DIR = PKG_DIR.parent
@@ -50,7 +50,8 @@ def secret_path() -> Path:
 
 
 def role() -> str:
-    return _env("MW_ROLE", "primary").lower()
+    """What this process is: "jobscout" (the Job Scout server, jobscout_server.py) unless MW_ROLE says otherwise."""
+    return _env("MW_ROLE", "jobscout").lower()
 
 
 def instance() -> str:
@@ -58,7 +59,16 @@ def instance() -> str:
 
 
 def primary_url() -> str:
-    return _env("MW_PRIMARY_URL", "https://api.michaelwegter.com").rstrip("/")
+    """Job Scout server a remote AI worker (`python -m jobscout.worker`) pulls tasks from."""
+    return _env("MW_PRIMARY_URL", "https://jobs.michaelwegter.com").rstrip("/")
+
+
+def auth_url():
+    """mw-backend that issued the sign-in token (the Surface). When set, tokens are verified by asking it
+    (GET /auth/me) instead of reading a local .secret_key and users table — so the Job Scout server
+    needs no copy of the Surface's signing key or accounts."""
+    value = _env("JOBS_AUTH_URL")
+    return value.rstrip("/") if value else None
 
 
 def worker_token():
@@ -86,7 +96,7 @@ def ai_api_base() -> str:
 
 
 def ai_model() -> str:
-    return _env("JOBS_AI_MODEL", "google/gemma-4-12b")
+    return _env("JOBS_AI_MODEL", "google/gemma-4-12b-qat")
 
 
 def ai_api_key() -> str:
@@ -94,7 +104,8 @@ def ai_api_key() -> str:
 
 
 def ai_local() -> bool:
-    return _env("JOBS_AI_LOCAL", "0") == "1"
+    """Run the AI worker inside the Job Scout server (default). 0 = leave AI tasks for a remote worker."""
+    return _env("JOBS_AI_LOCAL", "1") != "0"
 
 
 def ors_api_key():

@@ -1,4 +1,4 @@
-"""Primary-only background scheduler (one daemon thread, 60 s tick).
+"""Background scheduler for the Job Scout server (one daemon thread, 60 s tick).
 
 * every minute: return expired AI-task leases to the queue;
 * every 30 min: categorise companies whose enrich_status is pending (facts + heuristics + AI task);

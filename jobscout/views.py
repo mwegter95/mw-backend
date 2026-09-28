@@ -547,20 +547,30 @@ def status(conn, user, profile):
 
 
 def instances(conn):
-    primary_commit = config.commit_sha()
-    out = [{"instance": config.instance(), "role": "primary", "commit": primary_commit, "protocol": config.PROTOCOL,
-            "online": True}]
+    """The Job Scout server this API runs on — with its in-process AI worker's state folded in — plus any
+    remote AI workers (optional). A heartbeat older than 90 s counts as offline."""
+    server_commit = config.commit_sha()
     cutoff = db.now_iso(datetime.now(timezone.utc) - timedelta(seconds=90))
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    server = {"instance": config.instance(), "role": config.role(), "commit": server_commit,
+              "protocol": config.PROTOCOL, "online": True, "model": config.ai_model(), "lmstudio_ok": None,
+              "last_heartbeat_at": None, "tasks_done_today": 0}
+    remote = []
     for w in conn.execute("SELECT * FROM workers ORDER BY worker_id"):
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        fresh = (w["last_heartbeat_at"] or "") >= cutoff
+        done = w["tasks_done_today"] if w["day"] == today else 0
+        if w["role"] == "local-ai":
+            if w["instance"] == config.instance():
+                server.update(model=w["model"], lmstudio_ok=bool(w["lmstudio_ok"]) and fresh,
+                              last_heartbeat_at=w["last_heartbeat_at"], tasks_done_today=done)
+            continue
         mismatch = w["protocol"] != config.PROTOCOL or (
-            w["commit_sha"] not in (None, "", "unknown") and primary_commit != "unknown" and w["commit_sha"] != primary_commit)
-        out.append({"instance": w["instance"], "role": w["role"], "model": w["model"], "lmstudio_ok": bool(w["lmstudio_ok"]),
-                    "online": (w["last_heartbeat_at"] or "") >= cutoff, "last_heartbeat_at": w["last_heartbeat_at"],
-                    "commit": w["commit_sha"], "protocol": w["protocol"],
-                    "tasks_done_today": w["tasks_done_today"] if w["day"] == today else 0,
-                    "version_mismatch": bool(mismatch)})
-    return out
+            w["commit_sha"] not in (None, "", "unknown") and server_commit != "unknown" and w["commit_sha"] != server_commit)
+        remote.append({"instance": w["instance"], "role": w["role"], "model": w["model"],
+                       "lmstudio_ok": bool(w["lmstudio_ok"]), "online": fresh, "last_heartbeat_at": w["last_heartbeat_at"],
+                       "commit": w["commit_sha"], "protocol": w["protocol"], "tasks_done_today": done,
+                       "version_mismatch": bool(mismatch)})
+    return [server] + remote
 
 
 def export_snapshot(conn, user, profile):

@@ -1,0 +1,15 @@
+# Job Scout server (jobscout_server.py) — everything wegter-pc needs. It does not load the rest of
+# mw-backend, so none of requirements.txt's other packages (Spotify, 3D, Google Calendar…) are needed.
+#   venv\Scripts\pip install -r requirements.jobscout.txt
+#   venv\Scripts\python -m playwright install chromium
+flask>=3.0
+flask-cors>=4.0
+waitress>=3.0
+python-dotenv>=1.0
+requests>=2.31
+beautifulsoup4>=4.12
+lxml>=5.3
+PyJWT>=2.8
+playwright>=1.49
+# Tests (python -m pytest tests/test_jobscout_*.py)
+pytest>=8

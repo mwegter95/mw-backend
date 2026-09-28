@@ -1,19 +1,32 @@
 # Job Scout backend — developer notes
 
-Blueprint `/jobs` inside mw-backend. The contract (API shapes, schema, AI schemas, taxonomies) lives in the
+Job Scout's backend, which runs by itself on wegter-pc (`jobscout_server.py`). The contract (API shapes, schema, AI schemas, taxonomies) lives in the
 ultimate-job-scraper repo's `docs/CONTRACT.md`; running the two instances is in `JOBSCOUT_SETUP.md`; this file explains how the code is organised.
 
-## Wiring (server.py)
+## Wiring
+
+Job Scout runs on its own: `jobscout_server.py` is a small Flask app (CORS for the front end, `/health`, the
+`/jobs` blueprint) served by waitress on 127.0.0.1:$PORT (5057), published through wegter-pc's own Cloudflare
+tunnel as jobs.michaelwegter.com. `server.py` (the Surface) does not load Job Scout. `run-server.ps1` with
+`MW_ROLE=jobscout` starts `jobscout_server.py`, skips the mw-backend tunnel and managed services, and installs
+`requirements.jobscout.txt` on auto-deploy. Setup: `JOBSCOUT_SETUP.md`.
 
 ```python
 from jobscout_blueprint import jobscout_bp, start_jobscout
 app.register_blueprint(jobscout_bp)
-start_jobscout(os.environ.get("MW_ROLE", "primary"))   # in __main__, after init_db()
+start_jobscout()      # db.init, scheduler (unless JOBS_SCHEDULER=0), in-process AI worker (unless JOBS_AI_LOCAL=0)
 ```
-Importing the shim starts nothing. `start_jobscout("primary")` runs `db.init()`, marks interrupted runs failed, starts
-the scheduler (unless `JOBS_SCHEDULER=0`) and, with `JOBS_AI_LOCAL=1`, an in-process AI worker.
-`start_jobscout("ai-worker")` only starts the worker loop that pulls tasks from `MW_PRIMARY_URL`.
-Data lives in `JOBSCOUT_DATA_DIR` (default `mw-backend/data`): `jobscout.db`, plus the shared `mw.db` and `.secret_key`.
+Importing the shim starts nothing. Data lives in `JOBSCOUT_DATA_DIR` (default `mw-backend/data`): `jobscout.db`.
+
+**Sign-in**: the front end logs in on the Surface (api.michaelwegter.com/auth/login) and sends that token here.
+With `JOBS_AUTH_URL` set, `auth.require_user` verifies it by calling `{JOBS_AUTH_URL}/auth/me` (answers cached
+5 minutes, rejections 1 minute, never cached when the Surface is unreachable → 503 `auth_unavailable`). Without
+it, it verifies locally with `<data>/.secret_key` and `<data>/mw.db` (the tests do this).
+
+**AI**: the worker thread inside the server claims tasks from the local queue and calls LM Studio. Optionally
+the AI can run on another machine instead: `JOBS_AI_LOCAL=0` + `JOBS_WORKER_TOKEN` on the server, and
+`python -m jobscout.worker` there with `MW_PRIMARY_URL=https://jobs.michaelwegter.com` and the same token
+(it pulls tasks over `/jobs/worker/*`). Not used in the current setup.
 
 ## Module map (`jobscout/`)
 
@@ -85,15 +98,16 @@ python -m jobscout.geo build 2024_Gaz_place_national.txt 2024_Gaz_cousubs_nation
      roofing installer is construction, not building materials.
    * **Hidden gem** = gem_score ≥ 70, local HQ/major office, not well known, a maker (`taxonomy.is_maker`:
      manufacturing or distribution) **and categorized by the AI** — keywords alone can't judge size or fame. Gem
-     fields are recomputed for every company at primary startup (`enrich.recompute_gems`).
+     fields are recomputed for every company at server startup (`enrich.recompute_gems`).
 3. **Sweep** (nightly): each active company's adapter lists jobs with the function keywords. Jobs outside MN/WI (and not
    US-wide remote) are dropped before any detail fetch. Details are fetched only for pass/maybe titles that are new,
    retitled, or older than 14 days. A careers system without an adapter (Paycom, iCIMS…) is swept like a plain
    careers page: the rendered board text goes to a `parse_page` AI task. Salary comes from structured ATS data, else the salary text, else the description.
    Jobs missing from two consecutive sweeps get `closed_at`. Finally `enqueue_scores` queues `score_job` for every
    (open pass/maybe job × profile) whose AI score hash no longer matches `hash(profile.input_hash, job.content_hash)`.
-4. **AI worker** claims tasks (score_job > enrich_company > parse_page), calls LM Studio with a strict json_schema and
-   posts results back; the primary validates/clamps and applies them. Until then the API shows rule scores.
+4. **AI worker** (a thread in the same server) claims tasks (score_job > enrich_company > parse_page), calls LM Studio
+   with a strict json_schema, and the results are validated/clamped and applied. Until then the API shows rule
+   scores and keyword categories. `ai.parse_json_content` strips a reasoning block if the model's thinking is on.
 
 ## Adding an ATS adapter
 

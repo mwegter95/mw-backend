@@ -12,7 +12,11 @@ import requests
 
 from . import ai_schemas, config, taxonomy
 
-MAX_TOKENS = {"score_job": 700, "enrich_company": 800, "parse_page": 3000}
+# Caps, not budgets: the JSON answers are a few hundred tokens, but if the model's "thinking" is on its
+# reasoning counts against max_tokens too, and a cap that's too tight truncates the JSON.
+MAX_TOKENS = {"score_job": 1500, "enrich_company": 1500, "parse_page": 4000}
+# Reasoning blocks some models (Gemma 4 with thinking on, Qwen, DeepSeek) put in the content.
+_REASONING = re.compile(r"<think>.*?</think>|<\|channel\|?>\s*thought.*?<\|?channel\|>|<\|think\|>", re.S | re.I)
 
 SCORE_SYSTEM = """You are a careful career advisor scoring how well ONE job fits ONE candidate.
 Score "fit" 0-100:
@@ -75,7 +79,7 @@ def build_messages(kind, payload):
 
 def parse_json_content(text):
     """Parse model output as a JSON object, tolerating ``` fences and leading/trailing prose."""
-    text = (text or "").strip()
+    text = _REASONING.sub("", text or "").strip()
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I)
     try:
         return json.loads(text)
@@ -100,7 +104,10 @@ def chat_json(kind, payload, base=None, model=None, api_key=None, timeout=180, s
                      headers={"Authorization": f"Bearer {api_key or config.ai_api_key()}"})
     resp.raise_for_status()
     data = resp.json()
-    content = data["choices"][0]["message"]["content"]
+    content = data["choices"][0]["message"].get("content") or ""
+    if not content.strip():
+        raise ValueError("model returned no answer — if thinking is on for this model in LM Studio, "
+                         "it may have used the whole token budget; turn thinking off")
     return parse_json_content(content), data.get("model") or model
 
 

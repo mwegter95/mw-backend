@@ -1,6 +1,6 @@
 """Strict JSON schemas for the three AI task kinds (contract §6 + §9.5) and validate/clamp helpers.
 
-The worker sends the schema to LM Studio as response_format json_schema (strict); the primary
+The worker sends the schema to LM Studio as response_format json_schema (strict); the server
 re-validates every result with `validate(kind, result)` before persisting it.
 """
 from .taxonomy import (BUSINESS_MODELS, EMPLOYEE_BANDS, ENTITY_TYPES, INDUSTRY_IDS, LOCAL_PRESENCE, OWNERSHIP,
