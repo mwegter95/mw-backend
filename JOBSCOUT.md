@@ -14,7 +14,8 @@ tunnel as jobs.michaelwegter.com. `server.py` (the Surface) does not load Job Sc
 ```python
 from jobscout_blueprint import jobscout_bp, start_jobscout
 app.register_blueprint(jobscout_bp)
-start_jobscout()      # db.init, scheduler (unless JOBS_SCHEDULER=0), in-process AI worker (unless JOBS_AI_LOCAL=0)
+start_jobscout()      # db.init, scheduler (housekeeping; automatic runs only with JOBS_AUTO_RUNS=1),
+                      # in-process AI worker (unless JOBS_AI_LOCAL=0)
 ```
 Importing the shim starts nothing. Data lives in `JOBSCOUT_DATA_DIR` (default `mw-backend/data`): `jobscout.db`.
 
@@ -32,13 +33,14 @@ the AI can run on another machine instead: `JOBS_AI_LOCAL=0` + `JOBS_WORKER_TOKE
 
 | Module | Purpose |
 |---|---|
-| `config.py` | env vars (read at call time), `PROTOCOL`, home coordinates, function keywords, commit SHA |
+| `config.py` | env vars (read at call time), `PROTOCOL`, home coordinates, commit SHA |
 | `db.py` | SQLite connect (WAL, FKs), idempotent schema + additive `ALTER TABLE` migrations, helpers |
 | `taxonomy.py` | industries and every enum shared with the frontend; `/meta` payload |
 | `auth.py` | `require_user` (JWT + allowlist) and `require_worker` (X-Worker-Token) |
 | `http.py` | `PoliteFetcher`: Chrome headers, per-host spacing (3 s pages / 1 s ATS APIs) across threads, retries, robots.txt for pages, `Blocked` on 403/challenges |
 | `browser.py` | optional Playwright render (`fetch_rendered`), `page_html` = static first, browser on `Blocked` |
-| `normalize.py` | HTML sanitise/text, title tier + prefilter + rule score (contract §4), salary parser, workplace, locations, hashes |
+| `interests.py` | job categories (id, label, title patterns, search terms), a person's interests (categories + target titles + levels) → title match pass/maybe/fail; `combined` = everyone's, stored as `jobs.prefilter` |
+| `normalize.py` | HTML sanitise/text, title tier, rule score (contract §4), salary parser, workplace, locations, hashes |
 | `geo.py` | offline gazetteer (`data/places.json`, MN/WI/IA/ND/SD), Census geocoder, haversine, ORS drive minutes |
 | `ats/` | `detect_from_url/html` for every contract ats_type; adapters: workday, oracle, greenhouse, lever, ashby, smartrecruiters, bamboohr, breezy, recruitee, paylocity, workable, jsonld; any other detected system is read by the AI |
 | `careers.py` | find the careers page and the ATS behind it → company status (`active`/`no_ats`/`no_careers`/`blocked`/`manual_check`) |
@@ -51,7 +53,8 @@ the AI can run on another machine instead: `JOBS_AI_LOCAL=0` + `JOBS_WORKER_TOKE
 | `tasks.py` | AI queue: enqueue (deduped), atomic claim with 10-min lease, complete/fail, lease reaper |
 | `worker.py` | AI worker loop (remote or local transport), heartbeat, protocol-mismatch handling |
 | `runs.py` | background runs with live event history for SSE (one running run per kind) |
-| `scheduler.py` | lease reaper, 30-min categorisation, nightly pipeline+sweep, monthly discovery |
+| `find.py` | the on-demand "Find matches" run: discover → categorize → careers pages → read jobs → queue AI scoring |
+| `scheduler.py` | lease reaper always; with `JOBS_AUTO_RUNS=1` also 30-min categorisation, nightly pipeline+sweep, monthly discovery |
 | `views.py` / `api.py` | response builders (shared with `export-snapshot`) and the Flask blueprint |
 | `cli.py` | command line |
 
@@ -59,7 +62,7 @@ the AI can run on another machine instead: `JOBS_AI_LOCAL=0` + `JOBS_WORKER_TOKE
 
 ```
 python -m jobscout.cli init
-python -m jobscout.cli plan --keywords "injection molding" --max-queries 20
+python -m jobscout.cli plan --keywords "commercial printing" --max-queries 20
 python -m jobscout.cli discover [--industries a,b] [--keywords x,y] [--sources maps,search,osm,places] [--max-queries 60] [--cities "Oakdale, MN;Hudson, WI"] [--no-pipeline]
 python -m jobscout.cli osm
 python -m jobscout.cli pipeline [--company ID] [--limit N]
@@ -85,7 +88,8 @@ python -m jobscout.geo build 2024_Gaz_place_national.txt 2024_Gaz_cousubs_nation
      (name + `!3d…!4d…` coordinates), a "Website" button and a "category · street · phone" line, so nothing is clicked.
      (clientfinder's Maps helper clicks six cards and its selectors went stale; Job Scout no longer uses it.)
    * **search** — clientfinder's DuckDuckGo/Bing/Yellow Pages helpers. Bare keywords search as businesses
-     (`business_phrase`: "injection molding" → "injection molding company"; the bare phrase returns medical articles).
+     (`business_phrase`: "commercial printing" → "commercial printing company"; a bare product word tends to return
+     articles about it). With no industries or keywords, the plan uses one phrase for every industry (`broad_terms`).
    * **osm** — one Overpass bounding-box query with a single key-regex per website tag, trimmed to the radius in
      Python (a large `around:` union of many selectors 504s on the public servers), sent with the descriptive
      `http.APP_UA` (overpass-api.de answers 406 to generic and browser user agents). Storefront/solo office kinds
@@ -96,11 +100,15 @@ python -m jobscout.geo build 2024_Gaz_place_national.txt 2024_Gaz_cousubs_nation
    branches and sites with no sign of a local presence (unless a user restored the company).
    * The heuristic only picks a manufacturing industry with manufacturing evidence (`enrich.makes_things`), so a
      roofing installer is construction, not building materials.
-   * **Hidden gem** = gem_score ≥ 70, local HQ/major office, not well known, a maker (`taxonomy.is_maker`:
-     manufacturing or distribution) **and categorized by the AI** — keywords alone can't judge size or fame. Gem
-     fields are recomputed for every company at server startup (`enrich.recompute_gems`).
-3. **Sweep** (nightly): each active company's adapter lists jobs with the function keywords. Jobs outside MN/WI (and not
-   US-wide remote) are dropped before any detail fetch. Details are fetched only for pass/maybe titles that are new,
+   * **Hidden gem** = an established local employer most people haven't heard of, in **any industry**:
+     gem_score ≥ 70, local HQ/major office, not well known, 50–4,999 people, **and categorized by the AI** —
+     keywords alone can't judge size or fame. Gem fields are recomputed for every company at server startup
+     (`enrich.recompute_gems`).
+3. **Sweep** (on demand — part of "Find matches"; nightly only with `JOBS_AUTO_RUNS=1`): each active company's adapter
+   lists jobs, searching big boards with the words from everyone's job categories and target titles
+   (`interests.combined(conn).search_terms()`). Jobs outside MN/WI (and not US-wide remote) are dropped before any
+   detail fetch. Titles are rated pass/maybe/fail against everyone's interests (stored `jobs.prefilter`); each
+   person's list and AI scoring then use their own (`interests.for_profile`). Details are fetched only for pass/maybe titles that are new,
    retitled, or older than 14 days. A careers system without an adapter (Paycom, iCIMS…) is swept like a plain
    careers page: the rendered board text goes to a `parse_page` AI task. Salary comes from structured ATS data, else the salary text, else the description.
    Jobs missing from two consecutive sweeps get `closed_at`. Finally `enqueue_scores` queues `score_job` for every

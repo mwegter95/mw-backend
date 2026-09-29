@@ -17,15 +17,14 @@ import logging
 import math
 import random
 import re
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from . import config, db, geo, runs
+from . import config, db, geo, runs, taxonomy
 from .http import APP_UA, FetchError, get_fetcher
 
 log = logging.getLogger("jobscout")
 
 DEFAULT_MAX_QUERIES = 60
-DEFAULT_INDUSTRIES = ["mfg_plastics_packaging", "mfg_building_materials"]
 DEFAULT_SOURCES = ["maps", "search", "osm"]
 PER_QUERY_SOURCES = ("maps", "search", "places")
 OVERPASS_URLS = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"]
@@ -112,17 +111,26 @@ _BUSINESS_WORD = re.compile(r"\b(compan(y|ies)|manufactur\w*|makers?|suppliers?|
 
 
 def business_phrase(keyword):
-    """A bare process or product ("injection molding") searches as articles about the word; asking for a
-    company ("injection molding company") returns the businesses that do it."""
+    """A bare process or product ("commercial printing") searches as articles about the word; asking for a
+    company ("commercial printing company") returns the businesses that do it."""
     keyword = keyword.strip()
     return keyword if _BUSINESS_WORD.search(keyword) else f"{keyword} company"
 
 
+def broad_terms():
+    """No industries or keywords chosen: one phrase for every industry, so a search covers all kinds of local
+    employers evenly (OpenStreetMap already sweeps the whole radius regardless of industry)."""
+    return [(INDUSTRY_QUERY_WORDS[slug][0], slug) for slug in taxonomy.INDUSTRY_IDS if slug in INDUSTRY_QUERY_WORDS]
+
+
 def query_terms(industries, keywords):
-    """[(phrase, industry slug | None)] — free-text keywords first, then industry phrases."""
+    """[(phrase, industry slug | None)] — free-text keywords first, then industry phrases; everything
+    (broad_terms) when neither is given."""
     terms = [(business_phrase(k), None) for k in keywords or [] if k and k.strip()]
     for slug in industries or []:
         terms += [(w, slug) for w in INDUSTRY_QUERY_WORDS.get(slug, [])]
+    if not terms:
+        terms = broad_terms()
     seen, out = set(), []
     for phrase, slug in terms:
         if phrase.lower() not in seen:
@@ -174,10 +182,10 @@ def build_plan(industries, keywords, sources, max_queries, home_lat, home_lng, r
 
 
 def profile_defaults(profile):
-    """Discovery defaults for a profile (or Ashley's defaults when there is none)."""
+    """Discovery defaults for a profile: its hunt settings, else the industries it wants, else everything."""
     p = profile or {}
     return {
-        "industries": p.get("discover_industries") or p.get("industries_want") or DEFAULT_INDUSTRIES,
+        "industries": p.get("discover_industries") or p.get("industries_want") or [],
         "keywords": p.get("discover_keywords") or [],
         "sources": p.get("discover_sources") or DEFAULT_SOURCES,
         "max_queries": DEFAULT_MAX_QUERIES,
@@ -564,14 +572,18 @@ def run_discovery(run, options=None, profile=None, fetcher=None, start_pipeline=
 
     if new_ids:
         run.log(f"categorizing {len(new_ids)} new companies (facts + heuristics; AI enrichment queued)")
+        run.progress(0, len(new_ids), "categorize")
         with ThreadPoolExecutor(max_workers=pipeline.MAX_WORKERS) as pool:
-            list(pool.map(lambda cid: _prepare(cid, fetcher, run), new_ids))
+            futures = [pool.submit(_prepare, cid, fetcher, run) for cid in new_ids]
+            for done, fut in enumerate(as_completed(futures), 1):
+                fut.result()
+                run.progress(done, len(new_ids), "categorize")
         if start_pipeline:
             try:
                 follow = runs.start("pipeline", pipeline.run_pipeline, company_ids=new_ids, fetcher=fetcher)
                 run.log(f"careers/ATS detection + job sweep continues in pipeline run {follow.id}")
             except runs.AlreadyRunning as exc:
-                run.log(f"pipeline run {exc.run_id} already running; new companies will be picked up nightly")
+                run.log(f"pipeline run {exc.run_id} already running; new companies will be checked by the next Find matches")
     run.log(f"discovery done: {stats['new_companies']} new, {stats['known']} known, {stats['filtered']} filtered")
     return stats
 
@@ -581,7 +593,7 @@ def import_seeds(source, source_detail=None):
     Upserts by normalised domain, only filling empty fields so user/AI edits are never clobbered."""
     import json
     from pathlib import Path
-    from . import ats, enrich, taxonomy
+    from . import ats, enrich
     if isinstance(source, (str, Path)):
         source_detail = source_detail or Path(source).name
         items = json.loads(Path(source).read_text(encoding="utf-8"))

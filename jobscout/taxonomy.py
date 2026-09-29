@@ -1,29 +1,30 @@
 """Taxonomies shared with the frontend (contract §2). Single source of truth for the backend."""
 
+# Industry groups and industries in plain alphabetical order ("Other" last) so no sector is featured.
 INDUSTRIES = [
-    ("mfg_plastics_packaging", "Plastics & Packaging", "Manufacturing"),
-    ("mfg_building_materials", "Building Materials & Construction Products", "Manufacturing"),
-    ("mfg_chemicals_coatings", "Chemicals, Adhesives & Coatings", "Manufacturing"),
-    ("mfg_industrial_equipment", "Industrial Equipment & Machinery", "Manufacturing"),
-    ("mfg_electrical_electronics", "Electrical & Electronics", "Manufacturing"),
-    ("mfg_medical_devices", "Medical Devices", "Manufacturing"),
-    ("mfg_food_beverage", "Food & Beverage Manufacturing", "Manufacturing"),
-    ("mfg_consumer_products", "Consumer & Outdoor Products", "Manufacturing"),
-    ("mfg_metals_fabrication", "Metals & Fabrication", "Manufacturing"),
-    ("mfg_other", "Other Manufacturing", "Manufacturing"),
     ("construction_real_estate", "Construction & Real Estate", "Built environment"),
+    ("agriculture", "Agriculture & Agribusiness", "Commerce"),
     ("distribution_logistics", "Distribution & Logistics", "Commerce"),
     ("retail_ecommerce", "Retail & E-commerce", "Commerce"),
-    ("agriculture", "Agriculture & Agribusiness", "Commerce"),
-    ("tech_software", "Technology & Software", "Technology"),
-    ("it_services", "IT Services & Consulting", "Technology"),
-    ("professional_services", "Professional Services", "Services"),
+    ("healthcare", "Healthcare & Health Systems", "Health"),
+    ("mfg_building_materials", "Building Materials & Construction Products", "Manufacturing"),
+    ("mfg_chemicals_coatings", "Chemicals, Adhesives & Coatings", "Manufacturing"),
+    ("mfg_consumer_products", "Consumer & Outdoor Products", "Manufacturing"),
+    ("mfg_electrical_electronics", "Electrical & Electronics", "Manufacturing"),
+    ("mfg_food_beverage", "Food & Beverage Manufacturing", "Manufacturing"),
+    ("mfg_industrial_equipment", "Industrial Equipment & Machinery", "Manufacturing"),
+    ("mfg_medical_devices", "Medical Devices", "Manufacturing"),
+    ("mfg_metals_fabrication", "Metals & Fabrication", "Manufacturing"),
+    ("mfg_plastics_packaging", "Plastics & Packaging", "Manufacturing"),
+    ("mfg_other", "Other Manufacturing", "Manufacturing"),
+    ("education", "Education", "Public & nonprofit"),
+    ("government", "Government & Public Sector", "Public & nonprofit"),
+    ("nonprofit", "Nonprofit & Associations", "Public & nonprofit"),
     ("agency_marketing", "Marketing, Advertising & PR Agencies", "Services"),
     ("financial_insurance", "Financial Services & Insurance", "Services"),
-    ("healthcare", "Healthcare & Health Systems", "Health"),
-    ("education", "Education", "Public & nonprofit"),
-    ("nonprofit", "Nonprofit & Associations", "Public & nonprofit"),
-    ("government", "Government & Public Sector", "Public & nonprofit"),
+    ("professional_services", "Professional Services", "Services"),
+    ("it_services", "IT Services & Consulting", "Technology"),
+    ("tech_software", "Technology & Software", "Technology"),
     ("energy_utilities", "Energy & Utilities", "Other"),
     ("hospitality_media", "Hospitality, Recreation & Media", "Other"),
     ("other", "Other", "Other"),
@@ -45,9 +46,26 @@ ATS_TYPES = ["workday", "oracle", "greenhouse", "lever", "ashby", "smartrecruite
              "ukg", "adp", "paylocity", "paycom", "dayforce", "successfactors", "taleo", "jobvite",
              "workable", "jazzhr", "rippling", "recruitee", "breezy", "phenom", "jsonld", "html", "none"]
 
-# AI result enums (contract §6).
-ROLE_FAMILIES = ["marketing", "communications", "brand", "content", "demand_gen", "product_marketing",
-                 "pr", "digital", "other"]
+# Job categories a profile can pick (the title patterns behind them live in interests.py).
+JOB_CATEGORIES = [
+    ("marketing", "Marketing"), ("communications", "Communications & PR"),
+    ("sales", "Sales & Business Development"), ("customer", "Customer Success & Service"),
+    ("product", "Product Management"), ("software", "Software & Web Development"),
+    ("it", "IT & Cybersecurity"), ("data", "Data & Analytics"), ("design", "Design & UX"),
+    ("engineering", "Engineering (non-software)"), ("operations", "Operations & Supply Chain"),
+    ("finance", "Finance & Accounting"), ("hr", "HR & Recruiting"), ("project", "Project & Program Management"),
+    ("admin", "Administration & Office"), ("legal", "Legal & Compliance"),
+    ("fundraising", "Fundraising & Development"), ("healthcare", "Healthcare & Clinical"),
+    ("education", "Education & Training"), ("leadership", "General Management"),
+    ("trades", "Skilled Trades & Production"),
+]
+JOB_CATEGORY_IDS = [c[0] for c in JOB_CATEGORIES]
+JOB_CATEGORY_LABEL = dict(JOB_CATEGORIES)
+# Seniority levels a profile can ask for (title tiers minus intern).
+LEVELS = ["exec", "director", "manager", "lead", "ic"]
+
+# AI result enums (contract §6). role_family is the job category the AI reads the posting as.
+ROLE_FAMILIES = JOB_CATEGORY_IDS + ["other"]
 SENIORITIES = ["exec", "director", "manager", "senior_ic", "ic", "intern"]
 SALARY_PERIODS = ["year", "hour"]
 
@@ -57,25 +75,13 @@ LOCAL_PRESENCE = ["hq", "major_office", "branch", "none", "unknown"]
 DISCOVER_SOURCES = ["maps", "search", "osm", "places"]
 ENRICH_STATUSES = ["pending", "queued", "done", "failed"]
 
-RUN_KINDS = ["sweep", "discover", "pipeline", "enrich", "detect", "company"]
+RUN_KINDS = ["find", "sweep", "discover", "pipeline", "enrich", "detect", "company"]
 TASK_KINDS = ["score_job", "enrich_company", "parse_page"]
 
-# Industries that count toward the gem score's "industrial" bonus (contract §4).
-GEM_INDUSTRY_BONUS = {"distribution_logistics", "construction_real_estate"}
 
 
 def industry_label(slug):
     return INDUSTRY_LABEL.get(slug) if slug else None
-
-
-def is_maker(slug) -> bool:
-    """Companies that make or move physical products: the "hidden gem" employers (a 200-person
-    injection molder, a millwork shop) as opposed to local service firms."""
-    return INDUSTRY_GROUP.get(slug) == "Manufacturing" or slug == "distribution_logistics"
-
-
-def is_industrial(slug) -> bool:
-    return INDUSTRY_GROUP.get(slug) == "Manufacturing" or slug in GEM_INDUSTRY_BONUS
 
 
 def coerce(value, allowed, default):
@@ -96,6 +102,8 @@ def meta(places_enabled=False) -> dict:
         "local_presence": LOCAL_PRESENCE,
         "discover_sources": DISCOVER_SOURCES,
         "industries": [{"id": i, "label": l, "group": g} for i, l, g in INDUSTRIES],
+        "job_categories": [{"id": i, "label": l} for i, l in JOB_CATEGORIES],
+        "levels": LEVELS,
         "employee_bands": EMPLOYEE_BANDS,
         "ownership": OWNERSHIP,
         "workplace": WORKPLACE,

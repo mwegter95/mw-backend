@@ -1,6 +1,8 @@
 """Background scheduler for the Job Scout server (one daemon thread, 60 s tick).
 
-* every minute: return expired AI-task leases to the queue;
+Always:
+* every minute: return expired AI-task leases to the queue.
+Only with JOBS_AUTO_RUNS=1 (off by default — Job Scout runs on demand):
 * every 30 min: categorise companies whose enrich_status is pending (facts + heuristics + AI task);
 * nightly at JOBS_SWEEP_HOUR (local time; runs any time in the following 4 hours if the machine was
   busy/asleep, once per day — last date kept in meta): pipeline for pending companies, then the sweep;
@@ -60,6 +62,9 @@ def tick(now=None):
     now = (now or datetime.now()).astimezone()
     with db.session() as conn:
         tasks.reap(conn)
+    if not config.auto_runs_enabled():
+        return
+    with db.session() as conn:
         today, month = now.strftime("%Y-%m-%d"), now.strftime("%Y-%m")
         in_window = config.sweep_hour() <= now.hour < config.sweep_hour() + SWEEP_WINDOW_HOURS
         due_sweep = in_window and db.get_meta(conn, "last_sweep_date") != today
@@ -85,7 +90,10 @@ def tick(now=None):
 
 
 def _loop():
-    log.info("jobs scheduler started (sweep hour %s local)", config.sweep_hour())
+    if config.auto_runs_enabled():
+        log.info("jobs scheduler started: automatic runs on (sweep hour %s local)", config.sweep_hour())
+    else:
+        log.info("jobs scheduler started: on demand only (JOBS_AUTO_RUNS=1 enables nightly/monthly runs)")
     while True:
         try:
             tick()

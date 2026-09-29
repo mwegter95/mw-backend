@@ -534,8 +534,17 @@ def home_points(conn):
     return points
 
 
+# A hidden gem is an established local employer most people haven't heard of — in any industry. Size is
+# what makes a company a real employer for someone's next role (a 3-person shop rarely hires a director),
+# so the badge needs 50+ people; industry never counts.
+GEM_SIZE_POINTS = {"50-199": 25, "200-999": 25, "1000-4999": 12}
+GEM_SIZES = set(GEM_SIZE_POINTS)
+
+
 def compute_gem(company, homes):
-    """(gem_score, hidden_gem) per contract §4 + §9.2."""
+    """(gem_score 0–100, hidden_gem 0/1): local HQ 35 · not well known 25 (unknown 10) · privately held 15
+    (subsidiary 5) · 50–999 people 25 (1,000–4,999: 12). The badge also needs the AI's categorization,
+    an HQ or major office here, a real company site and 50–4,999 people."""
     lat, lng = company.get("lat"), company.get("lng")
     near = lat is not None and lng is not None and any(geo.haversine_miles(lat, lng, h[0], h[1]) <= 60 for h in homes)
     local = near and company.get("local_presence") not in ("branch", "none")
@@ -543,12 +552,11 @@ def compute_gem(company, homes):
     wk = company.get("well_known")
     score += 25 if wk == 0 else 10 if wk is None else 0
     score += {"private": 15, "family": 15, "pe_backed": 15, "subsidiary": 5}.get(company.get("ownership"), 0)
-    score += {"50-199": 15, "200-999": 15, "1000-4999": 8, "1-49": 5}.get(company.get("employee_band"), 0)
-    score += 10 if taxonomy.is_industrial(company.get("industry")) else 0
+    score += GEM_SIZE_POINTS.get(company.get("employee_band"), 0)
     confirmed = company.get("enrich_source") in ("ai", "seed")
     hidden = (confirmed and score >= 70 and wk != 1 and local and company.get("entity_type") == "company"
               and company.get("local_presence") in ("hq", "major_office")
-              and taxonomy.is_maker(company.get("industry")))
+              and company.get("employee_band") in GEM_SIZES)
     return score, int(hidden)
 
 

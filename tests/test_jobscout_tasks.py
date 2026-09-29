@@ -183,19 +183,23 @@ def test_apply_enrichment_gem_and_restore_rules(conn):
 def test_compute_gem_rules():
     home = [(45.0619, -92.9766)]
     base = {"lat": 44.96, "lng": -92.96, "well_known": 0, "ownership": "family", "employee_band": "200-999",
-            "industry": "mfg_plastics_packaging", "entity_type": "company", "local_presence": "hq",
+            "industry": "professional_services", "entity_type": "company", "local_presence": "hq",
             "enrich_source": "ai"}
     assert enrich.compute_gem(base, home) == (100, 1)
+    # any industry: the same company as a software firm, a manufacturer or a health system scores the same
+    for industry in ("tech_software", "mfg_other", "healthcare", "financial_insurance"):
+        assert enrich.compute_gem({**base, "industry": industry}, home) == (100, 1)
     # keywords alone can't judge size or fame, so no badge until the AI has categorized the company
     assert enrich.compute_gem({**base, "enrich_source": "heuristic"}, home) == (100, 0)
-    # a local, private, mid-size law firm scores well but isn't a "hidden gem" maker
-    assert enrich.compute_gem({**base, "industry": "professional_services"}, home) == (90, 0)
+    # a 12-person shop can be local and unknown, but it isn't an established employer
+    assert enrich.compute_gem({**base, "employee_band": "1-49"}, home) == (75, 0)
+    assert enrich.compute_gem({**base, "employee_band": "unknown"}, home) == (75, 0)
     assert enrich.compute_gem({**base, "local_presence": "branch"}, home)[1] == 0
     assert enrich.compute_gem({**base, "well_known": 1}, home) == (75, 0)
     far = enrich.compute_gem({**base, "lat": 40.0, "lng": -100.0}, home)
     assert far == (65, 0)
-    assert enrich.compute_gem({**base, "well_known": None, "ownership": "subsidiary", "employee_band": "1000-4999",
-                               "industry": "healthcare"}, home) == (58, 0)
+    assert enrich.compute_gem({**base, "well_known": None, "ownership": "subsidiary", "employee_band": "1000-4999"},
+                              home) == (62, 0)
 
 
 def _page_facts(title, meta="", home="", category=None):
@@ -360,6 +364,7 @@ class FakeAdapter(Adapter):
 
 
 def test_upsert_details_only_when_needed_and_close_after_two_misses(conn):
+    conn.execute("""INSERT INTO profiles(user_id, job_categories) VALUES(1, '["marketing"]')""")
     cid = insert_company(conn)
     company = dict(conn.execute("SELECT * FROM companies WHERE id=?", (cid,)).fetchone())
     listing = [{"ats_job_id": "a", "title": "Brand Manager", "location_text": "Oakdale, MN"},
@@ -391,11 +396,22 @@ def test_apply_parsed_page_jobs(conn):
     assert (job["source"], job["url"], job["salary_max"], job["workplace"]) == ("page_ai", "https://acme.com/careers/mm", 110000, "hybrid")
 
 
+def test_scheduler_is_on_demand_by_default(data_dir, monkeypatch):
+    from jobscout import runs, scheduler
+    started = []
+    monkeypatch.setattr(runs, "start", lambda kind, target, **kw: started.append(kind) or runs.Run(len(started), kind, kind))
+    monkeypatch.setenv("JOBS_SWEEP_HOUR", "2")
+    scheduler._last_enrich = None
+    scheduler.tick(datetime(2026, 10, 1, 2, 30).astimezone())  # sweep hour, 1st of the month
+    assert started == []
+
+
 def test_scheduler_nightly_once_per_day_and_monthly_discovery(data_dir, monkeypatch):
     from jobscout import runs, scheduler
     started = []
     monkeypatch.setattr(runs, "start", lambda kind, target, **kw: started.append(kind) or runs.Run(len(started), kind, kind))
     monkeypatch.setenv("JOBS_SWEEP_HOUR", "2")
+    monkeypatch.setenv("JOBS_AUTO_RUNS", "1")
     scheduler._last_enrich = None
     local = datetime(2026, 10, 1, 2, 30).astimezone()
     scheduler.tick(local)

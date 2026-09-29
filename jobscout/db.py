@@ -59,6 +59,8 @@ SCHEMA = {
         # §9 discovery-first additions
         ("discover_industries", "TEXT DEFAULT '[]'"), ("discover_keywords", "TEXT DEFAULT '[]'"),
         ("discover_sources", "TEXT DEFAULT '[\"maps\",\"search\",\"osm\"]'"),
+        # §12 what the person is looking for (interests.py)
+        ("job_categories", "TEXT DEFAULT '[]'"), ("seniority", "TEXT DEFAULT '[]'"),
     ], []),
     "job_scores": ([
         ("job_id", "INTEGER"), ("profile_id", "INTEGER"), ("fit", "INTEGER"), ("fit_source", "TEXT"),

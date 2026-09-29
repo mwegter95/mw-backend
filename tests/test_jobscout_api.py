@@ -10,7 +10,7 @@ import pytest
 from flask import Flask
 
 from conftest import insert_company, insert_job
-from jobscout import db, geo, pipeline, runs, sweep
+from jobscout import db, find, geo, pipeline, runs, sweep, tasks
 from jobscout.api import jobscout_bp
 
 SECRET = "test-secret-with-at-least-thirty-two-bytes"
@@ -25,7 +25,8 @@ COMPANY_KEYS = {"id", "name", "domain", "homepage_url", "careers_url", "ats_type
                 "employee_band", "founded_year", "well_known", "gem_score", "hidden_gem", "tags", "hq_city", "hq_state",
                 "lat", "lng", "miles", "open_jobs", "matching_jobs", "enrich_status", "enrich_source", "last_swept_at",
                 "following", "notes", "entity_type", "local_presence", "discovered_via", "discovered_at", "source"}
-PROFILE_KEYS = {"name", "resume_text", "want_text", "avoid_text", "target_titles", "industries_want", "industries_avoid",
+PROFILE_KEYS = {"name", "resume_text", "want_text", "avoid_text", "target_titles", "job_categories", "seniority",
+                "industries_want", "industries_avoid",
                 "salary_floor", "workplace_pref", "home_address", "home_lat", "home_lng", "radius_miles", "radius_minutes",
                 "discover_industries", "discover_keywords", "discover_sources"}
 
@@ -115,8 +116,12 @@ def test_me_meta_and_visits(app_env, conn):
     row = conn.execute("SELECT last_visit_at, prev_visit_at FROM profiles").fetchone()
     assert row["prev_visit_at"] == old and row["last_visit_at"] > old
     meta = get(app_env, "/jobs/api/meta")[1]
-    assert len(meta["industries"]) == 26 and meta["industries"][0] == {"id": "mfg_plastics_packaging",
-                                                                        "label": "Plastics & Packaging", "group": "Manufacturing"}
+    assert len(meta["industries"]) == 26 and meta["industries"][0] == {"id": "construction_real_estate",
+                                                                        "label": "Construction & Real Estate",
+                                                                        "group": "Built environment"}
+    assert meta["industries"][-1]["id"] == "other"  # alphabetical by group and name, "Other" last
+    assert {"id": "marketing", "label": "Marketing"} in meta["job_categories"] and len(meta["job_categories"]) == 21
+    assert meta["levels"] == ["exec", "director", "manager", "lead", "ic"]
     assert meta["places_enabled"] is False and "hidden" in meta["statuses"] and meta["employee_bands"][-1] == "unknown"
 
 
@@ -124,13 +129,15 @@ def test_profile_get_put(app_env):
     assert get(app_env, "/jobs/api/profile")[1] == {"profile": None}
     resp = app_env.put("/jobs/api/profile", headers=auth(),
                        json={"name": "Ashley", "home_address": "Birchwood Village, MN", "salary_floor": "110000",
-                             "industries_want": ["mfg_plastics_packaging", "bogus"], "discover_keywords": ["precast concrete"],
-                             "workplace_pref": ["hybrid", "remote"]})
+                             "industries_want": ["tech_software", "bogus"], "discover_keywords": ["precast concrete"],
+                             "workplace_pref": ["hybrid", "remote"], "job_categories": ["marketing", "nope"],
+                             "seniority": ["director", "intern"], "target_titles": ["Director of Brand"]})
     profile = resp.get_json()["profile"]
     assert set(profile) == PROFILE_KEYS
-    assert profile["salary_floor"] == 110000 and profile["industries_want"] == ["mfg_plastics_packaging"]
-    assert profile["discover_industries"] == ["mfg_plastics_packaging", "mfg_building_materials"]
-    assert profile["target_titles"][0] == "Marketing Director" and profile["home_lat"] == 45.0619
+    assert profile["salary_floor"] == 110000 and profile["industries_want"] == ["tech_software"]
+    assert profile["discover_industries"] == []  # nothing assumed: discovery then covers every industry
+    assert profile["job_categories"] == ["marketing"] and profile["seniority"] == ["director"]
+    assert profile["target_titles"] == ["Director of Brand"] and profile["home_lat"] == 45.0619
     assert get(app_env, "/jobs/api/profile")[1]["profile"]["discover_keywords"] == ["precast concrete"]
 
 
@@ -274,7 +281,7 @@ def test_status_and_discovery_plan(seeded):
     assert counts["companies"] == 2 and counts["companies_by_status"]["ignored"] == 1 and counts["hidden_gems"] == 1
     assert counts["jobs_open"] == 4 and counts["jobs_matching"] == 3 and counts["unscored"] == 3  # ignored co. excluded
     assert status["queue"] == {"queued": 0, "leased": 0, "failed": 0} and status["instances"][0]["role"] == "jobscout"
-    assert status["next_sweep_at"].endswith("Z")
+    assert status["next_sweep_at"] is None  # on demand by default: nothing scheduled
     plan = get(client, "/jobs/api/discovery/plan?keywords=precast%20concrete&sources=maps&max_queries=5")[1]
     assert plan["total"] == 5 and plan["queries"][0] == {"source": "maps", "query": "precast concrete company",
                                                           "town": plan["queries"][0]["town"], "industry": None}
@@ -292,7 +299,8 @@ def test_worker_token_checks(app_env, monkeypatch):
 
 def test_worker_lease_flow_updates_fit(seeded):
     client = seeded["client"]
-    client.put("/jobs/api/profile", headers=auth(), json={"name": "Ashley"})  # queues score_job for 4 open matching jobs
+    client.put("/jobs/api/profile", headers=auth(),  # queues score_job for the open jobs in her field
+               json={"name": "Ashley", "job_categories": ["marketing", "communications"]})
     hb = client.post("/jobs/worker/heartbeat", headers=WORKER, json={
         "worker_id": "wegter-pc", "instance": "wegter-pc", "model": "google/gemma-4-12b", "lmstudio_ok": True,
         "commit": "abc1234", "protocol": 1}).get_json()
@@ -323,3 +331,70 @@ def test_worker_lease_flow_updates_fit(seeded):
     pc = next(i for i in status["instances"] if i["instance"] == "wegter-pc")
     assert pc["online"] and pc["lmstudio_ok"] and pc["tasks_done_today"] == 1 and pc["model"] == "google/gemma-4-12b"
     assert status["queue"]["queued"] == 2 and status["counts"]["unscored"] == 2
+
+
+# ── find matches / activity (on demand) ─────────────────────────────────────
+
+def test_activity_follows_the_run_and_the_ai(seeded, conn):
+    client = seeded["client"]
+    release = threading.Event()
+
+    def slow(run, **_):
+        run.log("step 1 of 3: looking for employers you haven't seen yet")
+        run.progress(12, 60, "discover")
+        release.wait(5)
+        return {"new_companies": 2}
+
+    running = runs.start("find", slow)
+    try:
+        for _ in range(50):
+            if running.current:
+                break
+            threading.Event().wait(0.02)
+        tasks.enqueue(conn, "score_job", job_id=seeded["mm"], profile_id=1)
+        tasks.enqueue(conn, "enrich_company", company_id=seeded["gem"])
+        conn.commit()
+        act = get(client, "/jobs/api/status")[1]["activity"]
+        assert act["run"]["kind"] == "find" and act["run"]["progress"] == {"done": 12, "total": 60, "phase": "discover"}
+        assert act["run"]["last_line"].startswith("step 1 of 3")
+        assert act["ai"]["queued"] == 2 and act["ai"]["total"] == 2
+        assert act["ai"]["pending_by_kind"] == {"score_job": 1, "enrich_company": 1, "parse_page": 0}
+        # a second heavy run is refused while this one works
+        busy = client.post("/jobs/api/runs", headers=auth(), json={"kind": "sweep"})
+        assert busy.status_code == 409 and busy.get_json() == {"error": "already_running", "run_id": running.id,
+                                                             "kind": "find"}
+    finally:
+        release.set()
+    for _ in range(100):
+        if running.status != "running":
+            break
+        threading.Event().wait(0.02)
+    conn.execute("UPDATE ai_tasks SET status='done', updated_at=?", (db.now_iso(),))
+    conn.commit()
+    act = get(client, "/jobs/api/status")[1]["activity"]
+    assert act["run"] is None and act["last_run"]["id"] == running.id and act["last_run"]["stats"]["new_companies"] == 2
+    assert act["ai"]["done"] == 2 and act["ai"]["queued"] == 0
+
+
+def test_changing_what_you_look_for_rerates_stored_jobs(seeded, conn):
+    client = seeded["client"]
+    welder = conn.execute("SELECT prefilter FROM jobs WHERE id=?", (seeded["welder"],)).fetchone()["prefilter"]
+    assert welder == "fail"
+    client.put("/jobs/api/profile", headers=auth(), json={"job_categories": ["trades"], "target_titles": []})
+    assert conn.execute("SELECT prefilter FROM jobs WHERE id=?", (seeded["welder"],)).fetchone()["prefilter"] == "pass"
+    items = get(client, "/jobs/api/jobs")[1]["items"]
+    assert [it["title"] for it in items] == ["Welder"]  # her own list follows her own categories
+    status = get(client, "/jobs/api/status")[1]
+    assert status["looking_for"] == {"categories": ["Skilled Trades & Production"], "titles": [], "levels": []}
+
+
+def test_find_is_a_run_kind(seeded, monkeypatch):
+    monkeypatch.setattr(find, "run_find", lambda run, **kw: {"new_companies": 0})
+    resp = seeded["client"].post("/jobs/api/runs", headers=auth(), json={"kind": "find", "options": {"skip_discovery": True}})
+    assert resp.status_code == 200 and resp.get_json()["run_id"]
+
+
+def test_profile_without_interests_queues_no_scores(seeded, conn):
+    client = seeded["client"]
+    client.put("/jobs/api/profile", headers=auth(), json={"name": "New person"})
+    assert conn.execute("SELECT COUNT(*) FROM ai_tasks WHERE kind='score_job'").fetchone()[0] == 0

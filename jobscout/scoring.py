@@ -5,12 +5,12 @@ otherwise the API falls back to the rule score for that profile (computed on the
 """
 import hashlib
 
-from . import db, normalize, taxonomy, tasks
+from . import db, interests, normalize, taxonomy, tasks
 
 PROFILE_LIST_FIELDS = ("target_titles", "industries_want", "industries_avoid", "workplace_pref",
-                       "discover_industries", "discover_keywords", "discover_sources")
+                       "discover_industries", "discover_keywords", "discover_sources", "job_categories", "seniority")
 _HASHED_FIELDS = ("resume_text", "want_text", "avoid_text", "target_titles", "industries_want", "industries_avoid",
-                  "salary_floor", "workplace_pref")
+                  "salary_floor", "workplace_pref", "job_categories", "seniority")
 MATCHING = ("pass", "maybe")
 
 
@@ -76,6 +76,8 @@ def build_score_payload(conn, job_id, profile_id):
         "profile": {
             "resume_text": (profile.get("resume_text") or "")[:8000], "want_text": profile.get("want_text") or "",
             "avoid_text": profile.get("avoid_text") or "", "target_titles": profile["target_titles"],
+            "job_categories": [taxonomy.JOB_CATEGORY_LABEL.get(c, c) for c in profile["job_categories"]],
+            "levels": profile["seniority"],
             "industries_want": labels(profile["industries_want"]), "industries_avoid": labels(profile["industries_avoid"]),
             "salary_floor": profile.get("salary_floor"), "workplace_pref": profile["workplace_pref"],
         },
@@ -105,21 +107,26 @@ def apply_score(conn, task, result, model):
 
 
 def enqueue_scores(conn, profile_ids=None, job_ids=None) -> int:
-    """Queue score_job for every (open pass/maybe job × profile) whose AI score is missing or stale."""
+    """Queue score_job for every (open job in that person's field × profile) whose AI score is missing or
+    stale. "In their field" = their own job categories/titles (interests.for_profile); a profile without
+    any is skipped until it has some."""
     q = "SELECT * FROM profiles" + (f" WHERE id IN ({','.join('?' * len(profile_ids))})" if profile_ids else "")
     profiles = [profile_dict(r) for r in conn.execute(q, tuple(profile_ids or ()))]
-    jq = ("SELECT j.id, j.content_hash FROM jobs j JOIN companies c ON c.id = j.company_id "
+    jq = ("SELECT j.id, j.title, j.title_tier, j.content_hash FROM jobs j JOIN companies c ON c.id = j.company_id "
           "WHERE j.closed_at IS NULL AND j.prefilter IN ('pass','maybe') AND c.status != 'ignored'")
     if job_ids:
         jq += f" AND j.id IN ({','.join('?' * len(job_ids))})"
     jobs = conn.execute(jq, tuple(job_ids or ())).fetchall()
     queued = 0
     for p in profiles:
-        if not p.get("input_hash"):
+        wanted = interests.for_profile(p)
+        if not p.get("input_hash") or wanted.empty:
             continue
         current = {r["job_id"]: r["input_hash"] for r in
                    conn.execute("SELECT job_id, input_hash FROM job_scores WHERE profile_id=?", (p["id"],))}
         for j in jobs:
+            if wanted.match(j["title"], j["title_tier"]) == "fail":
+                continue
             if current.get(j["id"]) != score_input_hash(p["input_hash"], j["content_hash"]):
                 if tasks.enqueue(conn, "score_job", job_id=j["id"], profile_id=p["id"]):
                     queued += 1

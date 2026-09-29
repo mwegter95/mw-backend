@@ -3,8 +3,7 @@ import pytest
 
 from jobscout import geo
 from jobscout.normalize import (content_hash, detect_workplace, html_to_text, is_local, make_salary,
-                                parse_location, parse_salary, prefilter, rule_score, sanitize_html, title_matches,
-                                title_tier)
+                                parse_location, parse_salary, rule_score, sanitize_html, title_matches)
 
 
 @pytest.mark.parametrize("text,lo,hi,period", [
@@ -50,35 +49,6 @@ def test_make_salary_structured():
     assert make_salary(90000, None, "YEAR").min == 90000
 
 
-@pytest.mark.parametrize("title,tier,pf", [
-    ("Data Center Vertical Marketing Manager", "manager", "pass"),
-    ("Director of Marketing", "director", "pass"),
-    ("VP, Brand", "exec", "pass"),
-    ("Head of Communications", "exec", "pass"),
-    ("Labor Communications Principal Consultant", "lead", "pass"),
-    ("Senior Content Strategist", "lead", "pass"),
-    ("Global Product Marketer", "ic", "maybe"),
-    ("Events Coordinator", "ic", "maybe"),
-    ("Senior Manager - Global Product Strategy", "manager", "maybe"),
-    ("Director, Strategy & Business Development", "director", "maybe"),
-    ("Manager, Investor Relations", "manager", "maybe"),
-    ("Internship - 2027 Undergraduate Marketing Intern", "intern", "fail"),
-    ("Marketing Co-op", "intern", "fail"),
-    ("Procurement Director - Global 3rd Party Materials", "director", "fail"),
-    ("Master Data Management Operations Mgr", "manager", "fail"),
-    ("Social Worker", "ic", "fail"),
-    ("Digital Success Engineer", "ic", "fail"),
-    ("Staffing Coordinator", "ic", "fail"),
-    ("Strategic Account Manager", "manager", "fail"),
-    ("Communications Technician", "ic", "fail"),
-    ("Senior Manager, IT Digital Commercial Excellence", "manager", "fail"),
-    ("Sr. Director, Digital Leader – Consumer Business Group", "director", "pass"),
-])
-def test_title_tier_and_prefilter(title, tier, pf):
-    assert title_tier(title) == tier
-    assert prefilter(title, tier) == pf
-
-
 def test_title_matches_fuzzy():
     targets = ["Marketing Director", "Communications Manager"]
     assert title_matches("Director of Marketing", targets)
@@ -97,8 +67,18 @@ def test_rule_score_contract_math():
     assert rule_score(unknown_salary, profile, None) == 82      # unknown salary +5
     low = dict(job, salary_min=60000, salary_max=70000)
     assert rule_score(low, profile, None) == 77                 # below floor: +0
-    assert rule_score({"title": "Procurement Director"}, profile, None) <= 15  # prefilter fail cap
-    assert rule_score({"title": "Marketing Manager", "workplace": "unknown"}, None, None) == 67
+    assert rule_score({"title": "Procurement Director"}, profile, None) <= 15  # not their field: capped
+    # no profile: the stored prefilter (everyone's interests) decides; manager 32 + field 30 + unknown pay 5
+    assert rule_score({"title": "Marketing Manager", "workplace": "unknown", "prefilter": "pass"}, None, None) == 67
+    assert rule_score({"title": "Marketing Manager", "workplace": "unknown"}, None, None) <= 15
+
+
+def test_rule_score_uses_categories_and_levels():
+    profile = {"job_categories": ["finance"], "seniority": ["manager", "director"], "workplace_pref": ["onsite"]}
+    fit = rule_score({"title": "Finance Manager", "workplace": "onsite"}, profile, None)
+    assert fit == 40 + 30 + 5 + 5  # wanted level + in field + workplace + unknown pay
+    assert rule_score({"title": "Senior Accountant", "workplace": "onsite"}, profile, None) == 15 + 30 + 5 + 5
+    assert rule_score({"title": "Marketing Manager", "workplace": "onsite"}, profile, None) <= 15
 
 
 @pytest.mark.parametrize("args,expected", [

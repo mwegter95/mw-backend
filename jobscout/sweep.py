@@ -11,8 +11,9 @@ from urllib.parse import urljoin
 from . import ats, browser, careers, config, db, geo, scoring, tasks
 from .ats.base import RawJob
 from .http import Blocked, FetchError
+from .interests import Interests, combined as combined_interests
 from .normalize import (Location, content_hash, detect_workplace, html_to_text, is_local, make_salary,
-                        parse_location, parse_salary, prefilter, rule_score, sanitize_html, title_tier)
+                        parse_location, parse_salary, rule_score, sanitize_html, title_tier)
 
 log = logging.getLogger("jobscout")
 
@@ -56,9 +57,11 @@ def commute_area(conn):
     return home_points(conn), max(60, (row[0] or 35) + 25)
 
 
-def normalize_job(raw: RawJob, company: dict, area=None):
+def normalize_job(raw: RawJob, company: dict, area=None, interests: Interests = None):
     """RawJob → job column dict, or None when the job is outside MN/WI (and not US-remote), or — given
-    `area` from commute_area() — an on-site/hybrid job beyond commuting distance of every home."""
+    `area` from commute_area() — an on-site/hybrid job beyond commuting distance of every home.
+    `interests` (everyone's job categories/titles, interests.combined) sets the stored prefilter."""
+    interests = interests or Interests.build()
     loc = _location(raw)
     if not is_local(loc):
         return None
@@ -91,7 +94,7 @@ def normalize_job(raw: RawJob, company: dict, area=None):
         if all(geo.haversine_miles(lat, lng, h[0], h[1]) > miles for h in homes):
             return None
     tier = title_tier(raw.title)
-    pf = prefilter(raw.title, tier)
+    pf = interests.match(raw.title, tier)
     fields = {
         "title": raw.title, "title_tier": tier, "prefilter": pf, "url": raw.url, "apply_url": raw.apply_url,
         "location_text": raw.location_text, "city": loc.city, "state": loc.state, "country": loc.country,
@@ -131,10 +134,10 @@ def _upsert(conn, company_id, raw, fields, existing, source, now):
     return "changed" if merged["content_hash"] != existing.get("content_hash") else "same"
 
 
-def _touch(conn, existing, industry, now):
+def _touch(conn, existing, industry, now, interests):
     """Mark an unchanged, already-detailed job seen; re-derive title rules so rule changes apply."""
     tier = title_tier(existing["title"])
-    pf = prefilter(existing["title"], tier)
+    pf = interests.match(existing["title"], tier)
     score = rule_score({**existing, "title_tier": tier, "prefilter": pf}, None, industry)
     db.update(conn, "jobs", "id", existing["id"], {"last_seen_at": now, "missed_sweeps": 0, "closed_at": None,
                                                    "title_tier": tier, "prefilter": pf, "rule_score": score})
@@ -164,13 +167,14 @@ def upsert_jobs(conn, company, raws, adapter=None, source="ats", log_fn=None):
     stats = {"jobs_seen": 0, "jobs_new": 0, "matching_new": 0, "details": 0, "changed": 0}
     seen = set()
     area = commute_area(conn)
+    interests = combined_interests(conn)
     for raw in raws:
         if not raw.title or not raw.ats_job_id:
             continue
         if not is_local(_location(raw)):
             continue  # clearly out of area at list level: no detail fetch, not stored
         ex = existing.get(raw.ats_job_id)
-        pf = prefilter(raw.title)
+        pf = interests.match(raw.title)
         stale = ex is not None and _age_days(ex.get("detail_fetched_at")) > DETAIL_STALE_DAYS
         needs_detail = (adapter is not None and adapter.has_detail and pf != "fail" and not raw.detailed and
                         (ex is None or not ex.get("detail_fetched_at") or ex["title"] != raw.title or stale))
@@ -182,11 +186,11 @@ def upsert_jobs(conn, company, raws, adapter=None, source="ats", log_fn=None):
                 (log_fn or log.info)(f"{company['name']}: detail failed for {raw.title!r}: {exc}")
         if ex is not None and ex.get("detail_fetched_at") and adapter is not None and adapter.has_detail \
                 and not raw.detailed:
-            _touch(conn, ex, company.get("industry"), now)  # unchanged and already detailed
+            _touch(conn, ex, company.get("industry"), now, interests)  # unchanged and already detailed
             seen.add(raw.ats_job_id)
             stats["jobs_seen"] += 1
             continue
-        fields = normalize_job(raw, company, area)
+        fields = normalize_job(raw, company, area, interests)
         if fields is None:
             continue
         outcome = _upsert(conn, company["id"], raw, fields, ex, source, now)
@@ -239,8 +243,12 @@ def sweep_company(company_id, run=None, fetcher=None, force_detect=False):
             return {**stats, "skipped": 1}
         if company["ats_type"] == "html" or not ats.has_adapter(company["ats_type"]):
             return {**stats, **sweep_html(conn, company, fetcher, run)}
+        interests = combined_interests(conn)
+        if interests.empty:
+            _say(run, f"{company['name']}: jobs not read — no profile has job categories or target titles yet")
+            return {**stats, "skipped": 1}
         adapter = ats.get_adapter(company["ats_type"], fetcher)
-        raws = adapter.list_jobs(company, config.FUNCTION_KEYWORDS)
+        raws = adapter.list_jobs(company, interests.search_terms())
         job_stats, seen = upsert_jobs(conn, company, raws, adapter, "jsonld" if company["ats_type"] == "jsonld" else "ats",
                                       log_fn=lambda line: _say(run, line))
         closed = close_missing(conn, company_id, seen, db.now_iso())

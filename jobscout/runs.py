@@ -31,6 +31,8 @@ class Run:
         self.stats = {}
         self.status = "running"
         self.events = []
+        self.current = None      # latest {"done", "total", "phase"} — shown by GET /status and /runs
+        self.last_line = None    # latest log line
         self._subscribers = []
         self._lock = threading.Lock()
 
@@ -44,12 +46,14 @@ class Run:
 
     def log(self, line):
         line = str(line)[:500]
+        self.last_line = line
         log.info("[jobs run %s %s] %s", self.id, self.kind, line)
         with db.session() as conn:
             conn.execute("UPDATE runs SET log = COALESCE(log, '') || ? WHERE id=?", (line + "\n", self.id))
         self._emit({"type": "log", "line": line})
 
     def progress(self, done, total, phase):
+        self.current = {"done": done, "total": total, "phase": phase}
         self._emit({"type": "progress", "done": done, "total": total, "phase": phase})
 
     def add(self, key, n=1):
@@ -154,8 +158,19 @@ def live(run_id):
 
 
 def run_dict(row):
-    return {"id": row["id"], "kind": row["kind"], "status": row["status"], "started_at": row["started_at"],
-            "finished_at": row["finished_at"], "stats": db.loads(row["stats"], {})}
+    """Run JSON. A run still going in this process also carries its live `progress` and `last_line`."""
+    out = {"id": row["id"], "kind": row["kind"], "status": row["status"], "started_at": row["started_at"],
+           "finished_at": row["finished_at"], "stats": db.loads(row["stats"], {})}
+    run = _recent.get(row["id"])
+    if run is not None and run.status == "running":
+        out.update(progress=run.current, last_line=run.last_line, stats=dict(run.stats) or out["stats"])
+    return out
+
+
+def active_ids():
+    """{kind: run id} of everything running now."""
+    with _lock:
+        return {run.kind: run.id for run in _active.values()}
 
 
 def mark_interrupted(conn):

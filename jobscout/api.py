@@ -8,7 +8,7 @@ import queue
 
 from flask import Blueprint, Response, g, jsonify, request
 
-from . import config, db, discovery, pipeline, runs, sweep, taxonomy, tasks, views
+from . import config, db, discovery, find, pipeline, runs, sweep, taxonomy, tasks, views
 from .auth import require_user, require_worker
 from .worker import record_heartbeat
 
@@ -185,6 +185,9 @@ def _ids(value):
     return None
 
 
+_HEAVY_RUNS = ("find", "sweep", "discover", "pipeline")
+
+
 @jobscout_bp.post("/api/runs")
 @require_user
 def run_create():
@@ -195,8 +198,18 @@ def run_create():
     if company_ids is None and kind != "company" and str(body.get("company_id", "")).isdigit():
         company_ids = [int(body["company_id"])]  # e.g. {"kind": "sweep", "company_id": 44}
     limit = opts.get("limit") if isinstance(opts.get("limit"), int) else None
+    busy = {k: v for k, v in runs.active_ids().items() if k in _HEAVY_RUNS}
+    if kind in _HEAVY_RUNS and busy and kind not in busy:
+        # find / sweep / discover / pipeline all read the same companies; one at a time.
+        other, run_id = next(iter(busy.items()))
+        return _err("already_running", 409, run_id=run_id, kind=other)
     try:
-        if kind == "sweep":
+        if kind == "find":
+            with db.session() as conn:
+                profile = _profile(conn)
+            options = {k: opts.get(k) for k in ("industries", "keywords", "sources", "max_queries", "skip_discovery")}
+            run = runs.start("find", find.run_find, user_id, options=options, profile=profile)
+        elif kind == "sweep":
             run = runs.start("sweep", sweep.run_sweep, user_id, company_ids=company_ids, limit=limit)
         elif kind == "discover":
             with db.session() as conn:

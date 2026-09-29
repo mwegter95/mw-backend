@@ -10,14 +10,14 @@ is also exposed as "state_code".
 """
 from datetime import datetime, timedelta, timezone
 
-from . import config, db, discovery, geo, scoring, taxonomy, tasks
+from . import config, db, discovery, geo, interests, scoring, taxonomy, tasks
 from .runs import run_dict
 
 JOB_STATUS_DEFAULT_HIDDEN = {"hidden"}
-_TARGET_TITLES = ["Marketing Director", "Marketing Manager", "Communications Director", "Communications Manager"]
-PROFILE_KEYS = ["name", "resume_text", "want_text", "avoid_text", "target_titles", "industries_want",
-                "industries_avoid", "salary_floor", "workplace_pref", "home_address", "home_lat", "home_lng",
-                "radius_miles", "radius_minutes", "discover_industries", "discover_keywords", "discover_sources"]
+PROFILE_KEYS = ["name", "resume_text", "want_text", "avoid_text", "target_titles", "job_categories", "seniority",
+                "industries_want", "industries_avoid", "salary_floor", "workplace_pref", "home_address", "home_lat",
+                "home_lng", "radius_miles", "radius_minutes", "discover_industries", "discover_keywords",
+                "discover_sources"]
 
 
 # ── param helpers ───────────────────────────────────────────────────────────
@@ -60,10 +60,11 @@ def _days_ago(days):
 def default_profile(user=None):
     return {
         "name": (user or {}).get("display_name") or "", "resume_text": "", "want_text": "", "avoid_text": "",
-        "target_titles": list(_TARGET_TITLES), "industries_want": [], "industries_avoid": [], "salary_floor": None,
+        "target_titles": [], "job_categories": [], "seniority": [],
+        "industries_want": [], "industries_avoid": [], "salary_floor": None,
         "workplace_pref": ["onsite", "hybrid", "remote"], "home_address": config.HOME_LABEL,
         "home_lat": config.HOME_LAT, "home_lng": config.HOME_LNG, "radius_miles": 35, "radius_minutes": 45,
-        "discover_industries": list(discovery.DEFAULT_INDUSTRIES), "discover_keywords": [],
+        "discover_industries": [], "discover_keywords": [],
         "discover_sources": list(discovery.DEFAULT_SOURCES),
     }
 
@@ -79,7 +80,8 @@ def profile_json(p):
 def _clean_profile(body, current):
     """Merge a PUT body over the current/default profile with type and enum checks."""
     out = dict(current)
-    lists = {"target_titles": None, "industries_want": taxonomy.INDUSTRY_IDS, "industries_avoid": taxonomy.INDUSTRY_IDS,
+    lists = {"target_titles": None, "job_categories": taxonomy.JOB_CATEGORY_IDS, "seniority": taxonomy.LEVELS,
+             "industries_want": taxonomy.INDUSTRY_IDS, "industries_avoid": taxonomy.INDUSTRY_IDS,
              "workplace_pref": taxonomy.WORKPLACE, "discover_industries": taxonomy.INDUSTRY_IDS,
              "discover_keywords": None, "discover_sources": taxonomy.DISCOVER_SOURCES}
     for key, allowed in lists.items():
@@ -123,6 +125,9 @@ def save_profile(conn, user, body, geocode=None):
                      (user["id"], *cols.values()))
     conn.commit()
     saved = get_profile(conn, user["id"])
+    looking_for = ("job_categories", "target_titles", "seniority")
+    if not current or any(current.get(k) != saved.get(k) for k in looking_for):
+        interests.refresh_prefilter(conn)  # which stored jobs anyone is looking for
     if not current or current.get("input_hash") != saved["input_hash"]:
         scoring.enqueue_scores(conn, profile_ids=[saved["id"]])
     return saved
@@ -292,12 +297,22 @@ class _Ctx:
 
     def __init__(self, conn, user, profile):
         self.conn, self.user, self.profile = conn, user, profile
+        # This person's own field; None → fall back to the stored prefilter (everyone's interests together).
+        wanted = interests.for_profile(profile)
+        self.interests = None if wanted.empty else wanted
         self.home = _home(profile)
         self.scores = _scores(conn, profile)
         self.states = _job_states(conn, user["id"])
         self.companies = {r["id"]: dict(r) for r in conn.execute("SELECT * FROM companies")}
         self.minutes = geo.cached_minutes(conn, profile["id"]) if profile and profile.get("id") and \
             config.ors_api_key() else {}
+
+
+def match_for(job, ctx):
+    """pass / maybe / fail for this caller's own job categories and titles."""
+    if ctx.interests is None:
+        return job.get("prefilter") or "fail"
+    return ctx.interests.match(job["title"], job.get("title_tier"))
 
 
 def job_summary(job, ctx):
@@ -307,7 +322,7 @@ def job_summary(job, ctx):
     state = ctx.states.get(job["id"]) or {}
     minutes = ctx.minutes.get((round(lat, 4), round(lng, 4))) if lat is not None and ctx.minutes else None
     return {
-        "id": job["id"], "title": job["title"], "title_tier": job.get("title_tier"), "prefilter": job.get("prefilter"),
+        "id": job["id"], "title": job["title"], "title_tier": job.get("title_tier"), "prefilter": match_for(job, ctx),
         "company": company_small(c) if c else None,
         "location_text": job.get("location_text"), "city": job.get("city"), "state_code": job.get("state"),
         "lat": lat, "lng": lng, "geo_precision": job.get("geo_precision") or "none",
@@ -400,9 +415,10 @@ def _load_jobs(conn, where, args):
 
 def list_jobs(conn, user, profile, params):
     ctx = _Ctx(conn, user, profile)
-    prefilters = _csv(params, "prefilter") or ["pass", "maybe"]
-    where = f"j.prefilter IN ({','.join('?' * len(prefilters))})"
-    args = list(prefilters)
+    prefilters = set(_csv(params, "prefilter") or ["pass", "maybe"])
+    # Stored prefilter = anyone's interests; this person's own match is applied below.
+    where = "1=1" if "fail" in prefilters else "j.prefilter IN ('pass','maybe')"
+    args = []
     if not _flag(params, "include_closed"):
         where += " AND j.closed_at IS NULL"
     company_id = _num(params, "company_id", int)
@@ -411,7 +427,7 @@ def list_jobs(conn, user, profile, params):
         args.append(company_id)
     jobs = _load_jobs(conn, where, args)
     by_id = {j["id"]: j for j in jobs}
-    items = [job_summary(j, ctx) for j in jobs]
+    items = [it for it in (job_summary(j, ctx) for j in jobs) if it["prefilter"] in prefilters]
     filters = _job_filters(params, ctx, by_id)
     matched = [it for it in items if _passes(it, filters)]
     matched.sort(key=_JOB_SORTS.get(params.get("sort") or "fit", _JOB_SORTS["fit"]))
@@ -441,7 +457,8 @@ def job_detail(conn, user, profile, job_id, ctx=None):
     counts = _job_counts(conn).get(company.get("id"), (0, 0))
     others = _load_jobs(conn, "j.company_id = ? AND j.id != ? AND j.closed_at IS NULL AND j.prefilter IN ('pass','maybe')",
                         (job["company_id"], job_id))
-    other_items = sorted((job_summary(o, ctx) for o in others), key=lambda it: -it["fit"])[:20]
+    other_items = sorted((it for it in (job_summary(o, ctx) for o in others) if it["prefilter"] != "fail"),
+                         key=lambda it: -it["fit"])[:20]
     item.update({
         "description_html": job.get("description_html") or "", "dealbreakers": fit["dealbreakers"],
         "seniority": fit["seniority"], "role_family": fit["role_family"],
@@ -462,7 +479,8 @@ def company_detail(conn, user, profile, company_id):
     ctx = _Ctx(conn, user, profile)
     jobs = _load_jobs(conn, "j.company_id = ? AND j.closed_at IS NULL AND j.prefilter IN ('pass','maybe')", (company_id,)) \
         if row["status"] != "ignored" else []
-    out["jobs"] = sorted((_strip(job_summary(j, ctx)) for j in jobs), key=lambda it: -it["fit"])
+    out["jobs"] = sorted((it for it in (_strip(job_summary(j, ctx)) for j in jobs) if it["prefilter"] != "fail"),
+                         key=lambda it: -it["fit"])
     out["facts"] = _public_facts(db.loads(row.get("facts"), {}))
     return out
 
@@ -527,7 +545,7 @@ def status(conn, user, profile):
     else:
         unscored = len(open_matching)
     week = _days_ago(7)
-    last = conn.execute("SELECT * FROM runs WHERE kind='sweep' ORDER BY id DESC LIMIT 1").fetchone()
+    last = conn.execute("SELECT * FROM runs WHERE kind IN ('sweep','find') ORDER BY id DESC LIMIT 1").fetchone()
     from .scheduler import next_sweep_at
     return {
         "counts": {
@@ -540,9 +558,41 @@ def status(conn, user, profile):
             "unscored": unscored,
         },
         "last_sweep": run_dict(last) if last else None,
-        "next_sweep_at": next_sweep_at() if config.scheduler_enabled() else None,
+        "next_sweep_at": next_sweep_at() if config.auto_runs_enabled() else None,
         "queue": tasks.counts(conn),
         "instances": instances(conn),
+        "activity": activity(conn),
+        "looking_for": interests.for_profile(profile).describe() if profile else None,
+    }
+
+
+# Runs whose work the activity panel follows (company-only runs are small and shown in their drawer).
+_ACTIVITY_KINDS = ("find", "discover", "pipeline", "sweep", "enrich", "detect")
+
+
+def activity(conn):
+    """What Job Scout is doing right now, for the app's progress panel:
+    {"run": the run in progress (with live progress/last_line) or null,
+     "last_run": the latest finished run, "ai": AI work queued since that run started}."""
+    marks = ",".join("?" * len(_ACTIVITY_KINDS))
+    rows = conn.execute(f"SELECT * FROM runs WHERE kind IN ({marks}) ORDER BY id DESC LIMIT 10", _ACTIVITY_KINDS).fetchall()
+    running = next((r for r in rows if r["status"] == "running"), None)
+    finished = next((r for r in rows if r["status"] != "running"), None)
+    anchor = running or finished
+    since = anchor["started_at"] if anchor else None
+    by_kind = {r["kind"]: r["n"] for r in conn.execute(
+        "SELECT kind, COUNT(*) n FROM ai_tasks WHERE status IN ('queued','leased') GROUP BY kind")}
+    q = tasks.counts(conn)
+    done = conn.execute("SELECT COUNT(*) n FROM ai_tasks WHERE status='done' AND updated_at >= ?",
+                        (since or "",)).fetchone()["n"] if since else 0
+    failed = conn.execute("SELECT COUNT(*) n FROM ai_tasks WHERE status='failed' AND updated_at >= ?",
+                          (since or "",)).fetchone()["n"] if since else 0
+    return {
+        "run": run_dict(running) if running else None,
+        "last_run": run_dict(finished) if finished else None,
+        "ai": {"since": since, "done": done, "failed": failed, "queued": q["queued"], "in_progress": q["leased"],
+               "total": done + failed + q["queued"] + q["leased"],
+               "pending_by_kind": {k: by_kind.get(k, 0) for k in taxonomy.TASK_KINDS}},
     }
 
 

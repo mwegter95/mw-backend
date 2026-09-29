@@ -104,7 +104,6 @@ def test_start_jobscout_runs_everything_in_process(data_dir, monkeypatch):
     assert started == ["scheduler", ("ai", True)]
     started.clear()
     monkeypatch.setenv("JOBS_AI_LOCAL", "0")
-    monkeypatch.setenv("JOBS_SCHEDULER", "0")
     jobscout_blueprint.start_jobscout()
-    assert started == []
+    assert started == ["scheduler"]  # housekeeping (lease reaper) always runs
     assert config.db_path().exists()

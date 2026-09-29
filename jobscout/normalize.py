@@ -103,31 +103,6 @@ _TIER_RULES = [
 ]
 _TIER_RES = [(tier, re.compile(p, re.I)) for tier, p in _TIER_RULES]
 
-# Contract §4 function list, plus a few unambiguous marketing synonyms (marketer, copywriter,
-# public affairs, media relations, paid media, SEO). "digital" and "social" are narrowed so
-# "Digital Engineer" and "Social Worker" don't count.
-_DIGITAL_NOT = (r"engineer|engineering|technology|technologies|transformation|product|health|solutions?|"
-                r"services|infrastructure|workplace|architect|systems|data|analytics|operations|security|"
-                r"pathology|imaging|success|support|forensics")
-_FUNCTION_RE = re.compile(
-    r"\b(marketing|marketer|communications?|comms|brand(ing)?|content|demand\s+gen(eration)?|growth|"
-    r"pr|public\s+relations|public\s+affairs|media\s+relations|corporate\s+affairs|external\s+affairs|"
-    r"advancement|events?|lifecycle|engagement|creative|copywrit(er|ing)|seo|"
-    r"paid\s+(search|social|media)|media\s+(planner|planning|buyer|buying|strategist)|"
-    r"social\s+(media|marketing|content|strategy|impact|engagement)|"
-    rf"digital(?!\s+({_DIGITAL_NOT})))\b",
-    re.I)
-_ADJACENT_RE = re.compile(
-    r"\b(strategy|customer\s+experience|product\s+manag(er|ement)|business\s+development|"
-    r"market\s+development|market\s+research|customer\s+insights|investor\s+relations)\b",
-    re.I)
-# Titles that are clearly another profession even if a function word appears.
-_NOT_FUNCTION_RE = re.compile(
-    r"\b(engineer|engineering|technician|developer|nurse|rn|physician|pharmacist|therapist|dispatcher|"
-    r"mechanic|welder|machinist|driver|custodian|electrician)\b", re.I)
-
-_LEADERSHIP = {"exec", "director", "manager", "lead"}
-_MANAGER_PLUS = {"exec", "director", "manager"}
 
 
 def title_tier(title) -> str:
@@ -137,31 +112,7 @@ def title_tier(title) -> str:
     return "ic"
 
 
-_IT_RE = re.compile(r"\bIT\b")  # "IT Digital …" is an IT role; case-sensitive on purpose
-
-
-def has_function(title) -> bool:
-    title = title or ""
-    return bool(_FUNCTION_RE.search(title)) and not _NOT_FUNCTION_RE.search(title) and not _IT_RE.search(title)
-
-
-def has_adjacent_function(title) -> bool:
-    return bool(_ADJACENT_RE.search(title or ""))
-
-
-def prefilter(title, tier=None) -> str:
-    """pass = function match AND tier ∈ {exec, director, manager, lead};
-    maybe = function match with tier ic, or tier ≥ manager with an adjacent function;
-    fail = everything else (always for interns / co-ops)."""
-    tier = tier or title_tier(title)
-    if tier == "intern":
-        return "fail"
-    if has_function(title):
-        return "pass" if tier in _LEADERSHIP else "maybe"
-    if tier in _MANAGER_PLUS and has_adjacent_function(title):
-        return "maybe"
-    return "fail"
-
+# Which titles count as someone's field is decided by their profile: see interests.py.
 
 _TITLE_ABBREV = {"mgr": "manager", "dir": "director", "sr": "senior", "jr": "junior", "comms": "communications",
                  "communication": "communications", "vp": "vice president", "mktg": "marketing",
@@ -169,7 +120,8 @@ _TITLE_ABBREV = {"mgr": "manager", "dir": "director", "sr": "senior", "jr": "jun
 _TITLE_STOP = {"of", "the", "and", "&", "for", "a", "an", "to", "in", "at"}
 
 
-def _title_tokens(title):
+def title_tokens(title):
+    """Lowercase title words with common abbreviations expanded and filler words dropped."""
     words = re.findall(r"[a-z0-9]+", (title or "").lower())
     out = []
     for w in words:
@@ -179,10 +131,10 @@ def _title_tokens(title):
 
 def title_matches(title, targets) -> bool:
     """Fuzzy match: every target word appears in the title (any order), or near-identical strings."""
-    tokens = _title_tokens(title)
+    tokens = title_tokens(title)
     token_set = set(tokens)
     for target in targets or []:
-        t_tokens = _title_tokens(target)
+        t_tokens = title_tokens(target)
         if not t_tokens:
             continue
         if set(t_tokens) <= token_set:
@@ -197,14 +149,23 @@ DEFAULT_WORKPLACE_PREF = ["onsite", "hybrid", "remote"]
 
 
 def rule_score(job: dict, profile: dict = None, industry=None) -> int:
-    """Provisional 0–100 fit before AI (contract §4). `profile` uses parsed lists; None = no profile."""
+    """Provisional 0–100 fit before AI (contract §4, §12). With a profile, its own job categories, target titles
+    and levels decide whether the title is in the person's field; without one (or a profile with no interests)
+    the job's stored prefilter — everyone's interests together — does."""
+    from .interests import for_profile  # interests imports this module
     profile = profile or {}
-    tier = job.get("title_tier") or title_tier(job.get("title"))
-    pf = job.get("prefilter") or prefilter(job.get("title"), tier)
-    score = _TIER_POINTS.get(tier, 10)
-    if has_function(job.get("title")):
-        score += 30
-    if title_matches(job.get("title"), profile.get("target_titles")):
+    title = job.get("title")
+    tier = job.get("title_tier") or title_tier(title)
+    interests = for_profile(profile)
+    pf = (job.get("prefilter") or "fail") if interests.empty else interests.match(title, tier)
+    levels = profile.get("seniority") or []
+    if levels:
+        score = 40 if tier in levels else (0 if tier == "intern" else 15)
+    else:
+        score = _TIER_POINTS.get(tier, 10)
+    if pf != "fail":
+        score += 30  # in the person's field
+    if title_matches(title, profile.get("target_titles")):
         score += 10
     if job.get("workplace") in (profile.get("workplace_pref") or DEFAULT_WORKPLACE_PREF):
         score += 5

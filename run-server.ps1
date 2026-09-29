@@ -68,11 +68,23 @@ function Disable-Prevention {
 }
 
 # ── Load .env ─────────────────────────────────────────────────────────────────
+# Same rules as python-dotenv (what server.py and jobscout_server.py read): skip blank
+# and # lines, allow "export KEY=...", strip matching quotes, and drop an inline
+# " # comment" after a value. Without that last rule "MW_ROLE=jobscout   # note" set the
+# role to "jobscout   # note", and the launcher silently ran the Surface's server.py.
+function Read-DotEnvValue([string]$raw) {
+    $v = $raw.Trim()
+    $quoted = [regex]::Match($v, '^(["''])(.*)\1\s*(#.*)?$')
+    if ($quoted.Success) { return $quoted.Groups[2].Value }
+    return ($v -replace '\s+#.*$', '').Trim()
+}
 $envFile = Join-Path $ScriptDir '.env'
 if (Test-Path $envFile) {
-    Get-Content $envFile | Where-Object { $_ -notmatch '^\s*#' -and $_ -match '=' } | ForEach-Object {
-        $k, $v = $_ -split '=', 2
-        [System.Environment]::SetEnvironmentVariable($k.Trim(), $v.Trim(), 'Process')
+    foreach ($line in Get-Content $envFile) {
+        if ($line -match '^\s*(#|$)' -or $line -notmatch '=') { continue }
+        $k, $v = $line -split '=', 2
+        $k = ($k.Trim() -replace '^export\s+', '')
+        [System.Environment]::SetEnvironmentVariable($k, (Read-DotEnvValue $v), 'Process')
     }
 }
 $port = if ($env:PORT) { $env:PORT } else { '5050' }
@@ -82,6 +94,12 @@ $port = if ($env:PORT) { $env:PORT } else { '5050' }
 # the mw-backend tunnel: Cloudflare sends traffic to every connector on a tunnel, so
 # running mw-backend's on a second machine would split api.michaelwegter.com.
 $role = if ($env:MW_ROLE) { $env:MW_ROLE.Trim().ToLower() } else { 'primary' }
+if ($role -notin @('primary', 'jobscout')) {
+    # Never guess: falling back to 'primary' on wegter-pc would start the whole Surface stack.
+    Write-Host "MW_ROLE='$($env:MW_ROLE)' in .env is not a role this launcher knows ('primary' or 'jobscout'). Stopping." -ForegroundColor Red
+    Read-Host 'Press Enter to close'
+    exit 1
+}
 $isJobScout = ($role -eq 'jobscout')
 $ServerScript = if ($isJobScout) { 'jobscout_server.py' } else { 'server.py' }
 $RequirementsFile = if ($isJobScout) { 'requirements.jobscout.txt' } else { 'requirements.txt' }
@@ -670,7 +688,13 @@ function Invoke-AutoDeploy {
         git -C $ScriptDir fetch origin $script:branch --quiet 2>$null
         $localRev  = (git -C $ScriptDir rev-parse HEAD 2>$null)
         $remoteRev = (git -C $ScriptDir rev-parse "origin/$script:branch" 2>$null)
+        # Deploy only when origin has commits this clone doesn't. A local commit that isn't pushed yet
+        # also makes the two differ, and treating it as new would pull nothing and relaunch every poll.
+        $behind = 0
         if ($localRev -and $remoteRev -and $localRev -ne $remoteRev) {
+            $behind = [int](git -C $ScriptDir rev-list --count "HEAD..origin/$script:branch" 2>$null)
+        }
+        if ($behind -gt 0) {
             Write-Host ""
             Write-Host "$(Get-Date -f 'HH:mm:ss')  New commit on origin/$script:branch -- pulling..." -ForegroundColor Cyan
             $changed = (git -C $ScriptDir diff --name-only HEAD "origin/$script:branch" 2>$null)

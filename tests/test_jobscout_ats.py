@@ -7,6 +7,7 @@ from conftest import FakeFetcher, fixture_json, fixture_text
 from jobscout import ats, browser, careers
 from jobscout.ats.workday import location_from_path, posted_on_to_iso
 from jobscout.http import Blocked
+from jobscout.interests import Interests
 from jobscout.sweep import normalize_job
 
 GUID = "0c7d1a9e-1111-2222-3333-444455556666"
@@ -108,7 +109,7 @@ def test_workday_list_restarts_with_us_facet_and_details():
     assert multi.url.startswith("https://3m.wd1.myworkdayjobs.com/Search/job/")
     raw = adapter.get_detail(company, multi)
     assert raw.detailed and raw.posted_at == "2026-09-01T00:00:00Z" and raw.employment_type == "Full time"
-    job = normalize_job(raw, company)
+    job = normalize_job(raw, company, interests=Interests.build(["marketing"]))
     assert (job["city"], job["state"], job["workplace"]) == ("Maplewood", "MN", "onsite")
     assert (job["salary_min"], job["salary_max"], job["salary_period"]) == (164612, 201193, "year")
     assert job["prefilter"] == "pass" and job["lat"] is not None

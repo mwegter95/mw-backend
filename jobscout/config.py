@@ -19,8 +19,7 @@ PACKAGE_DATA_DIR = PKG_DIR / "data"  # read-only data shipped with the code (gaz
 HOME_LAT, HOME_LNG = 45.0619, -92.9766
 HOME_LABEL = "Birchwood Village, MN"
 
-# Function keywords used to search large ATS tenants (Workday, Oracle, ...).
-FUNCTION_KEYWORDS = ["marketing", "communications", "brand", "content", "public relations"]
+# Search words for large careers boards come from profiles' job categories and titles (interests.py).
 
 LOCAL_STATES = ("MN", "WI")
 
@@ -80,8 +79,10 @@ def allowed_emails() -> set:
     return {e.strip().lower() for e in raw.split(",") if e.strip()}
 
 
-def scheduler_enabled() -> bool:
-    return _env("JOBS_SCHEDULER", "1") != "0"
+def auto_runs_enabled() -> bool:
+    """Automatic runs (nightly sweep, monthly discovery, periodic categorizing). Off by default: Job Scout
+    works on demand ("Find matches" and the other run buttons). JOBS_AUTO_RUNS=1 turns them on."""
+    return _env("JOBS_AUTO_RUNS", "0") == "1"
 
 
 def sweep_hour() -> int:

@@ -69,7 +69,7 @@ def data_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("JOBSCOUT_DATA_DIR", str(tmp_path))
     monkeypatch.delenv("GOOGLE_PLACES_API_KEY", raising=False)
     monkeypatch.delenv("ORS_API_KEY", raising=False)
-    for var in ("JOBS_SCHEDULER", "JOBS_AI_LOCAL", "MW_ROLE", "JOBS_ALLOWED_EMAILS"):
+    for var in ("JOBS_AUTO_RUNS", "JOBS_AI_LOCAL", "MW_ROLE", "JOBS_ALLOWED_EMAILS", "JOBS_AUTH_URL"):
         monkeypatch.delenv(var, raising=False)  # a developer shell must not change test results
     from jobscout import db
     db.init()

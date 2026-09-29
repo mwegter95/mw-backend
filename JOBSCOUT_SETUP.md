@@ -1,8 +1,8 @@
 # Job Scout — setting up wegter-pc
 
 All of Job Scout's backend runs on **wegter-pc**: the `/jobs` API, its database, employer discovery (Google
-Maps / web search / OpenStreetMap through Playwright), careers-site sweeps, the nightly scheduler and the AI
-(LM Studio, Gemma 4 12B). It runs `jobscout_server.py`, which loads only Job Scout, not the rest of mw-backend,
+Maps / web search / OpenStreetMap through Playwright), reading careers sites, and the AI (LM Studio, Gemma 4
+12B). Nothing runs on a timer: it works when someone presses **Find matches** in the app. It runs `jobscout_server.py`, which loads only Job Scout, not the rest of mw-backend,
 and it's published at **https://jobs.michaelwegter.com** through a Cloudflare tunnel of its own.
 
 The Surface is not involved except for sign-in: people log in with their michaelwegter.com account
@@ -67,24 +67,36 @@ it just downloaded.
 
 ## 4. `.env` in the mw-backend folder
 
+Put each comment on its own line, as below. (The launcher now also copes with a comment after a value, but
+an earlier version of this guide put comments there and the launcher read them as part of the value: that
+turned `MW_ROLE` into an unknown role, so it started the Surface's full server, which asked for bcrypt and
+Docker.)
+
 ```ini
-MW_ROLE=jobscout                 # run-server.ps1 starts jobscout_server.py instead of server.py
+# run-server.ps1 starts jobscout_server.py instead of server.py
+MW_ROLE=jobscout
 MW_INSTANCE=wegter-pc
-PORT=5057                        # the tunnel's route points here
+# the tunnel's route points at this port
+PORT=5057
 
 # Sign-in: tokens are checked against the Surface
 JOBS_AUTH_URL=https://api.michaelwegter.com
-JOBS_ALLOWED_EMAILS=zweetztuph@gmail.com,<ashley's email>
+JOBS_ALLOWED_EMAILS=zweetztuph@gmail.com,ashley@example.com
 
-# AI: LM Studio on this PC
+# AI: LM Studio on this PC. JOBS_AI_MODEL is the exact id from /v1/models
 JOBS_AI_API_BASE=http://localhost:1234/v1
-JOBS_AI_MODEL=google/gemma-4-12b-qat      # the exact id from /v1/models
+JOBS_AI_MODEL=google/gemma-4-12b-qat
 
 # Optional
-# JOBS_SWEEP_HOUR=2              # local hour for the nightly sweep
-# GOOGLE_PLACES_API_KEY=...      # enables the "Google Places" discovery source
-# ORS_API_KEY=...                # OpenRouteService key → drive-time minutes
+# enables the "Google Places" discovery source
+# GOOGLE_PLACES_API_KEY=...
+# OpenRouteService key → drive-time minutes
+# ORS_API_KEY=...
+# 1 = also run automatically (nightly job reading at JOBS_SWEEP_HOUR, discovery on the 1st of the month).
+# Off unless set: Job Scout runs when you press Find matches.
+# JOBS_AUTO_RUNS=1
 ```
+Replace `ashley@example.com` with the email Ashley registers with on michaelwegter.com.
 
 ## 5. Cloudflare tunnel (a new one, just for wegter-pc)
 
@@ -125,16 +137,25 @@ Windows account.
 
 ## 7. First run
 
-1. Ashley: register on michaelwegter.com, then add her email to `JOBS_ALLOWED_EMAILS` in `.env` (the launcher
+1. Ashley: register on michaelwegter.com, then put her email in `JOBS_ALLOWED_EMAILS` in `.env` (the launcher
    picks it up on the next restart; closing and reopening the window is enough).
-2. **Settings → Profile**: home address, radius, target titles, salary floor, work styles, resume text, "want"
-   and "avoid" notes, and **What to hunt for** (e.g. Plastics & Packaging, Building Materials; keywords like
-   "injection molding", "precast concrete", "millwork").
-3. **Companies → Discover companies**: preview the plan, start it and watch the log. The app searches town by
-   town, categorizes each company from its own website (a quick keyword pass, then Gemma), finds careers pages
-   and pulls jobs. Gemma scores jobs as they arrive.
-4. Nightly (around 2 AM, if the PC is awake): pending companies go through the pipeline, then every active
-   company is swept. Discovery reruns on the 1st of each month with the profile's hunt settings.
+2. **Settings → Profile** (each person has their own):
+   - **What you want**, in your own words: the kind of work, team, industry, anything that matters. The AI
+     reads this for every job it scores, along with the "avoid" notes and the resume text.
+   - **Job categories** (Marketing, Communications, Sales, Operations…) and **target titles** ("Marketing
+     Director", "Communications Manager"). These decide which jobs count as in your field. At least one is
+     needed before any job can match.
+   - **Levels** (Executive, Director, Manager, Lead, Individual contributor), or none for any level.
+   - Home address, radius, salary floor, work styles.
+   - **What to hunt for** (optional): kinds of employers to look for, as industries or keywords. Leave it
+     empty to search every industry.
+3. **Jobs → Find matches**. One run does everything, and the progress panel shows each step as it goes:
+   searching for employers near home that aren't in the list yet, categorizing each from its own website,
+   finding careers pages, reading open jobs everywhere, then Gemma scoring the jobs in your field ("12 of 40
+   scored"). The first run takes a while (an hour or more over a wide radius); later runs only look at what's
+   new. Press it again whenever you want fresh results.
+4. **Companies → Discover companies** is still there for a search with different settings (other industries,
+   keywords or sources) without reading jobs.
 
 ## The Surface
 
@@ -145,12 +166,15 @@ signed in. It must be up for anyone to sign in, as it already must for the rest 
 
 | Symptom | Cause / fix |
 |---|---|
+| Launcher asks for bcrypt, Docker or other Surface services | it isn't reading `MW_ROLE=jobscout`: check that line in `.env` (the banner must say `Role: jobscout`); pull the latest mw-backend |
 | App says it can't reach Job Scout | wegter-pc off/asleep, launcher not running, or tunnel down (`Get-Service cloudflared`; dashboard shows the tunnel Down) |
 | `jobs.michaelwegter.com` gives Cloudflare error 1033 / 502 | tunnel is up but the server isn't: check the launcher window, or `http://127.0.0.1:5057/jobs/health` |
 | Everyone gets "auth_unavailable" | wegter-pc can't reach api.michaelwegter.com (Surface down or no internet) |
 | "This account doesn't have access yet" | the email isn't in `JOBS_ALLOWED_EMAILS` (restart the launcher after editing `.env`) |
 | Instances: LM Studio not responding | LM Studio server stopped, or `JOBS_AI_MODEL` doesn't match an id from `/v1/models` |
 | AI tasks fail with "model returned no answer" | thinking is on and used the token budget: turn it off for the model |
+| Find matches reads no jobs | no profile has job categories or target titles yet (the run log says so) |
+| Find matches says another run is going | only one search runs at a time; the progress panel shows the one in progress |
 | Discovery: "maps/search skipped" | Playwright's browser missing: `venv\Scripts\python -m playwright install chromium` |
-| Discovery: OSM 406/504 | the public Overpass server is busy; the run continues with the other sources and the next run retries |
+| Discovery: OSM 406/504 | the public Overpass server is busy; the run continues with the other sources and the next Find matches retries |
 | A company shows "blocked" | its site refuses automated browsers; open its careers link from the company drawer |
