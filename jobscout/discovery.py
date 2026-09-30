@@ -15,8 +15,11 @@ import asyncio
 import importlib.util
 import logging
 import math
+import queue
 import random
 import re
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import config, db, geo, runs, taxonomy
@@ -31,6 +34,16 @@ OVERPASS_URLS = ["https://overpass-api.de/api/interpreter", "https://overpass.ku
 PLACES_URL = "https://places.googleapis.com/v1/places:searchText"
 PLACES_FIELDS = ("places.displayName,places.websiteUri,places.formattedAddress,places.location,"
                  "places.primaryType,places.types,nextPageToken")
+
+# Browser searches (Google Maps; DuckDuckGo + Bing + Yellow Pages together) normally take 10–40 s. A page that
+# stops answering must never hold up the run: each search gets QUERY_TIMEOUT, the browser is replaced after
+# one overruns, the browser searches stop after MAX_STUCK_IN_A_ROW overruns, and as a last resort the browser
+# thread is abandoned when it reports nothing for STALL_TIMEOUT.
+QUERY_TIMEOUT = 90
+CLOSE_TIMEOUT = 15
+MAX_STUCK_IN_A_ROW = 3
+STALL_TIMEOUT = 300
+_POLL_SECONDS = 1.0
 
 # Twin Cities metro + western Wisconsin within ~45 mi of Birchwood Village.
 DEFAULT_TOWNS = [
@@ -486,43 +499,92 @@ async def _maps_search(ctx, query, max_results=40):
         await page.close()
 
 
-async def _browser_queries(queries, on_result):
-    from playwright.async_api import async_playwright
+class BrowserStuck(Exception):
+    """Several browser searches in a row got no answer."""
+
+
+async def _bounded(awaitable, seconds):
+    """Wait at most `seconds` → (finished, result). A task that overruns is cancelled but not awaited, so a page
+    or browser that stopped answering can't hold the caller."""
+    task = asyncio.ensure_future(awaitable)
+    done, _ = await asyncio.wait({task}, timeout=seconds)
+    if task in done:
+        return True, task.result()
+    task.cancel()
+    return False, None
+
+
+async def _one_query(browser, cf, q):
+    """One planned query in a fresh browser context → candidate dicts."""
+    town = q["town"].split(",")[0]
+    ctx = await browser.new_context(**cf._BROWSER_CTX_OPTS)
+    try:
+        if q["source"] == "maps":
+            calls = [_maps_search(ctx, f"{q['query']} near {q['town']}")]
+        else:
+            text = f"{q['query']} {q['town']}"
+            calls = [cf._search_duckduckgo(ctx, text, town), cf._search_bing(ctx, text, town),
+                     cf._search_yellow_pages(ctx, q["query"], town)]
+        results = await asyncio.gather(*calls, return_exceptions=True)
+    finally:
+        await _bounded(ctx.close(), CLOSE_TIMEOUT)
+    found = []
+    for item in results:
+        if isinstance(item, Exception):
+            log.warning("discovery: %s search failed for %r: %s", q["source"], q["query"], item)
+        else:  # clientfinder helpers return (results, diag); _maps_search returns results
+            found += (item[0] if isinstance(item, tuple) else item) or []
+    # The query town is not evidence of where a result is; only a listed address or coordinates are.
+    return [{"name": b.get("name"), "website": b.get("website"), "address": b.get("address") or None,
+             "category": b.get("category"), "lat": b.get("lat"), "lng": b.get("lng"),
+             "source": q["source"], "query": q["query"], "town": q["town"], "industry": q["industry"]}
+            for b in found]
+
+
+async def _browser_queries(queries, emit, should_stop=lambda: False, launch=None, one_query=None, playwright=None):
+    """Run the queries one after another; emit(query, candidates, note) after each. A query that overruns
+    QUERY_TIMEOUT (or fails outright) is skipped with a note and the next one gets a fresh browser.
+    launch / one_query / playwright stand in for the real browser in tests."""
+    if playwright is None:
+        from playwright.async_api import async_playwright as playwright
     cf = _cf()
-    async with async_playwright() as pw:
-        browser = await _launch_async(pw, cf._LAUNCH_ARGS)
+    launch = launch or (lambda pw: _launch_async(pw, cf._LAUNCH_ARGS))
+    one_query = one_query or (lambda browser, q: _one_query(browser, cf, q))
+    async with playwright() as pw:
+        browser, stuck = None, 0
         try:
             for q in queries:
-                town = q["town"].split(",")[0]
-                ctx = await browser.new_context(**cf._BROWSER_CTX_OPTS)
+                if should_stop():
+                    return
+                if browser is None:
+                    browser = await launch(pw)
                 try:
-                    if q["source"] == "maps":
-                        calls = [_maps_search(ctx, f"{q['query']} near {q['town']}")]
-                    else:
-                        text = f"{q['query']} {q['town']}"
-                        calls = [cf._search_duckduckgo(ctx, text, town), cf._search_bing(ctx, text, town),
-                                 cf._search_yellow_pages(ctx, q["query"], town)]
-                    results = await asyncio.gather(*calls, return_exceptions=True)
-                finally:
-                    await ctx.close()
-                found = []
-                for item in results:
-                    if isinstance(item, Exception):
-                        log.warning("discovery: %s search failed for %r: %s", q["source"], q["query"], item)
-                    else:  # clientfinder helpers return (results, diag); _maps_search returns results
-                        found += (item[0] if isinstance(item, tuple) else item) or []
-                # The query town is not evidence of where a result is; only a listed address or coordinates are.
-                on_result(q, [{"name": b.get("name"), "website": b.get("website"), "address": b.get("address") or None,
-                               "category": b.get("category"), "lat": b.get("lat"), "lng": b.get("lng"),
-                               "source": q["source"], "query": q["query"], "town": q["town"],
-                               "industry": q["industry"]} for b in found])
-                await asyncio.sleep(random.uniform(2.0, 5.0))  # pace searches like a person would
+                    ok, found = await _bounded(one_query(browser, q), QUERY_TIMEOUT)
+                    note = None if ok else f"no answer in {QUERY_TIMEOUT} s, skipped"
+                except Exception as exc:  # noqa: BLE001 — e.g. the browser crashed
+                    ok, found, note = False, None, f"failed ({type(exc).__name__}: {str(exc)[:100]}), skipped"
+                if ok:
+                    stuck = 0
+                    emit(q, found, None)
+                    await asyncio.sleep(random.uniform(2.0, 5.0))  # pace searches like a person would
+                    continue
+                stuck += 1
+                emit(q, [], note)
+                await _bounded(browser.close(), CLOSE_TIMEOUT)  # the page or the browser stopped answering
+                browser = None
+                if stuck >= MAX_STUCK_IN_A_ROW:
+                    raise BrowserStuck(f"{stuck} searches in a row got no answer, so the rest were skipped")
         finally:
-            await browser.close()
+            if browser is not None:
+                await _bounded(browser.close(), CLOSE_TIMEOUT)
 
 
-def browser_search(queries, on_result):
-    """Run maps/search queries in one Playwright browser. Returns an error string or None."""
+def browser_search(queries, on_result, should_stop=lambda: False, **browser_kwargs):
+    """Run maps/search queries in a Playwright browser on a thread of its own; on_result(query, candidates, note)
+    runs here, on the caller's thread, as each one finishes. Returns an error string or None.
+
+    If the browser thread reports nothing for STALL_TIMEOUT it is abandoned (its later results are dropped) and
+    the caller carries on — a stuck browser can slow a run down but never stop it."""
     if not queries:
         return None
     cf = _cf()
@@ -530,11 +592,40 @@ def browser_search(queries, on_result):
         return "clientfinder helpers unavailable"
     if importlib.util.find_spec("playwright") is None:
         return "Playwright not installed"
+    events, abandoned = queue.Queue(), threading.Event()
+
+    def emit(q, found, note):
+        if not abandoned.is_set():
+            events.put(("result", q, found, note))
+
+    def body():
+        error = None
+        try:
+            asyncio.run(_browser_queries(queries, emit, lambda: abandoned.is_set(), **browser_kwargs))
+        except BrowserStuck as exc:
+            error = str(exc)
+        except Exception as exc:  # noqa: BLE001 — browser missing/crashed → fail soft
+            error = f"{type(exc).__name__}: {str(exc)[:160]}"
+        events.put(("done", error))
+
+    threading.Thread(target=body, name="jobs-browser-search", daemon=True).start()
+    last = time.monotonic()
     try:
-        asyncio.run(_browser_queries(queries, on_result))
-    except Exception as exc:  # noqa: BLE001 — browser missing/crashed → fail soft
-        return f"{type(exc).__name__}: {str(exc)[:160]}"
-    return None
+        while True:
+            try:
+                item = events.get(timeout=_POLL_SECONDS)
+            except queue.Empty:
+                if should_stop():
+                    return "stopped"
+                if time.monotonic() - last > STALL_TIMEOUT:
+                    return f"the browser stopped answering for {STALL_TIMEOUT // 60} min"
+                continue
+            last = time.monotonic()
+            if item[0] == "done":
+                return item[1]
+            on_result(*item[1:])
+    finally:
+        abandoned.set()  # the browser thread stops before its next query and its results are dropped
 
 
 # ── run ─────────────────────────────────────────────────────────────────────
@@ -548,7 +639,7 @@ def run_discovery(run, options=None, profile=None, fetcher=None, start_pipeline=
     run.log(f"discovery plan: {plan['total']} queries over {len(plan['towns'])} towns")
     seen, new_ids, total = set(), [], plan["total"]
 
-    def record(query, candidates):
+    def record(query, candidates, note=None):
         stats["queries"] += 1
         for cand in candidates:
             cand.setdefault("query", query["query"])
@@ -556,7 +647,10 @@ def run_discovery(run, options=None, profile=None, fetcher=None, start_pipeline=
         with db.session() as conn:
             ids = record_candidates(conn, candidates, stats, seen)
         new_ids.extend(ids)
-        run.log(f"{query['source']}: \"{query['query']}\" {query['town']} → {len(candidates)} candidates, {len(ids)} new")
+        if note:
+            stats["skipped_queries"] = stats.get("skipped_queries", 0) + 1
+        run.log(f"{query['source']}: \"{query['query']}\" {query['town']} → "
+                + (note or f"{len(candidates)} candidates, {len(ids)} new"))
         run.progress(stats["queries"], total, "discover")
 
     by_source = {s: [q for q in plan["queries"] if q["source"] == s] for s in ("osm", "places", "maps", "search")}
@@ -565,7 +659,8 @@ def run_discovery(run, options=None, profile=None, fetcher=None, start_pipeline=
     for q in by_source["places"]:
         record(q, places_search(q, opts["home_lat"], opts["home_lng"], fetcher))
     browser_qs = by_source["maps"] + by_source["search"]
-    error = browser_search(browser_qs, record)
+    error = browser_search(browser_qs, record, should_stop=lambda: run.cancelled)
+    run.check()
     if error:
         run.log(f"maps/search skipped: {error}")
     stats["by_source"] = {s: stats["by_source"].get(s, 0) for s in {q["source"] for q in plan["queries"]}}
@@ -575,9 +670,13 @@ def run_discovery(run, options=None, profile=None, fetcher=None, start_pipeline=
         run.progress(0, len(new_ids), "categorize")
         with ThreadPoolExecutor(max_workers=pipeline.MAX_WORKERS) as pool:
             futures = [pool.submit(_prepare, cid, fetcher, run) for cid in new_ids]
-            for done, fut in enumerate(as_completed(futures), 1):
-                fut.result()
-                run.progress(done, len(new_ids), "categorize")
+            try:
+                for done, fut in enumerate(as_completed(futures), 1):
+                    fut.result()
+                    run.progress(done, len(new_ids), "categorize")
+            except BaseException:  # Stop (runs.Cancelled) or a crash: don't start the companies still queued
+                runs.cancel_pending(futures)
+                raise
         if start_pipeline:
             try:
                 follow = runs.start("pipeline", pipeline.run_pipeline, company_ids=new_ids, fetcher=fetcher)

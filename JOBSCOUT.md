@@ -38,21 +38,21 @@ the AI can run on another machine instead: `JOBS_AI_LOCAL=0` + `JOBS_WORKER_TOKE
 | `taxonomy.py` | industries and every enum shared with the frontend; `/meta` payload |
 | `auth.py` | `require_user` (JWT + allowlist) and `require_worker` (X-Worker-Token) |
 | `http.py` | `PoliteFetcher`: Chrome headers, per-host spacing (3 s pages / 1 s ATS APIs) across threads, retries, robots.txt for pages, `Blocked` on 403/challenges |
-| `browser.py` | optional Playwright render (`fetch_rendered`), `page_html` = static first, browser on `Blocked` |
+| `browser.py` | optional Playwright render (`fetch_rendered`, 90 s limit per page), `page_html` = static first, browser on `Blocked` |
 | `interests.py` | job categories (id, label, title patterns, search terms), a person's interests (categories + target titles + levels) → title match pass/maybe/fail; `combined` = everyone's, stored as `jobs.prefilter` |
 | `normalize.py` | HTML sanitise/text, title tier, rule score (contract §4), salary parser, workplace, locations, hashes |
 | `geo.py` | offline gazetteer (`data/places.json`, MN/WI/IA/ND/SD), Census geocoder, haversine, ORS drive minutes |
 | `ats/` | `detect_from_url/html` for every contract ats_type; adapters: workday, oracle, greenhouse, lever, ashby, smartrecruiters, bamboohr, breezy, recruitee, paylocity, workable, jsonld; any other detected system is read by the AI |
 | `careers.py` | find the careers page and the ATS behind it → company status (`active`/`no_ats`/`no_careers`/`blocked`/`manual_check`) |
 | `enrich.py` | site facts, heuristic categoriser (industry, entity_type, local_presence, ownership…), AI enrichment apply, gem score, auto-ignore |
-| `discovery.py` | discovery plan (terms × towns within radius), sources maps/search (Playwright via clientfinder), osm (Overpass), places (Google, optional); candidate filtering; `import_seeds` utility |
+| `discovery.py` | discovery plan (terms × towns within radius), sources maps/search (Playwright via clientfinder, on a thread of its own: 90 s per search, a fresh browser after one overruns, give up after 3 in a row or 5 min of silence), osm (Overpass), places (Google, optional); candidate filtering; `import_seeds` utility |
 | `pipeline.py` | per-company pipeline: facts → heuristics → AI task → careers/ATS → sweep; run kinds pipeline/enrich/detect/company |
 | `sweep.py` | job sweep: list, local filter, detail for new/changed pass/maybe, normalise, upsert, close after 2 misses; `html` careers pages → `parse_page` |
 | `scoring.py` | profile/job hashes, rule vs AI fit resolution, score payloads/results, `enqueue_scores` |
 | `ai_schemas.py` / `ai.py` | strict JSON schemas + validation/clamping; LM Studio client and prompts |
 | `tasks.py` | AI queue: enqueue (deduped), atomic claim with 10-min lease, complete/fail, lease reaper |
 | `worker.py` | AI worker loop (remote or local transport), heartbeat, protocol-mismatch handling |
-| `runs.py` | background runs with live event history for SSE (one running run per kind) |
+| `runs.py` | background runs with live event history for SSE (one running run per kind); Stop (`POST /jobs/api/runs/<id>/cancel`) ends a run at once as `cancelled` and frees its slot, and the thread quits at its next `run.progress`/`run.check` (`Cancelled`) |
 | `find.py` | the on-demand "Find matches" run: discover → categorize → careers pages → read jobs → queue AI scoring |
 | `scheduler.py` | lease reaper always; with `JOBS_AUTO_RUNS=1` also 30-min categorisation, nightly pipeline+sweep, monthly discovery |
 | `views.py` / `api.py` | response builders (shared with `export-snapshot`) and the Flask blueprint |

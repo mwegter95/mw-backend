@@ -4,7 +4,9 @@ or render their job widgets with JavaScript.
 Playwright is imported lazily; every entry point returns None when it (or a browser
 binary) is unavailable, so the rest of the pipeline degrades to "blocked/manual_check".
 Uses the machine's installed Chrome (JOBS_BROWSER_CHANNEL, default "chrome") and falls
-back to Playwright's bundled Chromium. One page at a time per process.
+back to Playwright's bundled Chromium. One page at a time per process, and each render gets
+RENDER_TIMEOUT in all: some Playwright calls (evaluate, content) have no time limit of their own, and a
+render that never returned would otherwise hold the lock — and every later render — forever.
 """
 import importlib.util
 import logging
@@ -15,6 +17,7 @@ from . import config
 log = logging.getLogger("jobscout")
 
 _lock = threading.Lock()
+RENDER_TIMEOUT = 90  # launch + load + read one page
 
 _FALLBACK_CTX_OPTS = dict(
     viewport={"width": 1280, "height": 800},
@@ -72,41 +75,60 @@ def page_html(url, fetcher):
         return rendered["html"], rendered["final_url"], rendered
 
 
-def fetch_rendered(url, timeout_ms=30000):
-    """Render `url` → {html, final_url, links, iframes, scripts, requests} or None."""
+def fetch_rendered(url, timeout_ms=30000, limit=None):
+    """Render `url` → {html, final_url, links, iframes, scripts, requests} or None (also when it takes longer
+    than `limit` seconds, default RENDER_TIMEOUT; the stuck render is left behind on its own thread)."""
     if not available():
         return None
+    limit = limit or RENDER_TIMEOUT
+    if not _lock.acquire(timeout=limit * 2):
+        log.warning("browser: renders are backed up; skipped %s", url)
+        return None
+    try:
+        box = {}
+        worker = threading.Thread(target=lambda: box.update(result=_render(url, timeout_ms)),
+                                  name="jobs-render", daemon=True)
+        worker.start()
+        worker.join(limit)
+        if worker.is_alive():
+            log.warning("browser: render of %s took over %s s; skipped", url, limit)
+            return None
+        return box.get("result")
+    finally:
+        _lock.release()
+
+
+def _render(url, timeout_ms):
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         return None
     ctx_opts, launch_args = _clientfinder_opts()
-    with _lock:
-        try:
-            with sync_playwright() as pw:
-                browser = _launch(pw, launch_args)
+    try:
+        with sync_playwright() as pw:
+            browser = _launch(pw, launch_args)
+            try:
+                ctx = browser.new_context(**ctx_opts)
+                page = ctx.new_page()
+                requested = []
+                page.on("request", lambda r: requested.append(r.url))
+                page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
                 try:
-                    ctx = browser.new_context(**ctx_opts)
-                    page = ctx.new_page()
-                    requested = []
-                    page.on("request", lambda r: requested.append(r.url))
-                    page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-                    try:
-                        page.wait_for_load_state("networkidle", timeout=8000)
-                    except Exception:  # noqa: BLE001 — long-polling pages never go idle
-                        pass
-                    extracted = page.evaluate(_EXTRACT_JS)
-                    iframes = [f.url for f in page.frames if f != page.main_frame and f.url]
-                    return {
-                        "html": page.content(),
-                        "final_url": page.url,
-                        "links": extracted["links"],
-                        "iframes": sorted(set(iframes + extracted["iframes"])),
-                        "scripts": extracted["scripts"],
-                        "requests": requested[:500],
-                    }
-                finally:
-                    browser.close()
-        except Exception as exc:  # noqa: BLE001 — browser missing, crash, timeout
-            log.warning("browser: render failed for %s: %s", url, str(exc)[:200])
-            return None
+                    page.wait_for_load_state("networkidle", timeout=8000)
+                except Exception:  # noqa: BLE001 — long-polling pages never go idle
+                    pass
+                extracted = page.evaluate(_EXTRACT_JS)
+                iframes = [f.url for f in page.frames if f != page.main_frame and f.url]
+                return {
+                    "html": page.content(),
+                    "final_url": page.url,
+                    "links": extracted["links"],
+                    "iframes": sorted(set(iframes + extracted["iframes"])),
+                    "scripts": extracted["scripts"],
+                    "requests": requested[:500],
+                }
+            finally:
+                browser.close()
+    except Exception as exc:  # noqa: BLE001 — browser missing, crash, timeout
+        log.warning("browser: render failed for %s: %s", url, str(exc)[:200])
+        return None

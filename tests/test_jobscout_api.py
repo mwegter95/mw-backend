@@ -376,6 +376,33 @@ def test_activity_follows_the_run_and_the_ai(seeded, conn):
     assert act["ai"]["done"] == 2 and act["ai"]["queued"] == 0
 
 
+def test_stop_button_cancels_the_running_find(seeded):
+    client = seeded["client"]
+    release = threading.Event()
+
+    def stuck(run, **_):
+        run.progress(39, 60, "discover")
+        release.wait(5)
+        run.progress(40, 60, "discover")
+
+    running = runs.start("find", stuck)
+    try:
+        for _ in range(100):
+            if running.current:
+                break
+            time.sleep(0.02)
+        resp = client.post(f"/jobs/api/runs/{running.id}/cancel", headers=auth())
+        assert resp.status_code == 200 and resp.get_json()["run"]["status"] == "cancelled"
+        act = get(client, "/jobs/api/status")[1]["activity"]
+        assert act["run"] is None and act["last_run"]["status"] == "cancelled"
+        again = client.post(f"/jobs/api/runs/{running.id}/cancel", headers=auth())
+        assert again.status_code == 409 and again.get_json()["error"] == "not_running"
+        assert client.post("/jobs/api/runs/99999/cancel", headers=auth()).status_code == 404
+        assert client.post(f"/jobs/api/runs/{running.id}/cancel").status_code == 401
+    finally:
+        release.set()
+
+
 def test_changing_what_you_look_for_rerates_stored_jobs(seeded, conn):
     client = seeded["client"]
     welder = conn.execute("SELECT prefilter FROM jobs WHERE id=?", (seeded["welder"],)).fetchone()["prefilter"]

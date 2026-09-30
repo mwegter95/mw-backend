@@ -314,7 +314,7 @@ def test_record_candidates_dedupes_filters_and_annotates(conn):
 
 def test_run_discovery_offline_sources_fail_soft(data_dir, monkeypatch):
     from jobscout import runs
-    monkeypatch.setattr(discovery, "browser_search", lambda queries, cb: "Playwright browser not installed")
+    monkeypatch.setattr(discovery, "browser_search", lambda queries, cb, **kw: "Playwright browser not installed")
     monkeypatch.setattr(discovery, "osm_discover", lambda *a, **k: [dict(c) for c in discovery.parse_osm(fixture_json("overpass.json"))])
     fetcher = FakeFetcher([("northstarmolding.example", fixture_text("home_molder.html"))])
     run = runs.run_inline("discover", discovery.run_discovery, options={"max_queries": 5}, fetcher=fetcher,

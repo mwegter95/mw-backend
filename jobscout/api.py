@@ -252,6 +252,22 @@ def run_get(run_id):
     return jsonify({"run": runs.run_dict(row)}) if row else _err("not_found", 404)
 
 
+@jobscout_bp.post("/api/runs/<int:run_id>/cancel")
+@require_user
+def run_cancel(run_id):
+    """Stop: the run ends now (status 'cancelled') and its slot is free for the next Find matches, even if its
+    thread is stuck mid-request; the thread quits at its next checkpoint."""
+    with db.session() as conn:
+        if not conn.execute("SELECT 1 FROM runs WHERE id=?", (run_id,)).fetchone():
+            return _err("not_found", 404)
+    stopped = runs.cancel(run_id)
+    with db.session() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+    if not stopped:
+        return _err("not_running", 409, run=runs.run_dict(row))
+    return jsonify({"run": runs.run_dict(row)})
+
+
 def _sse(event):
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 

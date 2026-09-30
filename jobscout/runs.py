@@ -3,6 +3,10 @@
 Each run is a row in `runs` plus an in-memory `Run` that keeps every event so late subscribers
 replay the history. Only one run per key (normally the kind; "company:<id>" for company runs)
 may be running at a time in this process.
+
+Stop (cancel) ends a run at once — status 'cancelled', its slot freed so Find matches can start again —
+even when the run's thread is stuck in a network call. The thread stops at its next checkpoint
+(run.progress / run.check raise Cancelled) and anything it logs after that is dropped.
 """
 import logging
 import queue
@@ -17,6 +21,11 @@ _lock = threading.Lock()
 _active = {}      # key -> Run
 _recent = {}      # id -> Run (kept for streaming after finish)
 _RECENT_MAX = 30
+
+
+class Cancelled(BaseException):
+    """Raised in a run's own thread at its next checkpoint after Stop. A BaseException, so the pipeline's many
+    `except Exception` fallbacks (a failed page, a failed company) don't swallow it."""
 
 
 class AlreadyRunning(Exception):
@@ -35,6 +44,18 @@ class Run:
         self.last_line = None    # latest log line
         self._subscribers = []
         self._lock = threading.Lock()
+        self._cancel = threading.Event()
+        self._finished = False
+
+    # ── stop ─────────────────────────────────────────────────────────────────
+    @property
+    def cancelled(self):
+        return self._cancel.is_set()
+
+    def check(self):
+        """Checkpoint: raises Cancelled once Stop has been pressed."""
+        if self._cancel.is_set():
+            raise Cancelled()
 
     # ── events ───────────────────────────────────────────────────────────────
     def _emit(self, event):
@@ -45,6 +66,8 @@ class Run:
             q.put(event)
 
     def log(self, line):
+        if self._finished:  # a stopped run's thread winding down; its lines would confuse the finished log
+            return
         line = str(line)[:500]
         self.last_line = line
         log.info("[jobs run %s %s] %s", self.id, self.kind, line)
@@ -53,6 +76,7 @@ class Run:
         self._emit({"type": "log", "line": line})
 
     def progress(self, done, total, phase):
+        self.check()
         self.current = {"done": done, "total": total, "phase": phase}
         self._emit({"type": "progress", "done": done, "total": total, "phase": phase})
 
@@ -71,20 +95,27 @@ class Run:
                 self.add(key, value)
 
     def finish(self, status, stats=None):
+        """End the run once; later calls (the thread finishing after Stop) do nothing. → whether this call ended it."""
+        with self._lock:
+            if self._finished:
+                return False
+            self._finished = True
         if stats:
             self.stats.update(stats)
         with db.session() as conn:
             db.update(conn, "runs", "id", self.id, {"status": status, "finished_at": db.now_iso(),
                                                     "stats": db.dumps(self.stats)})
         with _lock:
-            _active.pop(self.key, None)
-        done = {"type": "done", "status": status, "stats": self.stats}
+            if _active.get(self.key) is self:  # never free a newer run's slot
+                _active.pop(self.key)
+        done = {"type": "done", "status": status, "stats": dict(self.stats)}
         with self._lock:  # status flip + final event are atomic w.r.t. subscribe()
             self.status = status
             self.events.append(done)
             subscribers, self._subscribers = list(self._subscribers), []
         for q in subscribers:
             q.put(done)
+        return True
 
     def subscribe(self):
         """Queue pre-filled with history, then live events."""
@@ -95,6 +126,14 @@ class Run:
             if self.status == "running":
                 self._subscribers.append(q)
         return q
+
+    def cancel(self):
+        """Stop: flag the thread and end the run now. → False if it had already finished."""
+        if self._finished:
+            return False
+        self._cancel.set()
+        self.log("stopped: Stop was pressed")
+        return self.finish("cancelled")
 
     def unsubscribe(self, q):
         with self._lock:
@@ -126,6 +165,8 @@ def start(kind, target, user_id=None, key=None, **kwargs):
         try:
             stats = target(run, **kwargs)
             run.finish("done", stats if isinstance(stats, dict) else None)
+        except Cancelled:
+            run.finish("cancelled")  # normally already done by Stop
         except Exception as exc:  # noqa: BLE001 — any crash ends the run as failed
             log.error("jobs run %s crashed: %s\n%s", run.id, exc, traceback.format_exc())
             run.log(f"failed: {exc}")
@@ -141,6 +182,8 @@ def run_inline(kind, target, user_id=None, key=None, **kwargs):
     try:
         stats = target(run, **kwargs)
         run.finish("done", stats if isinstance(stats, dict) else None)
+    except Cancelled:
+        run.finish("cancelled")
     except Exception:
         run.finish("failed")
         raise
@@ -155,6 +198,19 @@ def running_id(kind):
 
 def live(run_id):
     return _recent.get(run_id)
+
+
+def cancel(run_id):
+    """Stop a run of this process. → False when it isn't running here."""
+    run = _recent.get(run_id)
+    return bool(run and run.cancel())
+
+
+def cancel_pending(futures):
+    """For a thread-pool loop interrupted by Stop: drop the futures that haven't started, so leaving the
+    `with ThreadPoolExecutor` block waits only for the few already running."""
+    for fut in futures:
+        fut.cancel()
 
 
 def run_dict(row):

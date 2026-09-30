@@ -11,7 +11,7 @@ company (1–4 for one company).
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from . import db, enrich, scoring, sweep, taxonomy, tasks
+from . import db, enrich, runs, scoring, sweep, taxonomy, tasks
 
 log = logging.getLogger("jobscout")
 
@@ -80,16 +80,20 @@ def _parallel(run, ids, fn, phase):
     run.progress(0, total, phase)
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         futures = [pool.submit(fn, cid) for cid in ids]
-        for done, fut in enumerate(as_completed(futures), 1):
-            try:
-                result = fut.result() or {}
-            except Exception as exc:  # noqa: BLE001
-                run.log(f"error: {type(exc).__name__}: {exc}")
-                result = {"errors": 1}
-            for key, value in result.items():
-                if isinstance(value, (int, float)):
-                    stats[key] = stats.get(key, 0) + value
-            run.progress(done, total, phase)
+        try:
+            for done, fut in enumerate(as_completed(futures), 1):
+                try:
+                    result = fut.result() or {}
+                except Exception as exc:  # noqa: BLE001
+                    run.log(f"error: {type(exc).__name__}: {exc}")
+                    result = {"errors": 1}
+                for key, value in result.items():
+                    if isinstance(value, (int, float)):
+                        stats[key] = stats.get(key, 0) + value
+                run.progress(done, total, phase)
+        except BaseException:  # Stop (runs.Cancelled) or a crash: don't start the companies still queued
+            runs.cancel_pending(futures)
+            raise
     return stats
 
 

@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from urllib.parse import urljoin
 
-from . import ats, browser, careers, config, db, geo, scoring, tasks
+from . import ats, browser, careers, config, db, geo, runs, scoring, tasks
 from .ats.base import RawJob
 from .http import Blocked, FetchError
 from .interests import Interests, combined as combined_interests
@@ -354,10 +354,14 @@ def run_sweep(run, company_ids=None, limit=None, fetcher=None, skip_swept_since=
     stats = {"companies": 0, "jobs_seen": 0, "jobs_new": 0, "matching_new": 0, "errors": 0}
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         futures = [pool.submit(sweep_company, cid, run, fetcher) for cid in ids]
-        for done, fut in enumerate(as_completed(futures), 1):
-            for key, value in (fut.result() or {}).items():
-                stats[key] = stats.get(key, 0) + value
-            run.progress(done, total, "sweep")
+        try:
+            for done, fut in enumerate(as_completed(futures), 1):
+                for key, value in (fut.result() or {}).items():
+                    stats[key] = stats.get(key, 0) + value
+                run.progress(done, total, "sweep")
+        except BaseException:  # Stop (runs.Cancelled) or a crash: don't start the companies still queued
+            runs.cancel_pending(futures)
+            raise
     with db.session() as conn:
         queued = scoring.enqueue_scores(conn)
         refresh_drive_times(conn)
