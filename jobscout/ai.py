@@ -6,17 +6,26 @@ Prompt order for score_job is system rubric → PROFILE → JOB so llama.cpp can
 profile prefix across jobs.
 """
 import json
+import logging
 import re
 
 import requests
 
 from . import ai_schemas, config, taxonomy
 
-# Caps, not budgets: the JSON answers are a few hundred tokens, but if the model's "thinking" is on its
-# reasoning counts against max_tokens too, and a cap that's too tight truncates the JSON.
+log = logging.getLogger("jobscout")
+
+# Caps, not budgets: the JSON answers are a few hundred tokens, but if the model's "thinking" (LM Studio's
+# Reasoning setting) is on, its reasoning counts against max_tokens too and a tight cap cuts the JSON off.
 MAX_TOKENS = {"score_job": 1500, "enrich_company": 1500, "parse_page": 4000}
+# When an answer is cut off at the cap (finish_reason "length"), ask once more with this much room.
+RETRY_MAX_TOKENS = 6144
+RETRY_TIMEOUT = 420  # seconds; thousands of reasoning tokens take minutes on a 12 GB card
+THINKING_HINT = "turn off Reasoning in this model's settings in LM Studio"
 # Reasoning blocks some models (Gemma 4 with thinking on, Qwen, DeepSeek) put in the content.
-_REASONING = re.compile(r"<think>.*?</think>|<\|channel\|?>\s*thought.*?<\|?channel\|>|<\|think\|>", re.S | re.I)
+# (A block with no end means the budget ran out mid-thought.)
+_REASONING = re.compile(r"<think>.*?(?:</think>|\Z)|<\|channel\|?>\s*thought.*?(?:<\|?channel\|>|\Z)|<\|think\|>",
+                        re.S | re.I)
 
 SCORE_SYSTEM = """You are a careful career advisor scoring how well ONE job fits ONE candidate.
 The candidate says what they want in their own words (want_text), what to avoid (avoid_text), the kinds of
@@ -93,25 +102,62 @@ def parse_json_content(text):
         raise
 
 
+class AnswerCutOff(ValueError):
+    """The model stopped at max_tokens before finishing its JSON (or before writing any)."""
+
+
+def _reasoning_tokens(data):
+    details = (data.get("usage") or {}).get("completion_tokens_details") or {}
+    return details.get("reasoning_tokens")
+
+
 def chat_json(kind, payload, base=None, model=None, api_key=None, timeout=180, session=None):
-    """One structured completion → (result dict, model id). Raises on HTTP/parse errors."""
+    """One structured completion → (result dict, model id). Raises on HTTP/parse errors.
+
+    If the answer is cut off at max_tokens — which is what happens when the model's thinking is on and
+    uses up the budget — it asks once more with RETRY_MAX_TOKENS before giving up with AnswerCutOff."""
     base = (base or config.ai_api_base()).rstrip("/")
     model = model or config.ai_model()
-    body = {
-        "model": model, "temperature": 0.2, "max_tokens": MAX_TOKENS[kind], "messages": build_messages(kind, payload),
-        "response_format": {"type": "json_schema",
-                            "json_schema": {"name": kind, "strict": True, "schema": ai_schemas.SCHEMAS[kind]}},
-    }
     http = session or requests
-    resp = http.post(f"{base}/chat/completions", json=body, timeout=timeout,
-                     headers={"Authorization": f"Bearer {api_key or config.ai_api_key()}"})
-    resp.raise_for_status()
-    data = resp.json()
-    content = data["choices"][0]["message"].get("content") or ""
-    if not content.strip():
-        raise ValueError("model returned no answer — if thinking is on for this model in LM Studio, "
-                         "it may have used the whole token budget; turn thinking off")
-    return parse_json_content(content), data.get("model") or model
+    attempts = ((MAX_TOKENS[kind], timeout), (max(RETRY_MAX_TOKENS, MAX_TOKENS[kind]), max(timeout, RETRY_TIMEOUT)))
+    for n, (cap, wait) in enumerate(attempts):
+        last = n == len(attempts) - 1
+        body = {
+            "model": model, "temperature": 0.2, "max_tokens": cap, "messages": build_messages(kind, payload),
+            "response_format": {"type": "json_schema",
+                                "json_schema": {"name": kind, "strict": True, "schema": ai_schemas.SCHEMAS[kind]}},
+        }
+        resp = http.post(f"{base}/chat/completions", json=body, timeout=wait,
+                         headers={"Authorization": f"Bearer {api_key or config.ai_api_key()}"})
+        resp.raise_for_status()
+        data = resp.json()
+        choice = (data.get("choices") or [{}])[0]
+        content = (choice.get("message") or {}).get("content") or ""
+        cut_off = choice.get("finish_reason") == "length"
+        text = _REASONING.sub("", content).strip()
+        error = None
+        try:
+            if text:
+                return parse_json_content(content), data.get("model") or model
+        except ValueError as exc:
+            error = exc
+        # No answer, or JSON that doesn't parse: almost always the budget ran out mid-answer.
+        if not last:
+            log.info("ai: %s answer %s at %d tokens%s; retrying with %d", kind,
+                     "cut off" if cut_off else "unusable", cap, _thinking_note(data), attempts[-1][0])
+            continue
+        if not text:
+            raise AnswerCutOff(f"model returned no answer within {cap} tokens{_thinking_note(data)} — "
+                               f"{THINKING_HINT}")
+        if cut_off:
+            raise AnswerCutOff(f"answer cut off at {cap} tokens{_thinking_note(data)} — {THINKING_HINT}") from error
+        raise error
+    raise AssertionError("unreachable")
+
+
+def _thinking_note(data):
+    used = _reasoning_tokens(data)
+    return f" ({used} spent thinking)" if used else ""
 
 
 def health(base=None, timeout=5, session=None):

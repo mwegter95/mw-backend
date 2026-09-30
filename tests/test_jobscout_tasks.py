@@ -451,3 +451,58 @@ def test_redirected_domain_is_not_a_directory_and_ai_can_unignore(conn):
     user = insert_company(conn, domain="u.example", status="ignored", status_reason="ignored by user")
     enrich.apply_enrichment(conn, user, ai_schemas.validate("enrich_company", ENRICH))
     assert conn.execute("SELECT status FROM companies WHERE id=?", (user,)).fetchone()[0] == "ignored"
+
+
+class _FakeLM:
+    """Stands in for requests.Session against LM Studio: returns the queued responses in order."""
+
+    def __init__(self, *choices):
+        self.choices, self.bodies = list(choices), []
+
+    def post(self, url, json=None, timeout=None, headers=None):  # noqa: A002 — requests' signature
+        self.bodies.append({**json, "_timeout": timeout})
+        content, finish, reasoning = self.choices.pop(0)
+
+        class R:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"model": "gemma", "choices": [{"message": {"content": content}, "finish_reason": finish}],
+                        "usage": {"completion_tokens_details": {"reasoning_tokens": reasoning}}}
+        return R()
+
+
+def test_ai_retries_an_answer_cut_off_by_thinking():
+    lm = _FakeLM(('{"summary": "Makes wi', "length", 1480), ('{"summary": "Makes widgets"}', "stop", 2100))
+    result, model = ai.chat_json("enrich_company", {"name": "x"}, base="http://lm", model="gemma", session=lm)
+    assert result == {"summary": "Makes widgets"} and model == "gemma"
+    assert [b["max_tokens"] for b in lm.bodies] == [ai.MAX_TOKENS["enrich_company"], ai.RETRY_MAX_TOKENS]
+    assert lm.bodies[1]["_timeout"] >= ai.RETRY_TIMEOUT
+
+
+def test_ai_gives_a_clear_error_when_thinking_uses_every_token():
+    lm = _FakeLM(("", "length", 1500), ("<think>still going", "length", 6144))
+    with pytest.raises(ai.AnswerCutOff) as err:
+        ai.chat_json("enrich_company", {"name": "x"}, base="http://lm", model="gemma", session=lm)
+    assert "no answer within 6144 tokens (6144 spent thinking)" in str(err.value)
+    assert "Reasoning" in str(err.value)
+    lm = _FakeLM(('{"a": "b', "length", 1400), ('{"a": "b', "length", 6000))
+    with pytest.raises(ai.AnswerCutOff, match="cut off at 6144 tokens"):
+        ai.chat_json("score_job", {"profile": {}, "job": {}}, base="http://lm", model="gemma", session=lm)
+
+
+def test_requeue_cut_off_retries_only_token_budget_failures(conn):
+    cid = conn.execute("INSERT INTO companies(name, domain, status, enrich_status) VALUES('A', 'a.example', 'active', "
+                       "'failed')").lastrowid
+    cut = tasks.enqueue(conn, "enrich_company", company_id=cid)
+    other = tasks.enqueue(conn, "enrich_company", company_id=cid + 999)
+    for tid, err in ((cut, "JSONDecodeError: Unterminated string starting at: line 9"), (other, "HTTPError: 500")):
+        conn.execute("UPDATE ai_tasks SET status='failed', attempts=3, error=? WHERE id=?", (err, tid))
+    conn.commit()
+    assert tasks.requeue_cut_off(conn) == 1
+    rows = {r["id"]: r for r in conn.execute("SELECT id, status, attempts, error FROM ai_tasks")}
+    assert (rows[cut]["status"], rows[cut]["attempts"], rows[cut]["error"]) == ("queued", 0, None)
+    assert rows[other]["status"] == "failed"
+    assert conn.execute("SELECT enrich_status FROM companies WHERE id=?", (cid,)).fetchone()[0] == "queued"
+    assert tasks.requeue_cut_off(conn) == 0
