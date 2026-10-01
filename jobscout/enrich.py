@@ -505,14 +505,20 @@ AUTO_IGNORE_REASONS = ("not an employer site", "local branch of a chain", "no lo
 
 def auto_ignore(company):
     """§9.2: directories/news → ignored; chain/franchise branches → ignored — unless the user restored it.
-    A company auto-ignored on earlier (heuristic) evidence is un-ignored when a newer verdict disagrees."""
+    A company auto-ignored on earlier (heuristic) evidence is un-ignored when a newer verdict disagrees.
+
+    "Not an employer site" and "branch of a chain" wait for the AI's verdict: the keyword guess was wrong
+    about 7 times in 10 for the first (a sand & gravel company read as a news site) and half the time for the
+    second, and an ignored company is skipped by the careers check. "No local presence" (no Minnesota/Wisconsin
+    address, place or area code anywhere on the site) is right about 8 times in 10, so it still applies at once."""
     if db.loads(company.get("facts"), {}).get("_user_restored"):
         return {}
     et, presence = company.get("entity_type"), company.get("local_presence")
+    ai_verdict = company.get("enrich_source") in ("ai", "seed")
     if et in ("directory", "news"):
-        verdict = {"status": "ignored", "status_reason": "not an employer site"}
+        verdict = {"status": "ignored", "status_reason": "not an employer site"} if ai_verdict else {}
     elif et in ("retail_location", "franchise_location") and presence == "branch":
-        verdict = {"status": "ignored", "status_reason": "local branch of a chain"}
+        verdict = {"status": "ignored", "status_reason": "local branch of a chain"} if ai_verdict else {}
     elif presence == "none":
         verdict = {"status": "ignored", "status_reason": "no local presence found"}
     else:

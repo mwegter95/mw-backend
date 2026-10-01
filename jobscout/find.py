@@ -6,6 +6,7 @@
 2. pipeline — for every company not processed yet: careers page, careers system, first job read
                                                                (phase "pipeline")
 3. sweep — read open jobs at every other company with a careers system          (phase "sweep")
+   then a careers check for companies the AI confirmed as employers while this ran   (phase "pipeline")
 4. queue AI scoring for jobs in each person's field; the AI works through it in the background and
    GET /jobs/api/status → activity.ai reports how far it has got.
 
@@ -46,7 +47,17 @@ def run_find(run, options=None, profile=None, fetcher=None):
     swept = sweep.run_sweep(run, fetcher=fetcher, skip_swept_since=started) or {}
     stats["companies_read"] += swept.get("companies", 0) or 0
 
-    for part in (checked, swept):
+    # The AI categorizes new companies while the run goes on; one it found to be a real local employer after
+    # all (the quick keyword pass had set it aside) is waiting for its careers check — do that now.
+    with db.session() as conn:
+        late = pipeline.pending_ids(conn)
+    late_checked = {}
+    if late:
+        run.log(f"checking careers pages of {len(late)} more companies the AI confirmed as local employers meanwhile")
+        late_checked = pipeline.run_pipeline(run, company_ids=late, fetcher=fetcher) or {}
+        stats["companies_checked"] += late_checked.get("companies", 0) or 0
+
+    for part in (checked, swept, late_checked):
         for key in ("jobs_seen", "jobs_new", "matching_new", "score_tasks", "errors"):
             stats[key] += part.get(key, 0) or 0
     run.log(f"done: {stats['new_companies']} new companies, {stats['matching_new']} new jobs in your field; "

@@ -162,7 +162,9 @@ def test_entity_type_guesses_and_auto_ignore(fixture, domain, entity):
     facts = _facts(fixture, domain)
     fields = enrich.categorize({"domain": domain, "lat": None}, facts, fetcher=FakeFetcher())
     assert fields["entity_type"] == entity
-    assert enrich.auto_ignore({**fields, "status": "pending"})["status"] == "ignored"
+    # A keyword guess alone doesn't ignore the company (it's often wrong); the AI's verdict does.
+    assert enrich.auto_ignore({**fields, "status": "pending"}) == {}
+    assert enrich.auto_ignore({**fields, "enrich_source": "ai", "status": "pending"})["status"] == "ignored"
 
 
 def test_entity_type_for_public_bodies():
