@@ -10,7 +10,7 @@ Importing this module starts no threads and touches no network.
 """
 import logging
 
-from jobscout import config, db, enrich, runs, scheduler, worker
+from jobscout import config, db, enrich, runs, scheduler, tasks, worker
 from jobscout.api import jobscout_bp
 
 __all__ = ["jobscout_bp", "start_jobscout"]
@@ -28,6 +28,9 @@ def start_jobscout():
         changed = enrich.recompute_gems(conn)  # gem rules may have changed since the last start
         if changed:
             log.info("[jobs] recomputed gem scores for %d companies", changed)
+        requeued = tasks.requeue_cut_off(conn)
+        if requeued:
+            log.info("[jobs] retrying %d AI tasks that failed because the model's answer was cut off", requeued)
     scheduler.start_scheduler()
     if config.ai_local():
         worker.start_worker_thread(local=True)

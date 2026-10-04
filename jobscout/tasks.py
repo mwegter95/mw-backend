@@ -1,6 +1,6 @@
 """AI task queue (ai_tasks table).
 
-Workers claim tasks with a 10-minute lease; payloads are built at claim time from current data.
+Workers claim tasks with a 30-minute lease; payloads are built at claim time from current data.
 A failed attempt (explicit fail, invalid result or an expired lease) requeues the task until
 it has been tried 3 times, then marks it failed.
 """
@@ -11,7 +11,7 @@ from . import ai_schemas, db
 
 log = logging.getLogger("jobscout")
 
-LEASE_MINUTES = 10
+LEASE_MINUTES = 30  # long enough for a slow retry (ai.RETRY_TIMEOUT) on each task of a batch
 MAX_ATTEMPTS = 3
 KIND_PRIORITY = ("score_job", "enrich_company", "parse_page")
 
@@ -149,6 +149,29 @@ def fail(conn, task_id, worker_id=None, error=None):
         db.update(conn, "companies", "id", task["company_id"], {"enrich_status": "failed"})
     conn.commit()
     return status
+
+
+# Failures that mean the model ran out of tokens (its thinking used the budget), not that the task is bad.
+_CUT_OFF_ERRORS = ("%no answer%", "%cut off%", "%JSONDecodeError%", "%Unterminated string%")
+
+
+def requeue_cut_off(conn):
+    """Give tasks that failed because the answer was cut off a fresh start (run at server start, so fixing
+    LM Studio's Reasoning setting and restarting retries them). Returns how many were requeued."""
+    rows = conn.execute("SELECT id, kind, company_id FROM ai_tasks WHERE status='failed' AND ("
+                        + " OR ".join("error LIKE ?" for _ in _CUT_OFF_ERRORS) + ")", _CUT_OFF_ERRORS).fetchall()
+    now, n = db.now_iso(), 0
+    for r in rows:
+        # OR IGNORE: skip it if an identical task is already queued again.
+        cur = conn.execute("UPDATE OR IGNORE ai_tasks SET status='queued', attempts=0, error=NULL, lease_until=NULL, "
+                           "worker_id=NULL, updated_at=? WHERE id=?", (now, r["id"]))
+        if cur.rowcount:
+            n += 1
+            if r["kind"] == "enrich_company" and r["company_id"]:
+                conn.execute("UPDATE companies SET enrich_status='queued' WHERE id=? AND enrich_status='failed'",
+                             (r["company_id"],))
+    conn.commit()
+    return n
 
 
 def reap(conn):

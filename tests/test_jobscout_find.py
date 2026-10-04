@@ -35,3 +35,21 @@ def test_find_runs_every_step_in_order(data_dir, monkeypatch):
     calls.clear()
     runs.run_inline("find", find.run_find, options={"skip_discovery": True})
     assert [c[0] for c in calls] == ["pipeline", "sweep"]
+
+
+def test_find_checks_companies_the_ai_confirmed_during_the_run(data_dir, monkeypatch):
+    calls = []
+
+    def fake_pipeline(run, fetcher=None, company_ids=None, **_):
+        calls.append(("pipeline", company_ids))
+        return {"companies": len(company_ids or [1, 2]), "jobs_new": 1, "matching_new": 1}
+
+    pending = iter([[], [41, 42]])
+    monkeypatch.setattr(pipeline, "run_pipeline", fake_pipeline)
+    monkeypatch.setattr(pipeline, "pending_ids", lambda conn, limit=None: next(pending))
+    monkeypatch.setattr(sweep, "run_sweep", lambda run, fetcher=None, skip_swept_since=None, **_: {"companies": 9})
+    run = runs.run_inline("find", find.run_find, options={"skip_discovery": True})
+    assert run.stats["companies_checked"] == 2  # the first pass (2) — nothing pending afterwards
+    run = runs.run_inline("find", find.run_find, options={"skip_discovery": True})
+    assert calls[-1] == ("pipeline", [41, 42])
+    assert run.stats["companies_checked"] == 4 and run.stats["matching_new"] == 2

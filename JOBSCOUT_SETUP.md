@@ -51,9 +51,11 @@ it just downloaded.
 1. **Download the model**: in LM Studio search for **Gemma 4 12B** and download the **QAT** build
    (`google/gemma-4-12b-qat`). It's the version made to run at 4-bit, which fits the RTX 3060's 12 GB.
 2. **Load settings** (the model's settings/gear in *My Models*): GPU offload **max**, context length
-   **16384** (8192 also works). If the model has a **thinking** toggle, turn it **off**: Job Scout wants a
-   short JSON answer, and thinking spends time and tokens on each of hundreds of requests. (Job Scout copes if
-   it's left on, just slower.)
+   **16384** (8192 also works), and **Reasoning off**. Gemma 4 thinks before it answers when Reasoning is on
+   (LM Studio 0.4.17+ shows the toggle among the model's inference settings). Job Scout wants a short JSON
+   answer, and the thinking spends a minute and thousands of tokens on each of hundreds of requests — often
+   the whole budget, so the answer comes back empty or cut off. Job Scout retries those once with more room,
+   but it's much faster with Reasoning off.
 3. **Start the server**: Developer tab → start the server on port **1234**. Leave "serve on local network" off;
    only this PC needs it. Turn on **Just-in-time model loading** so a request loads the model by itself after
    a reboot.
@@ -172,7 +174,7 @@ signed in. It must be up for anyone to sign in, as it already must for the rest 
 | Everyone gets "auth_unavailable" | wegter-pc can't reach api.michaelwegter.com (Surface down or no internet) |
 | "This account doesn't have access yet" | the email isn't in `JOBS_ALLOWED_EMAILS` (restart the launcher after editing `.env`) |
 | Instances: LM Studio not responding | LM Studio server stopped, or `JOBS_AI_MODEL` doesn't match an id from `/v1/models` |
-| AI tasks fail with "model returned no answer" | thinking is on and used the token budget: turn it off for the model |
+| AI tasks fail with "model returned no answer", "answer cut off" or "Unterminated string" | Reasoning is on for the model in LM Studio and the thinking used the token budget: turn it off, then restart the launcher (tasks that failed this way are retried at startup) |
 | Find matches reads no jobs | no profile has job categories or target titles yet (the run log says so) |
 | Find matches says another run is going | only one search runs at a time; the progress panel shows the one in progress |
 | Discovery: "maps/search skipped" | Playwright's browser missing: `venv\Scripts\python -m playwright install chromium` |

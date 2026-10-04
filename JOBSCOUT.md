@@ -115,7 +115,9 @@ python -m jobscout.geo build 2024_Gaz_place_national.txt 2024_Gaz_cousubs_nation
    (open pass/maybe job × profile) whose AI score hash no longer matches `hash(profile.input_hash, job.content_hash)`.
 4. **AI worker** (a thread in the same server) claims tasks (score_job > enrich_company > parse_page), calls LM Studio
    with a strict json_schema, and the results are validated/clamped and applied. Until then the API shows rule
-   scores and keyword categories. `ai.parse_json_content` strips a reasoning block if the model's thinking is on.
+   scores and keyword categories. `ai.parse_json_content` strips a reasoning block if the model's thinking is on; an answer cut off at
+   `max_tokens` (finish_reason `length`, or empty/unparseable) is retried once with `RETRY_MAX_TOKENS`, and tasks that
+   failed that way are requeued at startup (`tasks.requeue_cut_off`).
 
 ## Adding an ATS adapter
 
