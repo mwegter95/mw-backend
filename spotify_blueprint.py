@@ -112,6 +112,21 @@ def get_authenticated_spotify():
         return None
 
 
+NOT_ALLOWLISTED_MSG = (
+    "Your Spotify account isn't approved for this app yet. Spotify only lets "
+    "apps in Development Mode work for accounts the owner has added by hand. "
+    "Ask Michael to add the email on your Spotify account, then reconnect."
+)
+
+
+def _spotify_error(e):
+    """Turn known Spotify API failures into a message a visitor can act on."""
+    msg = str(e)
+    if "not registered for this application" in msg:
+        return NOT_ALLOWLISTED_MSG
+    return msg
+
+
 def extract_playlist_id(playlist_url):
     if "playlist/" in playlist_url:
         return playlist_url.split("playlist/")[1].split("?")[0]
@@ -475,9 +490,9 @@ def create_playlist():
     if not track_uris:
         return jsonify({"success": False, "error": "No tracks selected"})
     try:
-        user = sp.current_user()
-        playlist = sp.user_playlist_create(
-            user=user["id"],
+        # POST /me/playlists -- Spotify removed POST /users/{id}/playlists for
+        # Development Mode apps in Feb 2026.
+        playlist = sp.current_user_playlist_create(
             name=playlist_name,
             public=True,
             description=f"Created with Spotify Super User Tools on {datetime.now().strftime('%Y-%m-%d')}",
@@ -491,7 +506,7 @@ def create_playlist():
             "track_count": len(track_uris),
         })
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
+        return jsonify({"success": False, "error": _spotify_error(e)})
 
 
 @spotify_bp.route("/cleanify-playlist", methods=["POST"])
@@ -549,10 +564,8 @@ def cleanify_playlist():
         if not new_uris:
             return jsonify({"success": False, "error": "No tracks to add to the new playlist."})
 
-        user = sp.current_user()
         new_name = f"{original_name} (Clean)"
-        new_playlist = sp.user_playlist_create(
-            user=user["id"],
+        new_playlist = sp.current_user_playlist_create(
             name=new_name,
             public=True,
             description=f"Clean version created with Spotify Super User Tools on {datetime.now().strftime('%Y-%m-%d')}",
@@ -571,4 +584,4 @@ def cleanify_playlist():
             "total_in_new_playlist": len(new_uris),
         })
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
+        return jsonify({"success": False, "error": _spotify_error(e)})
