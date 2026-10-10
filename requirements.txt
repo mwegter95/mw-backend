@@ -33,3 +33,5 @@ google-auth-oauthlib>=1.2
 google-api-python-client>=2.140
 # Job Scout — HTTP client for careers systems, geocoding and the AI worker
 requests>=2.31
+# Inbox dashboard — local-day counts need the IANA time zone database on Windows
+tzdata>=2024.1

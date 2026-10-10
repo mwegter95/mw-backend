@@ -369,6 +369,10 @@ app.register_blueprint(bowling_bp)
 from gaming_blueprint import gaming_bp
 app.register_blueprint(gaming_bp)
 
+# ─── Inbox dashboard (Gmail triage) ───────────────────────────────────────────
+from inbox_blueprint import inbox_bp
+app.register_blueprint(inbox_bp)
+
 from yard_seed import seed_for_owner as _yard_seed_for_owner
 from yard_seed_v2 import seed_v2_for_owner as _yard_seed_v2_for_owner
 
