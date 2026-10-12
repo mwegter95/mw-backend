@@ -355,8 +355,15 @@ def require_owner(f):
     return wrapper
 
 
+# Never answer a Gmail/Apps Script failure with 502 or 504: Cloudflare swaps any
+# 502/504 from this server for its own branded error page, which carries no CORS
+# headers, so the browser reports a CORS error and the real reason is lost.
+# 424 Failed Dependency passes through Cloudflare untouched.
+UPSTREAM_FAILED = 424
+
+
 def _script_error_response(e: ScriptError):
-    status = 503 if e.code == "config" else 404 if e.code == "not_found" else 502
+    status = 404 if e.code == "not_found" else UPSTREAM_FAILED
     return jsonify({"error": str(e), "code": e.code}), status
 
 

@@ -113,9 +113,26 @@ class ScriptClient:
                 "after adding dashboard-api.gs.", "not_json")
         if not isinstance(data, dict) or not data.get("ok"):
             err = (data or {}).get("error") if isinstance(data, dict) else None
-            raise ScriptError(err or "Apps Script returned an error", (data or {}).get("code", "error")
-                              if isinstance(data, dict) else "error")
+            code = (data or {}).get("code", "error") if isinstance(data, dict) else "error"
+            raise ScriptError(_explain(err or "Apps Script returned an error", code), code)
         return data
+
+
+_AUTH_HINTS = {
+    "Bad signature": " GMAIL_SCRIPT_SECRET on the server doesn't match the script's secret. Run "
+                     "setupDashboard() in Apps Script and copy its GMAIL_SCRIPT_SECRET line into .env again.",
+    "Timestamp outside": " The server's clock may be off.",
+}
+
+
+def _explain(err: str, code: str) -> str:
+    """Script refusals are terse on purpose; say what to do about them here."""
+    if code == "auth":
+        for start, hint in _AUTH_HINTS.items():
+            if err.startswith(start):
+                return f"Apps Script refused the request: {err}.{hint}".replace("..", ".")
+        return f"Apps Script refused the request: {err}"
+    return err
 
 
 # ─── Senders and people ───────────────────────────────────────────────────────

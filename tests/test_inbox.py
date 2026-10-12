@@ -330,7 +330,7 @@ def test_archive_counts_as_cleared_and_failures_surface(client, app):
     assert client.get("/inbox/summary").get_json()["today"]["cleared"] == 1
     app.fake.fail = core.ScriptError("Couldn't reach Apps Script", "network")
     r = client.post("/inbox/actions", json={"ids": ["t-mom"], "action": "archive"})
-    assert r.status_code == 502 and "reach" in r.get_json()["error"]
+    assert r.status_code == 424 and "reach" in r.get_json()["error"]
     # opening an email still counts as read when Gmail is unreachable
     assert client.post("/inbox/actions", json={"ids": ["t-mom"], "action": "read"}).status_code == 200
     assert client.post("/inbox/actions", json={"ids": ["t-mom"], "action": "explode"}).status_code == 400
@@ -439,5 +439,24 @@ def test_ai_that_skips_emails_gets_a_second_ask(client, app, monkeypatch):
 def test_gmail_not_connected_is_explained(client, app, monkeypatch):
     monkeypatch.setattr(ib, "get_script_client", lambda: core.ScriptClient("", ""))
     r = client.post("/inbox/triage/run", json={})
-    assert r.status_code == 503 and "GMAIL_SCRIPT_URL" in r.get_json()["error"]
+    assert r.status_code == 424 and "GMAIL_SCRIPT_URL" in r.get_json()["error"]
     assert client.get("/inbox/summary").get_json()["configured"]["script"] is False
+
+
+def test_gmail_failures_never_use_502_or_504(client, app):
+    """Cloudflare replaces 502/504 with a page that has no CORS headers."""
+    for code in ("network", "not_json", "auth", "error", "config"):
+        app.fake.fail = core.ScriptError("Apps Script refused the request: Bad signature.", code)
+        for path in ("/inbox/status?refresh=1", "/inbox/live?refresh=1", "/inbox/labels"):
+            r = client.get(path)
+            assert r.status_code not in (502, 504), (code, path, r.status_code)
+        r = client.get("/inbox/status?refresh=1")
+        assert r.status_code == 424 and r.get_json()["code"] == code
+
+
+def test_script_refusals_explain_what_to_do():
+    assert "GMAIL_SCRIPT_SECRET" in core._explain("Bad signature", "auth")
+    assert "clock" in core._explain("Timestamp outside the allowed window. Check the server's clock.", "auth")
+    assert core._explain("Dashboard API is off. Run setupDashboard() in the Apps Script editor.", "auth") \
+        .startswith("Apps Script refused the request: Dashboard API is off.")
+    assert core._explain("Thread gone", "not_found") == "Thread gone"

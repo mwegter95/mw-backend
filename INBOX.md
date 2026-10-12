@@ -76,6 +76,20 @@ Daily counts come from `inbox_events` by local day: sorted, read (distinct email
 Calls to the script are signed the same way (`{"ts","payload","sig"}`, five-minute window, replays refused). Both
 sides send ASCII-only JSON, so signatures never depend on text encoding.
 
+## Troubleshooting
+
+When a Gmail call fails, the dashboard shows the reason in a red banner, and Settings → Connection shows it too.
+Apps Script failures come back as **424**, never 502/504. Cloudflare replaces any 502/504 from the server with its
+own page, which has no CORS headers, so the browser would only report "CORS error".
+
+| Message | Fix |
+|---|---|
+| Dashboard API is off | Run `setupDashboard()` in the Apps Script editor. |
+| Bad signature | `GMAIL_SCRIPT_SECRET` doesn't match the script's secret. Copy the `GMAIL_SCRIPT_SECRET=` line from `setupDashboard()` again and restart the server. |
+| Sent back a web page instead of JSON | The web app wasn't redeployed after adding `dashboard-api.gs` (Manage deployments → edit → New version), or its access isn't "Anyone". |
+| Timestamp outside the allowed window | The server's clock is off by more than 5 minutes. |
+| Couldn't reach Apps Script | Check `GMAIL_SCRIPT_URL` ends in `/exec`. |
+
 ## Tests
 
 - `python -m pytest tests/test_inbox.py`: the blueprint against a fake script and model.
