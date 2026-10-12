@@ -95,6 +95,8 @@ own page, which has no CORS headers, so the browser would only report "CORS erro
 |---|---|
 | Dashboard API is off | Run `setupDashboard()` in the Apps Script editor. |
 | Bad signature | `GMAIL_SCRIPT_SECRET` doesn't match the script's secret. Copy the `GMAIL_SCRIPT_SECRET=` line from `setupDashboard()` again and restart the server. |
+| Google refused the request (HTTP 401/403) | The web app's "Who has access" isn't "Anyone". Deploy → Manage deployments → ✏️ → Who has access: Anyone → Deploy. To keep your existing link private, add a second deployment set to Anyone for the dashboard only, and put its URL in `GMAIL_SCRIPT_URL`. |
+| GMAIL_SCRIPT_URL is the test URL / has an account segment | Use the deployment's Web app URL: `https://script.google.com/macros/s/…/exec`, with no `/dev` and no `/u/0/`. |
 | Sent back a web page instead of JSON | The web app wasn't redeployed after adding `dashboard-api.gs` (Manage deployments → edit → New version), or its access isn't "Anyone". |
 | Timestamp outside the allowed window | The server's clock is off by more than 5 minutes. |
 | Couldn't reach Apps Script | Check `GMAIL_SCRIPT_URL` ends in `/exec`. |

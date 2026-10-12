@@ -65,6 +65,11 @@ class ScriptError(RuntimeError):
         self.code = code
 
 
+_EXEC_URL = re.compile(r"^https://script\.google\.com/(?:a/macros/[^/]+|macros)/s/[\w-]+/exec$")
+_ACCOUNT_SEGMENT = re.compile(r"/macros/u/\d+/")
+_SCRIPT_ID = re.compile(r"/s/([\w-]+)/")
+
+
 class ScriptClient:
     """Signed JSON calls to the deployed web app (dashboard-api.gs).
 
@@ -81,6 +86,29 @@ class ScriptClient:
     def configured(self) -> bool:
         return bool(self.url and self.secret)
 
+    def url_problem(self) -> str:
+        """What's wrong with GMAIL_SCRIPT_URL's shape, if anything. Only a deployment's /exec URL
+        answers callers that aren't signed in to Google, like this server."""
+        u = self.url.rstrip("/")
+        if not u or _EXEC_URL.match(u):
+            return ""
+        if u.endswith("/dev"):
+            return ("GMAIL_SCRIPT_URL is the test URL (it ends in /dev), which only works for someone signed "
+                    "in to the script editor. Use the Web app URL from Deploy → Manage deployments; it ends in /exec.")
+        if _ACCOUNT_SEGMENT.search(u):
+            return ("GMAIL_SCRIPT_URL has an account segment (/u/0/ or similar), which makes Google ask for a "
+                    "sign-in. Remove it so it reads https://script.google.com/macros/s/…/exec")
+        return ("GMAIL_SCRIPT_URL doesn't look like a web app URL. Copy the Web app URL from Deploy → Manage "
+                "deployments; it looks like https://script.google.com/macros/s/…/exec")
+
+    def url_hint(self) -> str:
+        """The URL with the middle of its id hidden, safe to show on screen."""
+        m = _SCRIPT_ID.search(self.url)
+        if not m:
+            return self.url[:40] + ("…" if len(self.url) > 40 else "")
+        sid = m.group(1)
+        return self.url.replace(sid, f"{sid[:6]}…{sid[-4:]}") if len(sid) > 12 else self.url
+
     def _http(self):
         if self._session is None:
             import requests
@@ -92,6 +120,9 @@ class ScriptClient:
             raise ScriptError(
                 "Gmail isn't connected yet. Set GMAIL_SCRIPT_URL and GMAIL_SCRIPT_SECRET on the server.",
                 "config")
+        problem = self.url_problem()
+        if problem:
+            raise ScriptError(problem, "config")
         payload = json.dumps({"op": op, **args}, separators=(",", ":"))  # ensure_ascii → pure ASCII
         ts = str(int(time.time()))
         body = json.dumps({"ts": ts, "payload": payload, "sig": sign(self.secret, ts, payload)})
@@ -102,6 +133,16 @@ class ScriptClient:
         except Exception as e:  # requests.RequestException and friends
             raise ScriptError(f"Couldn't reach Apps Script: {e.__class__.__name__}: {e}", "network")
         text = resp.content.decode("utf-8", "replace")
+        if resp.status_code in (401, 403):
+            raise ScriptError(
+                f"Google refused the request before it reached your script (HTTP {resp.status_code}). The web app's "
+                "“Who has access” must be “Anyone”, not “Anyone with Google account” or “Only myself”: Apps Script → "
+                "Deploy → Manage deployments → ✏️ → Who has access: Anyone → Deploy. To keep your current link "
+                "private, make a second deployment set to Anyone just for the dashboard and put its URL in "
+                "GMAIL_SCRIPT_URL.", "access")
+        if resp.status_code == 404:
+            raise ScriptError("Google can't find that web app (HTTP 404). Check GMAIL_SCRIPT_URL is the /exec URL of "
+                              "a current deployment (Deploy → Manage deployments).", "config")
         if resp.status_code >= 400:
             raise ScriptError(f"Apps Script answered HTTP {resp.status_code}", "network")
         try:

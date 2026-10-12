@@ -1251,7 +1251,7 @@ def import_rollup():
 @require_owner
 def connection():
     client = get_script_client()
-    out = {"script": {"configured": client.configured}}
+    out = {"script": {"configured": client.configured, "url": client.url_hint() if client.configured else ""}}
     if client.configured:
         try:
             ping = client.call("ping", timeout=60)

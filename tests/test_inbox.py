@@ -468,3 +468,49 @@ def test_script_refusals_explain_what_to_do():
     assert core._explain("Dashboard API is off. Run setupDashboard() in the Apps Script editor.", "auth") \
         .startswith("Apps Script refused the request: Dashboard API is off.")
     assert core._explain("Thread gone", "not_found") == "Thread gone"
+
+
+class _Resp:
+    def __init__(self, status, text=""):
+        self.status_code, self.content = status, text.encode()
+
+
+class _Session:
+    def __init__(self, status, text=""):
+        self.status, self.text, self.calls = status, text, 0
+
+    def post(self, *a, **k):
+        self.calls += 1
+        return _Resp(self.status, self.text)
+
+
+GOOD_URL = "https://script.google.com/macros/s/AKfycbxAbCdEfGhIjKlMnOp123/exec"
+
+
+def test_script_url_mistakes_are_caught_before_calling_google():
+    for url, words in [
+        ("https://script.google.com/macros/s/AKfycbxAbC/dev", "/dev"),
+        ("https://script.google.com/macros/u/0/s/AKfycbxAbC/exec", "account segment"),
+        ("https://script.google.com/home/projects/1abc/edit", "doesn't look like"),
+    ]:
+        session = _Session(200, '{"ok": true}')
+        with pytest.raises(core.ScriptError) as err:
+            core.ScriptClient(url, "s", session=session).call("ping")
+        assert words in str(err.value) and err.value.code == "config" and session.calls == 0
+    assert core.ScriptClient(GOOD_URL + "/", "s").url_problem() == ""
+    assert core.ScriptClient("https://script.google.com/a/macros/acme.com/s/AKfy123/exec", "s").url_problem() == ""
+
+
+def test_google_401_explains_the_access_setting():
+    with pytest.raises(core.ScriptError) as err:
+        core.ScriptClient(GOOD_URL, "s", session=_Session(401, "<html>Unauthorized</html>")).call("ping")
+    assert err.value.code == "access"
+    assert "Who has access" in str(err.value) and "Anyone with Google account" in str(err.value)
+    with pytest.raises(core.ScriptError) as err:
+        core.ScriptClient(GOOD_URL, "s", session=_Session(404)).call("ping")
+    assert "can't find that web app" in str(err.value)
+
+
+def test_url_hint_hides_most_of_the_id():
+    hint = core.ScriptClient(GOOD_URL, "s").url_hint()
+    assert hint == "https://script.google.com/macros/s/AKfycb…p123/exec"
