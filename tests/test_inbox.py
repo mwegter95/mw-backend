@@ -36,7 +36,7 @@ def test_people_matching_exact_and_domain():
     assert core.match_person("someone@example.org", people) is None
 
 
-def test_parse_actions_accepts_every_shape_chatgpt_produces():
+def test_parse_actions_accepts_every_shape_claude_or_chatgpt_produce():
     fenced = '```json\n[{"id":"t1","labels":"A. Read","importance":"HIGH","archive_ok":"true"},{"summary":"Batch."}]\n```'
     actions, summary = core.parse_actions(fenced)
     assert actions == [{"id": "t1", "summary": "", "labels": ["A. Read"], "importance": "high",
@@ -179,16 +179,15 @@ class FakeScript:
         raise AssertionError(f"unexpected op {op}")
 
 
-def ai_answer(messages, **_):
-    """A stand-in model: high + personal for Mom and the DJ lead, the rest low."""
-    text = messages[-1]["content"]
+def claude_answer(text):
+    """What Claude sends back for an export: high + personal for Mom and the DJ lead, the rest low."""
     ids = [line[4:] for line in text.splitlines() if line.startswith("ID: ")]
     actions = []
     for tid in ids:
         hot = tid in ("t-mom", "t-dj")
         actions.append({"id": tid, "summary": f"About {tid}", "labels": ["A. Read"] if not hot else ["A. Personal"],
                         "importance": "high" if hot else "low", "personal": tid == "t-mom", "archive_ok": not hot})
-    return json.dumps({"actions": actions, "summary": "Two need you."})
+    return {"actions": actions, "summary": "Two need you."}
 
 
 @pytest.fixture
@@ -208,11 +207,8 @@ def app(tmp_path, monkeypatch):
     monkeypatch.setattr(ib, "SCRIPT_SECRET", SCRIPT_SECRET)
     monkeypatch.setattr(ib, "_secret_cache", None)
     monkeypatch.setattr(ib, "_tables_ready", False)
-    monkeypatch.setattr(ib, "_scheduler_started", True)
     monkeypatch.setattr(ib, "_cache", {})
     monkeypatch.setattr(ib, "get_script_client", lambda: fake)
-    monkeypatch.setattr(ib, "ai_chat", ai_answer)
-    monkeypatch.setattr(ib, "ai_provider_name", lambda: "fake")
     monkeypatch.setattr(ib, "spawn", lambda fn, *a: fn(*a))
     flask_app = Flask(__name__)
     flask_app.register_blueprint(ib.inbox_bp)
@@ -231,9 +227,14 @@ def client(app):
     return c
 
 
-def _sort_with_ai(client, review=False):
-    r = client.post("/inbox/triage/run", json={"review": review})
-    assert r.status_code == 202, r.get_json()
+def _sort(client, review=False, source="claude"):
+    """Export, have "Claude" (or wegter-pc) answer, apply. Claude's answer is pasted as text."""
+    export = client.post("/inbox/triage/export", json={}).get_json()
+    answer = claude_answer(export["text"])
+    body = ({"json": "```json\n" + json.dumps(answer) + "\n```"} if source == "claude"
+            else {"actions": answer["actions"], "summary": answer["summary"], "source": source})
+    r = client.post("/inbox/triage/apply", json={**body, "review": review})
+    assert r.status_code == (201 if review else 202), r.get_json()
     return r.get_json()["batch"]
 
 
@@ -247,11 +248,11 @@ def test_only_the_owner_gets_in(app):
     assert c.get("/inbox/health").status_code == 200
 
 
-def test_ai_sort_applies_and_fills_the_dashboard(client, app):
-    batch = _sort_with_ai(client)
+def test_claude_sort_applies_and_fills_the_dashboard(client, app):
+    batch = _sort(client)
     assert batch["status"] == "done", batch
     assert (batch["applied"], batch["archived"], batch["important"], batch["personal"]) == (4, 2, 2, 1)
-    assert batch["summary"] == "Two need you."
+    assert batch["summary"] == "Two need you." and batch["source"] == "claude"
     fake = app.fake
     assert fake.threads["t-promo"]["inbox"] is False and fake.threads["t-mom"]["inbox"] is True
     hl = client.get("/inbox/messages?view=highlights").get_json()["items"]
@@ -267,9 +268,11 @@ def test_ai_sort_applies_and_fills_the_dashboard(client, app):
 
 
 def test_review_lets_me_edit_before_anything_changes(client, app):
-    batch = _sort_with_ai(client, review=True)
+    batch = _sort(client, review=True)
     assert batch["status"] == "review"
     assert len(batch["proposal"]["actions"]) == 4
+    mom = [a for a in batch["proposal"]["actions"] if a["id"] == "t-mom"][0]
+    assert mom["from"] == "Mom <mom@example.org>" and mom["subject"] == "Sunday dinner", "review shows who and what"
     assert not any(op == "apply" for op, _ in app.fake.calls), "nothing applied before review"
     edited = batch["proposal"]["actions"]
     for a in edited:
@@ -286,27 +289,29 @@ def test_review_lets_me_edit_before_anything_changes(client, app):
 
 def test_people_list_keeps_family_in_the_inbox_whatever_the_model_says(client, app, monkeypatch):
     client.put("/inbox/settings", json={"people": [{"match": "deals@pine.example", "name": "Pine", "kind": "friend"}]})
-    _sort_with_ai(client)
+    _sort(client)
     assert app.fake.threads["t-promo"]["inbox"] is True
     row = [m for m in client.get("/inbox/messages?view=all").get_json()["items"] if m["id"] == "t-promo"][0]
     assert row["personal"] is True
 
 
-def test_chatgpt_flow_export_then_paste(client, app):
+def test_claude_flow_export_then_paste(client, app):
     out = client.post("/inbox/triage/export", json={"limit": 2}).get_json()
     assert out["count"] == 2
     assert out["text"].startswith("You sort Michael's Gmail")
     assert "---EMAIL-1---\nID: t-mom" in out["text"]
+    assert out["prompt"].startswith("You sort Michael's Gmail") and len(out["blocks"]) == 2
+    assert out["blocks"][1].startswith("---EMAIL-2---\nID: t-bank")
     pasted = '```json\n{"actions":[{"id":"t-mom","labels":["A. Personal"],"importance":"high","personal":true,' \
              '"archive_ok":false,"summary":"Dinner"}],"summary":"Mom wrote."}\n```'
     batch = client.post("/inbox/triage/apply", json={"json": pasted}).get_json()["batch"]
-    assert batch["status"] == "done" and batch["source"] == "chatgpt" and batch["applied"] == 1
+    assert batch["status"] == "done" and batch["source"] == "claude" and batch["applied"] == 1
     bad = client.post("/inbox/triage/apply", json={"json": "nope"})
     assert bad.status_code == 400 and "valid JSON" in bad.get_json()["error"]
 
 
 def test_reading_pinning_and_unread_sync_with_gmail(client, app):
-    _sort_with_ai(client)
+    _sort(client)
     r = client.post("/inbox/actions", json={"ids": ["t-mom"], "action": "read"}).get_json()
     assert r["updated"][0]["read"] is True
     assert not [a for op, a in app.fake.calls if op == "modify"], "already read in Gmail: no Gmail call"
@@ -323,7 +328,7 @@ def test_reading_pinning_and_unread_sync_with_gmail(client, app):
 
 
 def test_archive_counts_as_cleared_and_failures_surface(client, app):
-    _sort_with_ai(client)
+    _sort(client)
     r = client.post("/inbox/actions", json={"ids": ["t-dj", "ghost"], "action": "archive"}).get_json()
     assert r["failed"] == {"ghost": "not found"}
     assert app.fake.threads["t-dj"]["inbox"] is False
@@ -337,7 +342,7 @@ def test_archive_counts_as_cleared_and_failures_surface(client, app):
 
 
 def test_thread_is_cached_and_gone_threads_are_marked(client, app):
-    _sort_with_ai(client)
+    _sort(client)
     app.fake.calls.clear()
     first = client.get("/inbox/thread/t-bank").get_json()
     assert first["thread"]["messages"][0]["html"] == "<p>Hello</p>" and first["cached"] is False
@@ -355,7 +360,7 @@ def test_live_inbox_merges_untriaged_mail_and_tracks_reads_elsewhere(client, app
     assert {m["id"] for m in live["items"]} == set(app.fake.threads)
     assert all(m["source"] == "inbox" and m["read"] is False for m in live["items"])
     client.put("/inbox/settings", json={"keep_important_unread": True})
-    _sort_with_ai(client)
+    _sort(client)
     mom = [m for m in client.get("/inbox/messages?view=highlights").get_json()["items"] if m["id"] == "t-mom"][0]
     assert mom["gmail_unread"] is True
     app.fake.threads["t-mom"]["unread"] = False  # read on the phone
@@ -388,9 +393,10 @@ def test_settings_roundtrip_and_detected_labels(client):
     s = client.get("/inbox/settings").get_json()
     assert s["prompt_is_default"] is True and s["batch_size"] == 50
     client.get("/inbox/labels")  # caches Gmail's labels
-    s = client.put("/inbox/settings", json={"batch_size": 500, "prompt": "  Custom  ", "auto_sort_hours": -3,
+    s = client.put("/inbox/settings", json={"batch_size": 500, "prompt": "  Custom  ", "auto_sort_hours": 3,
                                             "people": [{"match": "Mom@Example.org"}], "unknown": 1}).get_json()
-    assert s["batch_size"] == 100 and s["prompt"] == "Custom" and s["auto_sort_hours"] == 0
+    assert s["batch_size"] == 100 and s["prompt"] == "Custom" and "auto_sort_hours" not in s
+    assert "last_export" not in s
     assert s["people"] == [{"match": "mom@example.org", "name": "", "kind": "family"}]
     assert "A. Financial/Statements" in s["detected_labels"] and "Receipts" not in s["detected_labels"]
     s = client.put("/inbox/settings", json={"prompt": core.DEFAULT_PROMPT}).get_json()
@@ -407,38 +413,40 @@ def test_rollup_import_is_incremental_and_marks_history_read(client, app):
 
 
 def test_one_sort_at_a_time(client, app, monkeypatch):
-    monkeypatch.setattr(ib, "spawn", lambda fn, *a: None)  # leave the first batch "running"
-    assert client.post("/inbox/triage/run", json={}).status_code == 202
-    r = client.post("/inbox/triage/run", json={})
-    assert r.status_code == 409 and r.get_json()["batch_id"] == 1
+    monkeypatch.setattr(ib, "spawn", lambda fn, *a: None)  # leave the first batch "applying"
+    pasted = json.dumps(claude_answer(client.post("/inbox/triage/export", json={}).get_json()["text"]))
+    assert client.post("/inbox/triage/apply", json={"json": pasted}).status_code == 202
+    r = client.post("/inbox/triage/apply", json={"json": pasted})
+    assert r.status_code == 409
 
 
-def test_scheduled_sort_respects_the_interval(client, app):
-    assert ib._scheduler_tick() is None  # off by default
-    client.put("/inbox/settings", json={"auto_sort_hours": 6})
-    first = ib._scheduler_tick()
-    assert first is not None
-    assert ib._scheduler_tick() is None  # sorted less than 6 hours ago
+def test_wegter_pc_results_apply_under_their_own_name(client, app):
+    batch = _sort(client, source="wegter-pc")
+    assert batch["status"] == "done" and batch["source"] == "wegter-pc" and batch["applied"] == 4
+    for t in app.fake.threads.values():  # new mail arrives
+        t.update(unread=True, inbox=True)
+    reviewed = _sort(client, review=True, source="wegter-pc")
+    done = client.post(f"/inbox/triage/batches/{reviewed['id']}/apply", json={}).get_json()["batch"]
+    assert done["source"] == "wegter-pc" and done["status"] == "done"
+    assert client.post("/inbox/triage/apply", json={"actions": [], "source": "wegter-pc"}).status_code == 400
 
 
-def test_ai_that_skips_emails_gets_a_second_ask(client, app, monkeypatch):
-    calls = []
+def test_a_new_review_replaces_an_unfinished_one(client, app):
+    first = _sort(client, review=True)
+    second = _sort(client, review=True)
+    assert client.get(f"/inbox/triage/batches/{first['id']}").get_json()["batch"]["status"] == "discarded"
+    assert client.get(f"/inbox/triage/batches/{second['id']}").get_json()["batch"]["status"] == "review"
 
-    def lazy_model(messages, **kw):
-        calls.append(messages)
-        out = json.loads(ai_answer(messages))
-        if len(calls) == 1:
-            out["actions"] = out["actions"][:2]
-        return json.dumps(out)
-    monkeypatch.setattr(ib, "ai_chat", lazy_model)
-    batch = _sort_with_ai(client)
-    assert batch["applied"] == 4 and len(calls) == 2
-    assert calls[1][-1]["content"].count("---EMAIL-") == 2
+
+def test_this_server_never_calls_an_ai():
+    import pathlib
+    src = pathlib.Path(ib.__file__).read_text()
+    assert "gh_models" not in src and "copilot" not in src.lower() and "/triage/run" not in src
 
 
 def test_gmail_not_connected_is_explained(client, app, monkeypatch):
     monkeypatch.setattr(ib, "get_script_client", lambda: core.ScriptClient("", ""))
-    r = client.post("/inbox/triage/run", json={})
+    r = client.post("/inbox/triage/export", json={})
     assert r.status_code == 424 and "GMAIL_SCRIPT_URL" in r.get_json()["error"]
     assert client.get("/inbox/summary").get_json()["configured"]["script"] is False
 

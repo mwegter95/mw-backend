@@ -21,11 +21,17 @@ WHAT LIVES HERE (tables in data/mw.db, created lazily)
   inbox_bodies    cached full threads (HTML), so re-opening is instant
   inbox_settings  prompt, people, batch size and other preferences
 
-TRIAGE, THREE WAYS (all end in the script's same apply core)
-  1. Sort with AI   export → gh_models (the server's AI provider) → optional
-                    review → apply. Runs in a background thread; poll the batch.
-  2. ChatGPT        export text (prompt + emails) to copy, paste the JSON back.
+TRIAGE (every path ends in the script's same apply core; this server never
+calls an AI itself)
+  1. Copy for Claude   /triage/export gives the prompt + emails to copy into
+                       Claude; the JSON Claude answers is pasted back into
+                       /triage/apply.
+  2. wegter-pc's AI    the browser carries the same export, a few emails at a
+                       time, to LM Studio on wegter-pc (inbox_local_ai.py,
+                       served at jobs.michaelwegter.com/jobs/local-ai) and
+                       posts the results to /triage/apply.
   3. The Sheet / old web page keep working; the script reports to /ingest.
+  Either of the first two can stop for a review before anything changes.
 
 READ, UNREAD AND COUNTS
   Triage marks mail read in Gmail, so Gmail's read state can't say whether
@@ -95,12 +101,12 @@ DEFAULT_SETTINGS = {
     "labels": [],                   # explicit label list for the prompt; [] = detect
     "batch_size": 50,
     "query": "",                    # '' = the script's QUERY
-    "review_first": True,           # AI proposals wait for a look before applying
+    "review_first": True,           # wegter-pc's sorts wait for a look before applying
     "keep_people_in_inbox": True,
     "keep_important_unread": False,  # leave high/personal mail bold in Gmail
     "block_images": False,
-    "auto_sort_hours": 0,           # 0 = off; otherwise sort with AI every N hours
     "rollup_imported": 0,           # rows of the Rollup sheet already imported
+    "last_export": {},              # id → {from, subject, date, snippet} of the latest export
 }
 
 ACTIONS = {
@@ -123,7 +129,6 @@ _tables_ready = False
 _tables_lock = threading.Lock()
 _triage_lock = threading.Lock()   # one triage batch at a time
 _cache: dict[str, tuple[float, object]] = {}
-_scheduler_started = False
 
 
 # ─── Infrastructure ───────────────────────────────────────────────────────────
@@ -131,20 +136,6 @@ _scheduler_started = False
 def get_script_client() -> ScriptClient:
     """Tests replace this with a fake."""
     return ScriptClient(SCRIPT_URL, SCRIPT_SECRET)
-
-
-def ai_chat(messages, **kwargs) -> str:
-    """The server's configured AI provider (see gh_models.py). Tests replace this."""
-    import gh_models
-    return gh_models.chat_completion(messages, **kwargs)
-
-
-def ai_provider_name() -> str:
-    try:
-        import gh_models
-        return gh_models.PROVIDER
-    except Exception:
-        return "unavailable"
 
 
 def spawn(fn, *args):
@@ -350,7 +341,6 @@ def require_owner(f):
             return jsonify({"error": "This inbox is private"}), 403
         g.user_id = user_id
         _ensure_tables()
-        _ensure_scheduler()
         return f(*args, **kwargs)
     return wrapper
 
@@ -411,8 +401,6 @@ def _clean_settings(body: dict) -> dict:
     for key in ("review_first", "keep_people_in_inbox", "keep_important_unread", "block_images"):
         if key in body:
             out[key] = bool(body.get(key))
-    if "auto_sort_hours" in body:
-        out["auto_sort_hours"] = max(0, min(168, _int(body.get("auto_sort_hours"), 0)))
     return out
 
 
@@ -651,7 +639,7 @@ def summary():
         "latest_batch": _batch_dict(latest) if latest else None,
         "running_batch": _batch_dict(running) if running else None,
         "gmail": status,
-        "configured": {"script": get_script_client().configured, "ai": ai_provider_name()},
+        "configured": {"script": get_script_client().configured},
         "settings": {"block_images": settings["block_images"], "review_first": settings["review_first"],
                      "batch_size": settings["batch_size"]},
         "now": _iso(),
@@ -903,6 +891,7 @@ def get_settings():
         detected = triage_labels({**settings, "labels": []}, conn)
     finally:
         conn.close()
+    settings.pop("last_export", None)
     return jsonify({**settings, "default_prompt": core.DEFAULT_PROMPT, "prompt_is_default": not settings["prompt"],
                     "detected_labels": detected})
 
@@ -984,75 +973,6 @@ def _prompt_for(settings: dict, conn) -> str:
                             settings["people"])
 
 
-def _classify(prompt: str, items: list[dict]) -> tuple[list[dict], str]:
-    """Ask the AI; retry once for anything it skipped or mangled."""
-    ids = {it["id"] for it in items}
-    messages = [{"role": "system", "content": prompt},
-                {"role": "user", "content": core.export_blocks(items, LOCAL_TZ)}]
-    content = ai_chat(messages, json_object=True, max_tokens=8000, temperature=0.2, timeout=240)
-    try:
-        actions, summary = core.parse_actions(content)
-    except ValueError:
-        actions, summary = [], ""
-    actions = [a for a in actions if a["id"] in ids]
-    missing = [it for it in items if it["id"] not in {a["id"] for a in actions}]
-    if missing:
-        retry = [{"role": "system", "content": prompt},
-                 {"role": "user", "content": core.export_blocks(missing, LOCAL_TZ)}]
-        try:
-            more, more_summary = core.parse_actions(
-                ai_chat(retry, json_object=True, max_tokens=6000, temperature=0.2, timeout=240))
-            actions += [a for a in more if a["id"] in ids and a["id"] not in {x["id"] for x in actions}]
-            summary = summary or more_summary
-        except (ValueError, Exception) as e:  # keep what we have; the rest waits for next time
-            log.info("[inbox] retry for %d skipped emails failed: %s", len(missing), e)
-    if not actions:
-        raise ValueError("The AI didn't return usable results. Try again, or use the ChatGPT flow.")
-    return actions, summary
-
-
-def run_ai_batch(batch_id: int, limit: int | None, review: bool):
-    if not _triage_lock.acquire(blocking=False):
-        _update_batch(batch_id, status="failed", error="Another sort is already running.", finished_at=_iso())
-        return
-    try:
-        conn = _db()
-        try:
-            settings = load_settings(conn)
-            prompt = _prompt_for(settings, conn)
-        finally:
-            conn.close()
-        _update_batch(batch_id, step="Reading unread email from Gmail")
-        items = _export(settings, limit)
-        if not items:
-            _update_batch(batch_id, status="done", step="", message="Nothing new to sort. Inbox is clear.",
-                          finished_at=_iso())
-            return
-        _update_batch(batch_id, total=len(items), step=f"Sorting {len(items)} emails with AI")
-        actions, summary = _classify(prompt, items)
-        senders = {it["id"]: it.get("from", "") for it in items}
-        actions = core.apply_people_rules(actions, senders, settings["people"], settings["keep_people_in_inbox"],
-                                          settings["keep_important_unread"])
-        if review:
-            by_id = {it["id"]: it for it in items}
-            proposal = [{**a, "from": by_id[a["id"]].get("from", ""), "subject": by_id[a["id"]].get("subject", ""),
-                         "date": by_id[a["id"]].get("date", ""), "snippet": by_id[a["id"]].get("body", "")[:240]}
-                        for a in actions]
-            _update_batch(batch_id, status="review", step="", summary=summary, total=len(actions),
-                          proposal=json.dumps({"actions": proposal, "summary": summary}))
-            return
-        _apply(batch_id, actions, summary, "ai")
-    except ScriptError as e:
-        _update_batch(batch_id, status="failed", step="", error=str(e), finished_at=_iso())
-    except ValueError as e:
-        _update_batch(batch_id, status="failed", step="", error=str(e), finished_at=_iso())
-    except Exception as e:
-        log.exception("[inbox] AI batch %s failed", batch_id)
-        _update_batch(batch_id, status="failed", step="", error=f"{e.__class__.__name__}: {e}", finished_at=_iso())
-    finally:
-        _triage_lock.release()
-
-
 def _apply(batch_id: int, actions: list[dict], summary: str, source: str):
     """Send actions to the script's apply core and record the result."""
     _update_batch(batch_id, status="applying", total=len(actions),
@@ -1116,25 +1036,16 @@ def _batch_response(batch_id: int, status=202):
     return jsonify({"batch": _batch_dict(row, with_proposal=True)}), status
 
 
-@inbox_bp.post("/triage/run")
-@require_owner
-def triage_run():
-    body = request.get_json(silent=True) or {}
-    if not get_script_client().configured:
-        return _script_error_response(ScriptError("Gmail isn't connected yet. Set GMAIL_SCRIPT_URL and "
-                                                  "GMAIL_SCRIPT_SECRET on the server.", "config"))
-    settings = load_settings()
-    review = bool(body.get("review", settings["review_first"]))
-    limit = max(1, min(100, _int(body.get("limit"), settings["batch_size"])))
-    batch_id, busy = _start("ai", run_ai_batch, limit, review, step="Starting")
-    if busy:
-        return jsonify({"error": "A sort is already running", "batch_id": busy}), 409
-    return _batch_response(batch_id)
+SORT_SOURCES = ("claude", "wegter-pc")
+EXPORT_FIELDS = ("from", "subject", "date", "snippet")
 
 
 @inbox_bp.post("/triage/export")
 @require_owner
 def triage_export():
+    """The next unread emails, ready to sort: `text` to paste into Claude, or `prompt` + `blocks`
+    (one per email) for wegter-pc's AI. The senders are kept so the people rules can be applied
+    to whatever comes back."""
     body = request.get_json(silent=True) or {}
     conn = _db()
     try:
@@ -1146,25 +1057,64 @@ def triage_export():
         items = _export(settings, max(1, min(100, _int(body.get("limit"), settings["batch_size"]))))
     except ScriptError as e:
         return _script_error_response(e)
-    return jsonify({"count": len(items), "text": core.chatgpt_text(prompt, items, LOCAL_TZ) if items else "",
-                    "items": [{k: it.get(k) for k in ("id", "from", "subject", "date")} for it in items]})
+    conn = _db()
+    try:
+        save_settings({"last_export": {it["id"]: {"from": it.get("from", ""), "subject": it.get("subject", ""),
+                                                  "date": it.get("date", ""), "snippet": (it.get("body") or "")[:240]}
+                                       for it in items}}, conn)
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify({
+        "count": len(items),
+        "text": core.paste_text(prompt, items, LOCAL_TZ) if items else "",
+        "prompt": prompt,
+        "blocks": core.email_blocks(items, LOCAL_TZ),
+        "items": [{k: it.get(k) for k in ("id", "from", "subject", "date")} for it in items],
+    })
 
 
 @inbox_bp.post("/triage/apply")
 @require_owner
-def triage_apply_pasted():
-    """The ChatGPT flow: apply the JSON pasted back from ChatGPT."""
+def triage_apply():
+    """Apply sorting results — the JSON pasted back from Claude ({json}), or wegter-pc's
+    results ({actions, summary}). `source` is 'claude' or 'wegter-pc'. With `review`, nothing
+    changes in Gmail until the review is applied (/triage/batches/<id>/apply)."""
     body = request.get_json(silent=True) or {}
+    source = body.get("source") if body.get("source") in SORT_SOURCES else "claude"
     try:
-        actions, summary = core.parse_actions(str(body.get("json") or ""))
+        if isinstance(body.get("actions"), list):
+            actions = [a for a in (core.normalize_action(x) for x in body["actions"]) if a]
+            summary = str(body.get("summary") or "").strip()[:2000]
+            if not actions:
+                raise ValueError("No sorted emails came back.")
+        else:
+            actions, summary = core.parse_actions(str(body.get("json") or ""))
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
-    settings = load_settings()
-    actions = core.apply_people_rules(actions, {}, [], False, settings["keep_important_unread"])
-    batch_id, busy = _start("chatgpt", run_apply_batch, actions, summary, "chatgpt",
-                            step="Applying", total=len(actions))
-    if busy:
-        return jsonify({"error": "A sort is already running", "batch_id": busy}), 409
+    conn = _db()
+    try:
+        if _busy_batch(conn):
+            return jsonify({"error": "A sort is already running"}), 409
+        settings = load_settings(conn)
+        known = settings.get("last_export") or {}
+        senders = {tid: (v or {}).get("from", "") for tid, v in known.items()}
+        actions = core.apply_people_rules(actions, senders, settings["people"], settings["keep_people_in_inbox"],
+                                          settings["keep_important_unread"])
+        if body.get("review"):
+            # One review at a time: a new one replaces any left unfinished.
+            conn.execute("UPDATE inbox_batches SET status='discarded', finished_at=? WHERE status='review'", (_iso(),))
+            proposal = [{**a, **{k: (known.get(a["id"]) or {}).get(k, "") for k in EXPORT_FIELDS}} for a in actions]
+            batch_id = _new_batch(conn, source, status="review", total=len(actions))
+            conn.execute("UPDATE inbox_batches SET summary=?, proposal=? WHERE id=?",
+                         (summary, json.dumps({"actions": proposal, "summary": summary}), batch_id))
+            conn.commit()
+            return _batch_response(batch_id, 201)
+        batch_id = _new_batch(conn, source, step="Applying", total=len(actions))
+        conn.commit()
+    finally:
+        conn.close()
+    spawn(run_apply_batch, batch_id, actions, summary, source)
     return _batch_response(batch_id)
 
 
@@ -1196,7 +1146,7 @@ def get_batch(batch_id):
 @inbox_bp.post("/triage/batches/<int:batch_id>/apply")
 @require_owner
 def apply_reviewed(batch_id):
-    """Apply a reviewed AI proposal, with any edits made in the review."""
+    """Apply a reviewed sort, with any edits made in the review."""
     body = request.get_json(silent=True) or {}
     conn = _db()
     try:
@@ -1221,7 +1171,7 @@ def apply_reviewed(batch_id):
         conn.commit()
     finally:
         conn.close()
-    spawn(run_apply_batch, batch_id, actions, summary, "ai")
+    spawn(run_apply_batch, batch_id, actions, summary, row["source"] or "claude")
     return _batch_response(batch_id)
 
 
@@ -1301,7 +1251,7 @@ def import_rollup():
 @require_owner
 def connection():
     client = get_script_client()
-    out = {"script": {"configured": client.configured}, "ai": {"provider": ai_provider_name()}}
+    out = {"script": {"configured": client.configured}}
     if client.configured:
         try:
             ping = client.call("ping", timeout=60)
@@ -1309,12 +1259,6 @@ def connection():
                                   "inbox_unread": ping.get("inboxUnread"), "reports_to": ping.get("reportsTo")})
         except ScriptError as e:
             out["script"].update({"ok": False, "error": str(e), "code": e.code})
-    if request.args.get("ai") == "1":
-        try:
-            import gh_models
-            out["ai"] = gh_models.health()
-        except Exception as e:
-            out["ai"] = {"provider": ai_provider_name(), "available": False, "error": str(e)}
     return jsonify(out)
 
 
@@ -1356,41 +1300,3 @@ def ingest():
 def health():
     return jsonify({"ok": True, "service": "inbox", "script_configured": get_script_client().configured,
                     "ingest": bool(SCRIPT_SECRET)})
-
-
-# ─── Optional automatic sorting ───────────────────────────────────────────────
-
-def _scheduler_tick():
-    _ensure_tables()
-    conn = _db()
-    try:
-        settings = load_settings(conn)
-        hours = int(settings.get("auto_sort_hours") or 0)
-        if hours <= 0 or not get_script_client().configured or _busy_batch(conn):
-            return None
-        last = conn.execute("SELECT created_at FROM inbox_batches WHERE source='ai' AND status!='failed' "
-                            "ORDER BY id DESC LIMIT 1").fetchone()
-    finally:
-        conn.close()
-    last_at = _parse_iso(last["created_at"]) if last else None
-    if last_at and (_now() - last_at) < timedelta(hours=hours):
-        return None
-    batch_id, _ = _start("ai", run_ai_batch, None, False, step="Starting scheduled sort")
-    return batch_id
-
-
-def _scheduler_loop():
-    while True:
-        time.sleep(300)
-        try:
-            _scheduler_tick()
-        except Exception:
-            log.exception("[inbox] scheduled sort check failed")
-
-
-def _ensure_scheduler():
-    global _scheduler_started
-    if _scheduler_started or os.environ.get("INBOX_DISABLE_SCHEDULER"):
-        return
-    _scheduler_started = True
-    threading.Thread(target=_scheduler_loop, daemon=True, name="inbox-scheduler").start()

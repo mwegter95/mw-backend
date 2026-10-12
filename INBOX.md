@@ -27,19 +27,29 @@ Browser (michaelwegter.com) ──JWT──▶ api.michaelwegter.com/inbox/* ─
 3. Push. `run-server.ps1` picks up the change, installs `tzdata` and restarts.
 4. Open the dashboard → Settings → **Connection**. Both rows should be green. Then:
    - add family and close contacts;
-   - paste your ChatGPT prompt if you'd rather keep it (`{{labels}}` and `{{people}}` are filled in for you);
+   - paste the triage prompt you use with Claude if you'd rather keep it (`{{labels}}` and `{{people}}` are filled in for you);
    - **Import from the Rollup sheet** to bring in history.
 
 ## How sorting works
 
+This server never calls an AI itself. Every path ends in the script's same apply core.
+
 | Way | What happens |
 |---|---|
-| **Sort with AI** | `export` (next N unread, scrubbed like the Sheet export) → `gh_models.chat_completion` with the prompt → optional review (edit labels, importance, keep in inbox, skip) → `apply`. Runs in a background thread; the page polls `/triage/batches/<id>`. |
-| **Use ChatGPT** | `/triage/export` returns the prompt plus the same `---EMAIL-n---` blocks to copy. Paste ChatGPT's reply into `/triage/apply` (fences, prose and curly quotes are tolerated). |
+| **Copy for Claude** (default) | `/triage/export` returns the prompt plus the same `---EMAIL-n---` blocks the Sheet export uses. Copy them into Claude, then paste Claude's JSON back; it goes to `/triage/apply` (fences, prose and curly quotes are tolerated). An optional review comes first. |
+| **Sort on wegter-pc** | The browser takes the same export to LM Studio on wegter-pc, 8 emails per call (`inbox_local_ai.py` at `jobs.michaelwegter.com/jobs/local-ai`), asks it for the batch note, then posts everything to `/triage/apply` with `source: wegter-pc` (reviewed by default). The Surface never talks to wegter-pc, and LM Studio stays on localhost. |
 | **The Sheet / old web page** | Unchanged. After each apply the script signs and POSTs the batch to `/inbox/ingest`. |
-| **Automatic** | Settings → "Sort automatically with AI" every N hours (no review). |
 
-Family and close contacts (Settings) are always marked personal and, by default, never archived, whatever the model says.
+Each export remembers who sent what. That way the review shows sender and subject, and family and close contacts (Settings) are marked personal and kept in the inbox, whatever Claude or Gemma said.
+
+### wegter-pc (optional)
+
+`jobscout_server.py` now also serves `inbox_local_ai.py`, so wegter-pc picks it up on its next pull. It uses Job Scout's LM Studio settings (`JOBS_AI_API_BASE`, `JOBS_AI_MODEL`) and sign-in check, and only `INBOX_OWNER_EMAIL` may use it.
+
+- Each call carries at most 12 emails and finishes in under 90 seconds, inside Cloudflare's 100-second limit.
+- A strict JSON schema limits the model to the exact email ids it was sent.
+- While a call is running, others get 409 and the page waits.
+- If wegter-pc is asleep or LM Studio is closed, the dashboard says so and Copy for Claude still works.
 
 ## Read, unread and the daily counts
 
@@ -62,15 +72,14 @@ Daily counts come from `inbox_events` by local day: sorted, read (distinct email
 | GET | `/inbox/status?refresh=1` | inbox unread + waiting to sort (cached 60 s) |
 | GET | `/inbox/thread/<id>?refresh=1` | full thread, cached 30 min, stale copy if Gmail is unreachable |
 | POST | `/inbox/actions` `{ids, action, labels?}` | read, unread, pin, unpin, archive, inbox, star, unstar, trash, add_labels, remove_labels |
-| GET/PUT | `/inbox/settings` | prompt, people, labels, batch_size, query, review_first, keep_people_in_inbox, keep_important_unread, block_images, auto_sort_hours |
+| GET/PUT | `/inbox/settings` | prompt, people, labels, batch_size, query, review_first, keep_people_in_inbox, keep_important_unread, block_images |
 | GET | `/inbox/labels` | Gmail labels + labels used by triage |
-| POST | `/inbox/triage/run` `{limit?, review?}` | AI sort → 202 + batch |
-| POST | `/inbox/triage/export` `{limit?}` | ChatGPT text |
-| POST | `/inbox/triage/apply` `{json}` | apply pasted ChatGPT JSON → 202 + batch |
+| POST | `/inbox/triage/export` `{limit?}` | `text` to paste into Claude; `prompt` + `blocks` for wegter-pc |
+| POST | `/inbox/triage/apply` `{json}` or `{actions, summary}`, `source`, `review?` | 202 + applying batch, or 201 + review batch |
 | GET | `/inbox/triage/batches`, `/inbox/triage/batches/<id>` | |
 | POST | `/inbox/triage/batches/<id>/apply` `{actions?, skip?}` / `…/discard` | finish a review |
 | POST | `/inbox/import` | Rollup sheet → history (incremental) |
-| GET | `/inbox/connection?ai=1` | ping the script (+ AI provider health) |
+| GET | `/inbox/connection` | ping the script |
 | POST | `/inbox/ingest` | **HMAC** from Apps Script: `X-Inbox-Timestamp`, `X-Inbox-Signature` = hex HMAC-SHA256(secret, ts + "." + body) |
 
 Calls to the script are signed the same way (`{"ts","payload","sig"}`, five-minute window, replays refused). Both
@@ -92,6 +101,6 @@ own page, which has no CORS headers, so the browser would only report "CORS erro
 
 ## Tests
 
-- `python -m pytest tests/test_inbox.py`: the blueprint against a fake script and model.
+- `python -m pytest tests/test_inbox.py tests/test_inbox_local_ai.py`: the blueprint against a fake script, and the wegter-pc endpoint against a fake LM Studio.
 - In the script repo, `node --test tests/run-tests.js` runs the real `.gs` files under Node with fake Gmail and Sheets.
 - `node tests/gas-sim.js serve 8765` stands in for the deployed web app, for end-to-end runs.

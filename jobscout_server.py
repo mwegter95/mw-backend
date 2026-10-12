@@ -22,6 +22,7 @@ from flask import Flask, jsonify  # noqa: E402  (after load_dotenv so every gete
 from flask_cors import CORS  # noqa: E402
 
 from jobscout_blueprint import jobscout_bp, start_jobscout  # noqa: E402
+from inbox_local_ai import local_ai_bp  # noqa: E402  (inbox sorting on this PC's LM Studio)
 
 PORT = int(os.environ.get("PORT", "5057"))
 # Only this machine's cloudflared (and a local browser) needs to reach the server.
@@ -43,6 +44,7 @@ log = logging.getLogger("jobscout-server")
 app = Flask(__name__)
 CORS(app, origins=CORS_ORIGINS)
 app.register_blueprint(jobscout_bp)
+app.register_blueprint(local_ai_bp)  # /jobs/local-ai — see inbox_local_ai.py
 
 
 @app.get("/health")

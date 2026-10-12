@@ -4,8 +4,8 @@ Inbox dashboard — pure logic shared by inbox_blueprint.py.
 Nothing here touches Flask or the database, so it is easy to test:
   * ScriptClient     signed calls to the Gmail triage Apps Script web app
   * sign / verify    the HMAC scheme both directions use
-  * the triage prompt (default text, placeholders, the ChatGPT export text)
-  * parse_actions    lenient parsing of what ChatGPT or the AI returns
+  * the triage prompt (default text, placeholders, the text to paste into Claude)
+  * parse_actions    lenient parsing of what Claude or wegter-pc's AI returns
   * sender + people  "Name <email>" parsing and family/close-contact matching
 
 The Apps Script side of every contract here lives in
@@ -241,26 +241,29 @@ def _local_date_text(iso: str, tz) -> str:
     return f"{dt.strftime('%a %b')} {dt.day} {dt.year} {hour}:{dt.strftime('%M %p')}"
 
 
+def email_blocks(items: list[dict], tz=None) -> list[str]:
+    """One ---EMAIL-n--- block per email, the format the Sheet export has always produced."""
+    return [
+        f"---EMAIL-{i}---\n"
+        f"ID: {it.get('id', '')}\n"
+        f"From: {it.get('from', '')}\n"
+        f"Subject: {it.get('subject', '')}\n"
+        f"Date: {_local_date_text(it.get('date', ''), tz)}\n"
+        f"Body: {it.get('body', '')}\n"
+        for i, it in enumerate(items, 1)
+    ]
+
+
 def export_blocks(items: list[dict], tz=None) -> str:
-    """The same ---EMAIL-n--- blocks the Sheet export has always produced."""
-    blocks = []
-    for i, it in enumerate(items, 1):
-        blocks.append(
-            f"---EMAIL-{i}---\n"
-            f"ID: {it.get('id', '')}\n"
-            f"From: {it.get('from', '')}\n"
-            f"Subject: {it.get('subject', '')}\n"
-            f"Date: {_local_date_text(it.get('date', ''), tz)}\n"
-            f"Body: {it.get('body', '')}\n"
-        )
-    return "\n".join(blocks)
+    return "\n".join(email_blocks(items, tz))
 
 
-def chatgpt_text(prompt: str, items: list[dict], tz=None) -> str:
+def paste_text(prompt: str, items: list[dict], tz=None) -> str:
+    """Everything to paste into Claude: the prompt, then the emails."""
     return f"{prompt}\n\nEMAILS ({len(items)})\n\n{export_blocks(items, tz)}"
 
 
-# ─── Parsing what the model (or ChatGPT) returns ──────────────────────────────
+# ─── Parsing what Claude (or wegter-pc's AI) returns ──────────────────────────
 
 _FENCE_RE = re.compile(r"^\s*```[a-zA-Z]*\s*|\s*```\s*$")
 
@@ -332,19 +335,19 @@ def normalize_action(item: dict) -> dict | None:
 
 
 def parse_actions(text: str) -> tuple[list[dict], str]:
-    """Accepts a JSON array (items + an optional {"summary": ...}) or
+    """What Claude (or wegter-pc) answers: a JSON array (items + an optional {"summary": ...}) or
     {"actions": [...], "summary": "..."}, with or without a code fence or
     surrounding prose. Raises ValueError with a readable message."""
     raw = _strip_fences(text)
     if not raw:
-        raise ValueError("Paste the JSON ChatGPT returned.")
+        raise ValueError("Paste the JSON Claude returned.")
     try:
         parsed = _first_json_value(raw)
     except ValueError:
         try:
             parsed = _first_json_value(_smart_quote_fix(raw))
         except ValueError:
-            raise ValueError("That isn't valid JSON. Copy ChatGPT's whole reply, from the first [ or { to the last ] or }.")
+            raise ValueError("That isn't valid JSON. Copy Claude's whole reply, from the first [ or { to the last ] or }.")
     summary = ""
     if isinstance(parsed, list):
         items = []

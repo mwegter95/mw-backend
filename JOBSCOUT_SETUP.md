@@ -100,6 +100,10 @@ JOBS_AI_MODEL=google/gemma-4-12b-qat
 ```
 Replace `ashley@example.com` with the email Ashley registers with on michaelwegter.com.
 
+> **Also on this server:** `/jobs/local-ai` (`inbox_local_ai.py`), the inbox dashboard's optional
+> "Sort on wegter-pc". It uses the same LM Studio settings below, needs no extra setup, and only the
+> inbox owner can call it. See INBOX.md.
+
 ## 5. Cloudflare tunnel (a new one, just for wegter-pc)
 
 This is a **second, separate tunnel**. Don't reuse the Surface's `mw-backend` tunnel or copy its
