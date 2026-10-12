@@ -414,7 +414,7 @@ def parse_actions(text: str) -> tuple[list[dict], str]:
 
 
 def apply_people_rules(actions: list[dict], senders: dict[str, str], people: list[dict],
-                       keep_people_in_inbox: bool = True, keep_important_unread: bool = False) -> list[dict]:
+                       keep_people_in_inbox: bool = True) -> list[dict]:
     """Family and close contacts are always personal and (by default) never
     archived, whatever the model said. `senders` maps thread id → from line."""
     out = []
@@ -425,7 +425,23 @@ def apply_people_rules(actions: list[dict], senders: dict[str, str], people: lis
             a["personal"] = True
             if keep_people_in_inbox:
                 a["archive_ok"] = False
-        if keep_important_unread and (a.get("personal") or a.get("importance") == "high"):
-            a["keep_unread"] = True
+        out.append(a)
+    return out
+
+
+def is_highlight(action: dict) -> bool:
+    return bool(action.get("personal")) or action.get("importance") == "high"
+
+
+def unread_rule(actions: list[dict], keep_highlights_unread: bool = True) -> list[dict]:
+    """Decides, for every email, whether triage leaves it unread in Gmail. Highlights (important
+    or personal) that stay in the inbox stay unread until Michael opens them in the dashboard or
+    marks them read. Everything else is marked read, unless the model asked otherwise. The answer
+    is always an explicit true/false, so the script never falls back to its own default."""
+    out = []
+    for a in actions:
+        a = dict(a)
+        a["keep_unread"] = bool(a.get("keep_unread")) or (
+            keep_highlights_unread and is_highlight(a) and not a.get("archive_ok"))
         out.append(a)
     return out

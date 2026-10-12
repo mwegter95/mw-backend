@@ -37,7 +37,9 @@ READ, UNREAD AND COUNTS
   Triage marks mail read in Gmail, so Gmail's read state can't say whether
   Michael has actually looked at something. "Read" here means opened in the
   dashboard (read_at). Mark unread clears it and marks the thread unread in
-  Gmail too. Daily counts come from inbox_events in local time (INBOX_TZ).
+  Gmail too. Highlights that triage keeps in the inbox are left unread in
+  Gmail until they're opened here or marked read (keep_highlights_unread).
+  Daily counts come from inbox_events in local time (INBOX_TZ).
 
 AUTH: same as gaming_blueprint.py — the shared JWT secret (data/.secret_key)
 and the shared users table; only INBOX_OWNER_EMAIL may use any endpoint
@@ -87,6 +89,7 @@ except Exception:  # Windows without the tzdata package
     LOCAL_TZ = timezone(timedelta(hours=-5))
 
 HIGHLIGHT_DAYS = 14             # highlights older than this drop off once read
+RECENT_DAYS = 7                 # "Recently sorted" covers this many days of sorts
 BODY_CACHE_FRESH_SECONDS = 1800  # re-fetch a cached thread after 30 minutes
 BODY_CACHE_KEEP_DAYS = 30
 LIVE_CACHE_SECONDS = 45
@@ -103,7 +106,7 @@ DEFAULT_SETTINGS = {
     "query": "",                    # '' = the script's QUERY
     "review_first": True,           # wegter-pc's sorts wait for a look before applying
     "keep_people_in_inbox": True,
-    "keep_important_unread": False,  # leave high/personal mail bold in Gmail
+    "keep_highlights_unread": True,  # highlights kept in the inbox stay unread until opened here
     "block_images": False,
     "rollup_imported": 0,           # rows of the Rollup sheet already imported
     "last_export": {},              # id → {from, subject, date, snippet} of the latest export
@@ -398,7 +401,7 @@ def _clean_settings(body: dict) -> dict:
         out["batch_size"] = max(1, min(100, _int(body.get("batch_size"), 50)))
     if "query" in body:
         out["query"] = str(body.get("query") or "").strip()[:500]
-    for key in ("review_first", "keep_people_in_inbox", "keep_important_unread", "block_images"):
+    for key in ("review_first", "keep_people_in_inbox", "keep_highlights_unread", "block_images"):
         if key in body:
             out[key] = bool(body.get(key))
     return out
@@ -437,6 +440,14 @@ def _json_list(text) -> list:
 
 
 # ─── Messages ─────────────────────────────────────────────────────────────────
+
+def _looks_unread(r) -> bool:
+    """Unopened mail that's still waiting on Michael: in the inbox, a highlight, or unread in
+    Gmail. Mail triage archived and marked read doesn't count, opened or not."""
+    if r["read_at"] or (not r["sorted_at"] and not r["gmail_unread"]):
+        return False
+    return bool(r["in_inbox"] or r["gmail_unread"] or r["personal"] or r["importance"] == "high")
+
 
 def _msg_dict(r) -> dict:
     sorted_at = r["sorted_at"]
@@ -523,13 +534,15 @@ def store_sorted_items(conn, items: list[dict], batch_id: int | None, source: st
     return counts
 
 
-VIEWS = ("highlights", "unread", "sorted", "pinned", "inbox", "all")
+VIEWS = ("highlights", "recent", "sorted", "pinned", "inbox", "all")
 
 
 @inbox_bp.get("/messages")
 @require_owner
 def list_messages():
     view = request.args.get("view", "highlights")
+    if view == "unread":  # the old name, from a page loaded before the rename
+        view = "recent"
     if view not in VIEWS:
         view = "highlights"
     limit = max(1, min(300, _int(request.args.get("limit"), 120)))
@@ -544,8 +557,11 @@ def list_messages():
         where.append("(importance='high' OR personal=1)")
         where.append("(read_at IS NULL OR COALESCE(sorted_at, email_date) >= ?)")
         params.append(_iso(_now() - timedelta(days=HIGHLIGHT_DAYS)))
-    elif view == "unread":
-        where.append("sorted_at IS NOT NULL AND read_at IS NULL")
+    elif view == "recent":
+        # What triage filed lately, newest sort first; the page groups it by sort.
+        where.append("sorted_at >= ?")
+        params.append(_iso(_now() - timedelta(days=RECENT_DAYS)))
+        order = "sorted_at DESC, email_date DESC"
     elif view == "sorted":
         where.append("sorted_at IS NOT NULL")
     elif view == "pinned":
@@ -606,16 +622,15 @@ def summary():
         highlights_total = conn.execute(
             "SELECT COUNT(*) FROM inbox_messages WHERE trashed=0 AND (importance='high' OR personal=1) "
             "AND (read_at IS NULL OR COALESCE(sorted_at, email_date) >= ?)", (cutoff,)).fetchone()[0]
-        unread = conn.execute("SELECT COUNT(*) FROM inbox_messages WHERE trashed=0 AND sorted_at IS NOT NULL "
-                              "AND read_at IS NULL").fetchone()[0]
         in_inbox = conn.execute("SELECT COUNT(*) FROM inbox_messages WHERE trashed=0 AND in_inbox=1").fetchone()[0]
         label_counts = {}
-        for r in conn.execute("SELECT labels, read_at FROM inbox_messages WHERE trashed=0 AND sorted_at >= ?",
+        for r in conn.execute("SELECT * FROM inbox_messages WHERE trashed=0 AND sorted_at >= ?",
                               (_iso(_now() - timedelta(days=60)),)):
+            waiting = _looks_unread(r)
             for name in _json_list(r["labels"]):
                 c = label_counts.setdefault(name, {"name": name, "count": 0, "unread": 0})
                 c["count"] += 1
-                c["unread"] += int(not r["read_at"])
+                c["unread"] += int(waiting)
         pins = [_msg_dict(r) for r in conn.execute(
             "SELECT * FROM inbox_messages WHERE pinned_at IS NOT NULL AND trashed=0 ORDER BY pinned_at DESC LIMIT 40")]
         latest = conn.execute("SELECT * FROM inbox_batches WHERE status IN ('done','review') "
@@ -631,7 +646,6 @@ def summary():
         "today": next(d for d in days if d["day"] == today),
         "days": days,
         "highlights": {"unread": highlights_unread, "total": highlights_total},
-        "unread": unread,
         "in_inbox": in_inbox,
         "sorted_total": sorted_total,
         "labels": sorted(label_counts.values(), key=lambda c: (-c["count"], c["name"]))[:60],
@@ -819,10 +833,16 @@ def actions():
     gmail_ids = ids
     if action == "read":
         gmail_ids = [i for i in ids if i not in rows or rows[i]["gmail_unread"]]
+    extra = {}
+    if action == "unread":
+        # Sorted mail marked unread here is waiting for me, not for triage: the script skips it
+        # in its exports until new mail arrives in the thread.
+        extra["sorted"] = [i for i in gmail_ids if i in rows and rows[i]["sorted_at"]]
     failed = {}
     if gmail_op and gmail_ids:
         try:
-            res = get_script_client().call("modify", ids=gmail_ids, action=gmail_op, labels=labels, timeout=90)
+            res = get_script_client().call("modify", ids=gmail_ids, action=gmail_op, labels=labels, timeout=90,
+                                           **extra)
             failed = {r["id"]: r.get("error", "failed") for r in res.get("results", []) if not r.get("ok")}
         except ScriptError as e:
             if action != "read":  # reading still counts even if Gmail is unreachable
@@ -977,12 +997,14 @@ def _apply(batch_id: int, actions: list[dict], summary: str, source: str):
     """Send actions to the script's apply core and record the result."""
     _update_batch(batch_id, status="applying", total=len(actions),
                   step=f"Applying labels to {len(actions)} emails in Gmail")
+    settings = load_settings()
+    # Decided here, after any review edits, so what's archived and what stays unread always agree.
+    actions = core.unread_rule(actions, settings["keep_highlights_unread"])
     result = get_script_client().call("apply", actions=actions, summary=summary, timeout=330)
     items = result.get("items") or []
     conn = _db()
     try:
-        people = load_settings(conn)["people"]
-        counts = store_sorted_items(conn, items, batch_id, source, people)
+        counts = store_sorted_items(conn, items, batch_id, source, settings["people"])
         conn.execute("""UPDATE inbox_batches SET status='done', step='', applied=?, archived=?, important=?,
             personal=?, missing=?, errored=?, summary=?, message=?, finished_at=? WHERE id=?""",
                      (counts["applied"], counts["archived"], counts["important"], counts["personal"],
@@ -1099,8 +1121,7 @@ def triage_apply():
         settings = load_settings(conn)
         known = settings.get("last_export") or {}
         senders = {tid: (v or {}).get("from", "") for tid, v in known.items()}
-        actions = core.apply_people_rules(actions, senders, settings["people"], settings["keep_people_in_inbox"],
-                                          settings["keep_important_unread"])
+        actions = core.apply_people_rules(actions, senders, settings["people"], settings["keep_people_in_inbox"])
         if body.get("review"):
             # One review at a time: a new one replaces any left unfinished.
             conn.execute("UPDATE inbox_batches SET status='discarded', finished_at=? WHERE status='review'", (_iso(),))

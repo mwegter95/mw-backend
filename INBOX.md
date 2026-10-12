@@ -53,11 +53,14 @@ Each export remembers who sent what. That way the review shows sender and subjec
 
 ## Read, unread and the daily counts
 
-Triage marks mail read in Gmail, so Gmail's read state can't tell whether you've actually looked at an email.
+Triage marks most mail read in Gmail, so Gmail's read state can't tell whether you've actually looked at an email.
 **Read** here means opened in the dashboard (`read_at`).
 
-- Mark unread clears it and also marks the thread unread in Gmail.
-- If triage left a thread unread ("Leave important mail unread in Gmail") and you then read it on your phone, the next live-inbox refresh counts it as read.
+- **Highlights stay unread.** An important or personal email that triage keeps in the inbox is labeled but left unread in Gmail, so it stays bold until you open it here or mark it read (both mark it read in Gmail too). Archived highlights and everything else are marked read as before. The server decides this at the moment a batch is applied (after any review edits) and sends an explicit `keep_unread` for every email; Settings → "Keep highlights unread until you open them" turns it off. Sheet batches follow the same rule inside the script.
+- The script remembers those threads and leaves them out of every export and the "waiting" count, so they aren't sorted again. New mail in the thread brings it back to be sorted. Sorted mail you mark unread here is remembered the same way.
+- If you read a kept highlight on your phone, the next live-inbox refresh counts it as read here too.
+- Mark unread clears `read_at` and marks the thread unread in Gmail.
+- A row looks unread only while it's waiting on you: unopened and still in the inbox, a highlight, or unread in Gmail. Mail triage archived and marked read never looks unread, and label counts follow the same rule.
 
 Daily counts come from `inbox_events` by local day: sorted, read (distinct emails), and archived/trashed.
 
@@ -67,12 +70,12 @@ Daily counts come from `inbox_events` by local day: sorted, read (distinct email
 |---|---|---|
 | GET | `/inbox/health` | public |
 | GET | `/inbox/summary` | today, 14 days, highlight counts, labels, pins, latest/running batch, cached Gmail counts (no Apps Script call) |
-| GET | `/inbox/messages?view=highlights\|unread\|sorted\|pinned\|inbox\|all&label=&q=&limit=&offset=` | |
+| GET | `/inbox/messages?view=highlights\|recent\|sorted\|pinned\|inbox\|all&label=&q=&limit=&offset=` | `recent` = sorted in the last 7 days, newest sort first (`unread`, the old name, still answers) |
 | GET | `/inbox/live?refresh=1` | Gmail's inbox right now, merged with dashboard state (cached 45 s) |
 | GET | `/inbox/status?refresh=1` | inbox unread + waiting to sort (cached 60 s) |
 | GET | `/inbox/thread/<id>?refresh=1` | full thread, cached 30 min, stale copy if Gmail is unreachable |
 | POST | `/inbox/actions` `{ids, action, labels?}` | read, unread, pin, unpin, archive, inbox, star, unstar, trash, add_labels, remove_labels |
-| GET/PUT | `/inbox/settings` | prompt, people, labels, batch_size, query, review_first, keep_people_in_inbox, keep_important_unread, block_images |
+| GET/PUT | `/inbox/settings` | prompt, people, labels, batch_size, query, review_first, keep_people_in_inbox, keep_highlights_unread, block_images |
 | GET | `/inbox/labels` | Gmail labels + labels used by triage |
 | POST | `/inbox/triage/export` `{limit?}` | `text` to paste into Claude; `prompt` + `blocks` for wegter-pc |
 | POST | `/inbox/triage/apply` `{json}` or `{actions, summary}`, `source`, `review?` | 202 + applying batch, or 201 + review batch |

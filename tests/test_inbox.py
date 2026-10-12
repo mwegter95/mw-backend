@@ -58,9 +58,21 @@ def test_people_rules_override_the_model():
     actions = [{"id": "a", "importance": "low", "personal": False, "archive_ok": True},
                {"id": "b", "importance": "high", "personal": False, "archive_ok": False}]
     senders = {"a": "Mom <mom@example.org>", "b": "Boss <boss@work.example>"}
-    out = core.apply_people_rules(actions, senders, people, True, True)
-    assert out[0]["personal"] is True and out[0]["archive_ok"] is False and out[0]["keep_unread"] is True
-    assert out[1]["keep_unread"] is True and "personal" in out[1]
+    out = core.apply_people_rules(actions, senders, people, True)
+    assert out[0]["personal"] is True and out[0]["archive_ok"] is False
+    assert out[1] == actions[1] and "keep_unread" not in out[0]
+
+
+def test_highlights_kept_in_the_inbox_stay_unread():
+    actions = [{"id": "mom", "importance": "medium", "personal": True, "archive_ok": False},
+               {"id": "dj", "importance": "high", "personal": False, "archive_ok": False},
+               {"id": "bank", "importance": "high", "personal": False, "archive_ok": True},
+               {"id": "promo", "importance": "low", "personal": False, "archive_ok": False},
+               {"id": "asked", "importance": "low", "personal": False, "archive_ok": True, "keep_unread": True}]
+    out = {a["id"]: a["keep_unread"] for a in core.unread_rule(actions)}
+    assert out == {"mom": True, "dj": True, "bank": False, "promo": False, "asked": True}
+    off = {a["id"]: a["keep_unread"] for a in core.unread_rule(actions, keep_highlights_unread=False)}
+    assert off == {"mom": False, "dj": False, "bank": False, "promo": False, "asked": True}
 
 
 def test_prompt_fills_labels_and_people_and_rescues_formatless_prompts():
@@ -111,16 +123,22 @@ class FakeScript:
                                  "unread": True, "inbox": True, "labels": [], "starred": False}
         self.calls = []
         self.fail = None
+        self.kept = {}  # thread id → message id left unread by triage (KEPT_UNREAD in the script)
+
+    def _to_sort(self):
+        return [t for t in self.threads.values()
+                if t["inbox"] and t["unread"] and self.kept.get(t["id"]) != t["messageId"]]
 
     def call(self, op, timeout=60, **args):
         self.calls.append((op, args))
         if self.fail:
             raise self.fail
         if op == "stats":
-            waiting = sum(1 for t in self.threads.values() if t["inbox"] and t["unread"])
-            return {"ok": True, "inboxUnread": waiting, "waiting": waiting, "waitingCapped": False, "query": "q"}
+            unread = sum(1 for t in self.threads.values() if t["inbox"] and t["unread"])
+            return {"ok": True, "inboxUnread": unread, "waiting": len(self._to_sort()), "waitingCapped": False,
+                    "query": "q"}
         if op == "export":
-            items = [t for t in self.threads.values() if t["inbox"] and t["unread"]][: args.get("limit", 50)]
+            items = self._to_sort()[: args.get("limit", 50)]
             return {"ok": True, "items": [{**t, "body": "Body of " + t["subject"]} for t in items]}
         if op == "apply":
             out = []
@@ -129,9 +147,14 @@ class FakeScript:
                 if not t:
                     continue
                 t["labels"] += a.get("labels", [])
-                t["unread"] = bool(a.get("keep_unread"))
+                assert isinstance(a.get("keep_unread"), bool), "the server always decides"
+                t["unread"] = a["keep_unread"]
                 if a.get("archive_ok"):
                     t["inbox"] = False
+                if t["unread"] and t["inbox"]:
+                    self.kept[t["id"]] = t["messageId"]
+                else:
+                    self.kept.pop(t["id"], None)
                 out.append({"id": t["id"], "messageId": t["messageId"], "from": t["from"], "subject": t["subject"],
                             "date": t["date"], "summary": a.get("summary", ""), "labels": a.get("labels", []),
                             "importance": a.get("importance", ""), "personal": a.get("personal", False),
@@ -157,6 +180,8 @@ class FakeScript:
                 act = args["action"]
                 if act == "read": t["unread"] = False
                 if act == "unread": t["unread"] = True
+                if act in ("read", "archive", "trash"): self.kept.pop(tid, None)
+                if act == "unread" and tid in args.get("sorted", []): self.kept[tid] = t["messageId"]
                 if act == "archive": t["inbox"] = False
                 if act == "inbox": t["inbox"] = True
                 results.append({"id": tid, "ok": True})
@@ -287,6 +312,56 @@ def test_review_lets_me_edit_before_anything_changes(client, app):
     assert client.post(f"/inbox/triage/batches/{batch['id']}/apply", json={}).status_code == 409
 
 
+def test_highlights_stay_unread_in_gmail_and_are_not_sorted_again(client, app):
+    _sort(client)
+    fake = app.fake
+    assert fake.threads["t-mom"]["unread"] is True and fake.threads["t-dj"]["unread"] is True
+    assert fake.threads["t-bank"]["unread"] is False and fake.threads["t-promo"]["unread"] is False
+    hl = {m["id"]: m for m in client.get("/inbox/messages?view=highlights").get_json()["items"]}
+    assert hl["t-mom"]["gmail_unread"] is True and hl["t-mom"]["read"] is False
+    assert client.post("/inbox/triage/export", json={}).get_json()["count"] == 0, "nothing new to sort"
+    assert client.get("/inbox/status?refresh=1").get_json()["waiting"] == 0
+
+    client.put("/inbox/settings", json={"keep_highlights_unread": False})
+    assert client.get("/inbox/settings").get_json()["keep_highlights_unread"] is False
+    fake.threads["t-dj"].update(messageId="m-t-dj-2")  # a reply arrives
+    _sort(client)
+    assert fake.threads["t-dj"]["unread"] is False, "with the setting off, triage marks everything read"
+
+
+def test_review_edits_decide_what_stays_unread(client, app):
+    batch = _sort(client, review=True)
+    edited = batch["proposal"]["actions"]
+    for a in edited:
+        if a["id"] == "t-dj":
+            a["archive_ok"] = True
+    client.post(f"/inbox/triage/batches/{batch['id']}/apply", json={"actions": edited})
+    applied = [a for op, a in app.fake.calls if op == "apply"][-1]["actions"]
+    assert {a["id"]: a["keep_unread"] for a in applied} == {"t-mom": True, "t-dj": False, "t-bank": False,
+                                                           "t-promo": False}
+    assert app.fake.threads["t-dj"]["inbox"] is False and app.fake.threads["t-dj"]["unread"] is False
+
+
+def test_recently_sorted_lists_the_latest_sorts_first(client, app, monkeypatch):
+    client.post("/inbox/import")  # history from September: too old for "recent"
+    _sort(client)
+    later = datetime.now(timezone.utc) + timedelta(hours=1)
+    monkeypatch.setattr(ib, "_now", lambda: later)
+    app.fake.threads["t-promo"].update(unread=True, inbox=True, messageId="m-t-promo-2")
+    _sort(client)
+    recent = client.get("/inbox/messages?view=recent").get_json()
+    assert [m["id"] for m in recent["items"]][0] == "t-promo", "newest sort first"
+    assert {m["id"] for m in recent["items"]} == {"t-mom", "t-bank", "t-promo", "t-dj"}
+    assert len({m["batch_id"] for m in recent["items"]}) == 2
+    assert client.get("/inbox/messages?view=unread").get_json()["view"] == "recent", "the old name still works"
+    assert client.get("/inbox/messages?view=sorted").get_json()["total"] == 7
+    summary = client.get("/inbox/summary").get_json()
+    assert "unread" not in summary
+    labels = {c["name"]: c for c in summary["labels"]}
+    assert labels["A. Personal"]["unread"] == 2, "highlights waiting in the inbox"
+    assert labels["A. Read"]["unread"] == 0, "archived and read by triage: nothing waiting"
+
+
 def test_people_list_keeps_family_in_the_inbox_whatever_the_model_says(client, app, monkeypatch):
     client.put("/inbox/settings", json={"people": [{"match": "deals@pine.example", "name": "Pine", "kind": "friend"}]})
     _sort(client)
@@ -312,13 +387,17 @@ def test_claude_flow_export_then_paste(client, app):
 
 def test_reading_pinning_and_unread_sync_with_gmail(client, app):
     _sort(client)
-    r = client.post("/inbox/actions", json={"ids": ["t-mom"], "action": "read"}).get_json()
-    assert r["updated"][0]["read"] is True
+    client.post("/inbox/actions", json={"ids": ["t-bank"], "action": "read"})
     assert not [a for op, a in app.fake.calls if op == "modify"], "already read in Gmail: no Gmail call"
+    assert app.fake.threads["t-mom"]["unread"] is True, "triage left the highlight unread"
+    r = client.post("/inbox/actions", json={"ids": ["t-mom"], "action": "read"}).get_json()
+    assert r["updated"][0]["read"] is True and r["updated"][0]["gmail_unread"] is False
+    assert app.fake.threads["t-mom"]["unread"] is False, "opening it here marks it read in Gmail"
     client.post("/inbox/actions", json={"ids": ["t-mom"], "action": "read"})  # twice = still one read today
-    assert client.get("/inbox/summary").get_json()["today"]["read"] == 1
+    assert client.get("/inbox/summary").get_json()["today"]["read"] == 2
     r = client.post("/inbox/actions", json={"ids": ["t-mom"], "action": "unread"}).get_json()
     assert r["updated"][0]["read"] is False and app.fake.threads["t-mom"]["unread"] is True
+    assert [a for op, a in app.fake.calls if op == "modify"][-1]["sorted"] == ["t-mom"]
     client.post("/inbox/actions", json={"ids": ["t-dj"], "action": "pin"})
     pins = client.get("/inbox/summary").get_json()["pins"]
     assert [p["id"] for p in pins] == ["t-dj"]
@@ -359,7 +438,6 @@ def test_live_inbox_merges_untriaged_mail_and_tracks_reads_elsewhere(client, app
     live = client.get("/inbox/live").get_json()
     assert {m["id"] for m in live["items"]} == set(app.fake.threads)
     assert all(m["source"] == "inbox" and m["read"] is False for m in live["items"])
-    client.put("/inbox/settings", json={"keep_important_unread": True})
     _sort(client)
     mom = [m for m in client.get("/inbox/messages?view=highlights").get_json()["items"] if m["id"] == "t-mom"][0]
     assert mom["gmail_unread"] is True
@@ -424,7 +502,7 @@ def test_wegter_pc_results_apply_under_their_own_name(client, app):
     batch = _sort(client, source="wegter-pc")
     assert batch["status"] == "done" and batch["source"] == "wegter-pc" and batch["applied"] == 4
     for t in app.fake.threads.values():  # new mail arrives
-        t.update(unread=True, inbox=True)
+        t.update(unread=True, inbox=True, messageId=t["messageId"] + "-2")
     reviewed = _sort(client, review=True, source="wegter-pc")
     done = client.post(f"/inbox/triage/batches/{reviewed['id']}/apply", json={}).get_json()["batch"]
     assert done["source"] == "wegter-pc" and done["status"] == "done"
