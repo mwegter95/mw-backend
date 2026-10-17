@@ -829,6 +829,53 @@ def delete_session(session_id: int):
     return jsonify({"ok": True, "deleted": session_id})
 
 
+@gaming_bp.patch("/sessions/<int:session_id>")
+@require_owner
+def update_session(session_id: int):
+    """Correct a session's length.
+
+    For the session the tracker got wrong — a game left open while the machine
+    slept, a stream running in the background — where deleting it would throw
+    away an evening that did happen. Body: `{"duration_seconds": N}`.
+
+    The start is kept, since that much is known; the end moves to start + N.
+    Idle is carried over, clamped to the new length, so `active + idle ==
+    duration` still holds and "played" stays the figure every chart sums.
+    """
+    body = request.get_json(silent=True) or {}
+    if "duration_seconds" not in body:
+        return jsonify({"error": "duration_seconds is required"}), 400
+    duration = _clean_int(body.get("duration_seconds"), 0, 1, MAX_SESSION_SECONDS)
+
+    conn = _db()
+    try:
+        row = conn.execute("SELECT * FROM gaming_sessions WHERE id=?", (session_id,)).fetchone()
+        if row is None:
+            return jsonify({"error": "session not found"}), 404
+        if row["in_progress"]:
+            # The agent still owns it and would write its own figures back.
+            return jsonify({"error": "that session is still being played"}), 409
+
+        started = _parse_iso(row["started_at"])
+        if started is None:
+            return jsonify({"error": "that session has no usable start time"}), 409
+        idle = max(0, min(row["idle_seconds"] or 0, duration))
+        conn.execute(
+            """UPDATE gaming_sessions
+                  SET ended_at=?, duration_seconds=?, idle_seconds=?,
+                      active_seconds=?, updated_at=?
+                WHERE id=?""",
+            ((started + timedelta(seconds=duration)).isoformat(), duration, idle,
+             duration - idle, _now_iso(), session_id),
+        )
+        conn.commit()
+        updated = conn.execute("SELECT * FROM gaming_sessions WHERE id=?",
+                               (session_id,)).fetchone()
+    finally:
+        conn.close()
+    return jsonify({"ok": True, "session": _session_row_to_dict(updated)})
+
+
 CULL_PREVIEW_LIMIT = 300
 
 
