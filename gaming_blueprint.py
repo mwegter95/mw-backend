@@ -403,6 +403,184 @@ def _range_bounds(args):
     return (local_today - timedelta(days=days - 1)).isoformat(), local_today.isoformat()
 
 
+# ─── Work-hours cleanup ───────────────────────────────────────────────────────
+#
+# The agent stops recording during work hours, but sessions captured before
+# that rule existed are still in this table, and they still reach every total.
+# What follows is the retrospective version of the same blackout: it subtracts
+# the window from sessions that were already written down.
+#
+# It is deliberately the agent's rule rather than a blunt "delete anything that
+# started between 9 and 5":
+#
+#   - a Wednesday lunchtime session goes;
+#   - an 8:30 session that ran to 10:00 keeps the half hour it earned and is
+#     cut at 9:00, which is exactly where the live tracker would cut it;
+#   - a 16:45 session that ran to 18:30 keeps the part after 17:00;
+#   - evenings, weekends and anything clear of the window are untouched.
+#
+# A trimmed session's idle and active split cannot be re-derived — the agent
+# recorded the totals, not the minute-by-minute shape — so it is prorated over
+# the surviving stretch, keeping active + idle == duration, which every
+# statistic depends on. A session that straddles the whole window (started
+# before 9, ended after 5) keeps its longer side; the live tracker would have
+# recorded two sessions there, and inventing the second one would be inventing
+# data.
+
+WORKDAY_DEFAULT_DAYS = [0, 1, 2, 3, 4]     # 0 = Monday
+WORKDAY_DEFAULT_START = 9 * 60
+WORKDAY_DEFAULT_END = 17 * 60
+DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def _parse_hhmm(value, default_minutes):
+    """'09:00', '9:00' or 540 → minutes from midnight."""
+    if isinstance(value, bool) or value is None:
+        return default_minutes
+    if isinstance(value, (int, float)):
+        return int(value) % (24 * 60)
+    try:
+        hours, _, minutes = str(value).strip().partition(":")
+        return (int(hours) * 60 + int(minutes or 0)) % (24 * 60)
+    except (TypeError, ValueError):
+        return default_minutes
+
+
+def _clean_weekdays(value):
+    if value is None:
+        return frozenset(WORKDAY_DEFAULT_DAYS)
+    try:
+        days = frozenset(int(d) % 7 for d in value)
+    except (TypeError, ValueError):
+        return frozenset(WORKDAY_DEFAULT_DAYS)
+    return days
+
+
+def _describe_window(days, start_minutes, end_minutes):
+    if not days or start_minutes == end_minutes:
+        return "nothing (empty window)"
+    ordered = sorted(days)
+    runs, run = [], [ordered[0]]
+    for day in ordered[1:]:
+        if day == run[-1] + 1:
+            run.append(day)
+        else:
+            runs.append(run)
+            run = [day]
+    runs.append(run)
+    label = ", ".join(DAY_NAMES[r[0]] if len(r) == 1
+                      else f"{DAY_NAMES[r[0]]}-{DAY_NAMES[r[-1]]}" for r in runs)
+    return f"{label} {start_minutes // 60:02d}:{start_minutes % 60:02d}" \
+           f"-{end_minutes // 60:02d}:{end_minutes % 60:02d}"
+
+
+def _blackout_spans(local_start, local_end, days, start_minutes, end_minutes):
+    """Every blackout interval that could overlap [local_start, local_end].
+
+    Naive local datetimes, so daylight saving is already baked into the offset
+    the agent reported for that session. A window whose end is not after its
+    start runs past midnight and belongs to the day it opened on, which is why
+    the walk begins a day early.
+    """
+    if not days or start_minutes == end_minutes:
+        return []
+    length = timedelta(minutes=(end_minutes - start_minutes) % (24 * 60))
+    day = local_start.date() - timedelta(days=1)
+    last = local_end.date()
+    spans = []
+    while day <= last:
+        if day.weekday() in days:
+            opened = (datetime.combine(day, datetime.min.time())
+                      + timedelta(minutes=start_minutes))
+            spans.append((opened, opened + length))
+        day += timedelta(days=1)
+    return spans
+
+
+def _surviving_spans(local_start, local_end, spans):
+    """[local_start, local_end] with every blackout interval cut out of it."""
+    pieces = [(local_start, local_end)]
+    for opened, closed in spans:
+        remaining = []
+        for seg_start, seg_end in pieces:
+            if closed <= seg_start or opened >= seg_end:
+                remaining.append((seg_start, seg_end))
+                continue
+            if seg_start < opened:
+                remaining.append((seg_start, opened))
+            if closed < seg_end:
+                remaining.append((closed, seg_end))
+        pieces = remaining
+    return pieces
+
+
+def _cull_plan_for(row, days, start_minutes, end_minutes, min_seconds):
+    """What should happen to one session: None, or a plan describing the change.
+
+    `None` means the session never touched the window and is left exactly as it
+    is — the common case, and the reason a preview is cheap to run over years
+    of history.
+    """
+    started = _parse_iso(row["started_at"])
+    ended = _parse_iso(row["ended_at"])
+    if started is None or ended is None or ended <= started:
+        return None
+
+    tz_minutes = row["tz_offset_minutes"] or 0
+    offset = timedelta(minutes=tz_minutes)
+    # Naive local wall clock, which is the only frame the window is defined in.
+    local_start = (started + offset).replace(tzinfo=None)
+    local_end = (ended + offset).replace(tzinfo=None)
+
+    wall = (local_end - local_start).total_seconds()
+    kept = _surviving_spans(local_start, local_end,
+                            _blackout_spans(local_start, local_end, days,
+                                            start_minutes, end_minutes))
+    survives = sum((end - start).total_seconds() for start, end in kept)
+    if survives >= wall:
+        return None                                   # clear of the window
+
+    old_active = max(0, row["active_seconds"] or 0)
+    plan = {
+        "id": row["id"],
+        "game_slug": row["game_slug"],
+        "game_name": row["game_name"] or row["game_slug"],
+        "local_date": row["local_date"],
+        "started_at": row["started_at"],
+        "duration_seconds": row["duration_seconds"] or 0,
+        "active_seconds": old_active,
+    }
+
+    longest = max(kept, key=lambda s: s[1] - s[0], default=None)
+    keep_seconds = int((longest[1] - longest[0]).total_seconds()) if longest else 0
+    if keep_seconds < max(1, min_seconds):
+        # Nothing worth keeping: what is left is shorter than a session is
+        # allowed to be, which is the same bar the agent applies live.
+        plan.update(action="delete", active_removed=old_active,
+                    seconds_removed=int(wall))
+        return plan
+
+    ratio = keep_seconds / wall
+    new_active = max(0, min(keep_seconds, int(round(old_active * ratio))))
+    new_started = (longest[0] - offset).replace(tzinfo=timezone.utc)
+    new_ended = (longest[1] - offset).replace(tzinfo=timezone.utc)
+    local_date, local_hour, local_weekday = _derive_local_fields(new_started, tz_minutes, "")
+    plan.update(
+        action="trim",
+        seconds_removed=int(wall - keep_seconds),
+        active_removed=old_active - new_active,
+        new_started_at=new_started.isoformat(),
+        new_ended_at=new_ended.isoformat(),
+        new_duration_seconds=keep_seconds,
+        new_active_seconds=new_active,
+        new_idle_seconds=keep_seconds - new_active,
+        new_local_date=local_date,
+        new_local_start_hour=local_hour,
+        new_local_weekday=local_weekday,
+    )
+    return plan
+
+
 # ─── Public ───────────────────────────────────────────────────────────────────
 
 @gaming_bp.get("/health")
@@ -649,6 +827,103 @@ def delete_session(session_id: int):
     if not deleted:
         return jsonify({"error": "session not found"}), 404
     return jsonify({"ok": True, "deleted": session_id})
+
+
+CULL_PREVIEW_LIMIT = 300
+
+
+@gaming_bp.post("/sessions/cull")
+@require_owner
+def cull_sessions():
+    """Apply the work-hours blackout to sessions that predate it.
+
+    POST with no body is a **preview**: nothing is written, and the response
+    lists every session that would go and every one that would be shortened.
+    Send `{"apply": true}` to carry the same plan out.
+
+        curl -X POST https://api.michaelwegter.com/gaming/sessions/cull \
+             -H "Authorization: Bearer $TOKEN"                    # preview
+        curl -X POST https://api.michaelwegter.com/gaming/sessions/cull \
+             -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+             -d '{"apply": true}'                                 # do it
+
+    Body, all optional: `days` (0 = Monday), `start`, `end`, `before`
+    (YYYY-MM-DD local — only sessions from before that day, which is how you
+    limit this to history the agent recorded before it knew better),
+    `min_seconds`, `apply`.
+
+    Live sessions are skipped: the agent still owns them and would write them
+    back on its next checkpoint.
+    """
+    body = request.get_json(silent=True) or {}
+    days = _clean_weekdays(body.get("days"))
+    start_minutes = _parse_hhmm(body.get("start"), WORKDAY_DEFAULT_START)
+    end_minutes = _parse_hhmm(body.get("end"), WORKDAY_DEFAULT_END)
+    min_seconds = _clean_int(body.get("min_seconds"), 60, 0, 24 * 3600)
+    before = (body.get("before") or "").strip()
+    apply_changes = body.get("apply") is True
+
+    where = ["in_progress = 0", "ended_at IS NOT NULL"]
+    params = []
+    if len(before) == 10:
+        where.append("local_date < ?")
+        params.append(before)
+    clause = " WHERE " + " AND ".join(where)
+
+    conn = _db()
+    try:
+        rows = conn.execute(
+            f"SELECT * FROM gaming_sessions{clause} ORDER BY started_at", params
+        ).fetchall()
+
+        plans = []
+        for row in rows:
+            plan = _cull_plan_for(row, days, start_minutes, end_minutes, min_seconds)
+            if plan is not None:
+                plans.append(plan)
+
+        if apply_changes and plans:
+            try:
+                for plan in plans:
+                    if plan["action"] == "delete":
+                        conn.execute("DELETE FROM gaming_sessions WHERE id=?", (plan["id"],))
+                    else:
+                        conn.execute(
+                            """UPDATE gaming_sessions
+                                  SET started_at=?, ended_at=?, duration_seconds=?,
+                                      active_seconds=?, idle_seconds=?, local_date=?,
+                                      local_start_hour=?, local_weekday=?, updated_at=?
+                                WHERE id=?""",
+                            (plan["new_started_at"], plan["new_ended_at"],
+                             plan["new_duration_seconds"], plan["new_active_seconds"],
+                             plan["new_idle_seconds"], plan["new_local_date"],
+                             plan["new_local_start_hour"], plan["new_local_weekday"],
+                             _now_iso(), plan["id"]),
+                        )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+    finally:
+        conn.close()
+
+    deleted = [p for p in plans if p["action"] == "delete"]
+    trimmed = [p for p in plans if p["action"] == "trim"]
+    return jsonify({
+        "ok": True,
+        "applied": apply_changes,
+        "window": _describe_window(days, start_minutes, end_minutes),
+        "before": before or None,
+        "scanned": len(rows),
+        "affected": len(plans),
+        "deleted": len(deleted),
+        "trimmed": len(trimmed),
+        "seconds_removed": sum(p["seconds_removed"] for p in plans),
+        "active_seconds_removed": sum(p["active_removed"] for p in plans),
+        "days_touched": sorted({p["local_date"] for p in plans}),
+        "sessions": plans[:CULL_PREVIEW_LIMIT],
+        "truncated": len(plans) > CULL_PREVIEW_LIMIT,
+    })
 
 
 @gaming_bp.get("/stats")
