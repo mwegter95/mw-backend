@@ -56,6 +56,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -90,6 +91,8 @@ except Exception:  # Windows without the tzdata package
 
 HIGHLIGHT_DAYS = 14             # highlights older than this drop off once read
 RECENT_DAYS = 7                 # "Recently sorted" covers this many days of sorts
+SORT_GAP_SECONDS = 600          # imported history: rows further apart than this were separate sorts
+MAX_SORT_KEYS = 50              # sorts one /messages call can filter by
 BODY_CACHE_FRESH_SECONDS = 1800  # re-fetch a cached thread after 30 minutes
 BODY_CACHE_KEEP_DAYS = 30
 LIVE_CACHE_SECONDS = 45
@@ -535,6 +538,101 @@ def store_sorted_items(conn, items: list[dict], batch_id: int | None, source: st
 
 
 VIEWS = ("highlights", "recent", "sorted", "pinned", "inbox", "all")
+SORT_VIEWS = ("recent", "sorted")   # the views that can be narrowed to chosen sorts
+
+# A sort's key, as /sorts gives it and /messages?sort= takes it:
+#   b12              all of batch 12 (every sort since the dashboard: Claude, wegter-pc, the Sheet)
+#   b3:1729000000-1729000420   batch 3 between two times (unix seconds): one run in imported history
+#   x:1729000000-1729000420    mail with no batch, between two times
+_SORT_KEY = re.compile(r"^(?:b(\d{1,12})|x)(?::(\d{1,12})-(\d{1,12}))?$")
+
+
+def _epoch(iso: str | None) -> int | None:
+    try:
+        return int(datetime.fromisoformat(str(iso).replace("Z", "+00:00")).timestamp())
+    except (TypeError, ValueError):
+        return None
+
+
+def _sort_filter(raw: str) -> tuple[str, list]:
+    """SQL for ?sort=key,key. Keys that don't parse match nothing, never everything."""
+    clauses, params = [], []
+    for key in [k.strip() for k in raw.split(",") if k.strip()][:MAX_SORT_KEYS]:
+        m = _SORT_KEY.match(key)
+        if not m or (m.group(1) is None and m.group(2) is None):
+            continue
+        batch, start, end = m.groups()
+        parts, p = (["batch_id=?"], [int(batch)]) if batch else (["batch_id IS NULL"], [])
+        if start:
+            parts.append("sorted_at BETWEEN ? AND ?")
+            p += [_iso(datetime.fromtimestamp(int(start), timezone.utc)),
+                  _iso(datetime.fromtimestamp(int(end), timezone.utc))]
+        clauses.append("(" + " AND ".join(parts) + ")")
+        params += p
+    return ("(" + " OR ".join(clauses) + ")" if clauses else "0"), params
+
+
+def sort_groups(conn, since: str | None = None) -> list[dict]:
+    """Every sort that filed mail still in the dashboard, newest first, with its counts. A sort is
+    one batch. Imported history arrives as one batch covering years of Sheet runs, so it's split
+    wherever sort times are more than SORT_GAP_SECONDS apart. A thread sorted again belongs to
+    its latest sort."""
+    where, params = "trashed=0 AND sorted_at IS NOT NULL", []
+    if since:
+        where += " AND sorted_at >= ?"
+        params.append(since)
+    rows = conn.execute(f"SELECT batch_id, sorted_at, source, in_inbox, importance, personal FROM inbox_messages "
+                        f"WHERE {where} ORDER BY sorted_at DESC", params).fetchall()
+    groups, open_group = [], {}
+    for r in rows:
+        t = _epoch(r["sorted_at"])
+        if t is None:
+            continue
+        whole = r["batch_id"] is not None and r["source"] != "import"
+        slot = ("batch", r["batch_id"]) if whole else ("run", r["batch_id"])
+        g = open_group.get(slot)
+        if g is None or (not whole and g["_from"] - t > SORT_GAP_SECONDS):
+            g = {"batch_id": r["batch_id"], "whole": whole, "source": r["source"] or "", "_to": t, "_from": t,
+                 "at": r["sorted_at"], "count": 0, "in_inbox": 0, "highlights": 0}
+            open_group[slot] = g
+            groups.append(g)
+        g["_from"] = min(g["_from"], t)
+        g["count"] += 1
+        g["in_inbox"] += int(bool(r["in_inbox"]))
+        g["highlights"] += int(bool(r["personal"]) or r["importance"] == "high")
+    whole_ids = [g["batch_id"] for g in groups if g["whole"]]
+    summaries = {}
+    for chunk in range(0, len(whole_ids), 500):
+        ids = whole_ids[chunk:chunk + 500]
+        summaries.update({r["id"]: r["summary"] for r in conn.execute(
+            f"SELECT id, summary FROM inbox_batches WHERE id IN ({_marks(ids)})", ids)})
+    out = []
+    for g in groups:
+        if g["whole"]:
+            key = f"b{g['batch_id']}"
+        else:
+            key = f"{'b' + str(g['batch_id']) if g['batch_id'] is not None else 'x'}:{g['_from']}-{g['_to']}"
+        out.append({"key": key, "batch_id": g["batch_id"], "at": g["at"], "source": g["source"],
+                    "count": g["count"], "in_inbox": g["in_inbox"], "highlights": g["highlights"],
+                    "summary": summaries.get(g["batch_id"], "") if g["whole"] else ""})
+    return out
+
+
+@inbox_bp.get("/sorts")
+@require_owner
+def list_sorts():
+    """The sorts to choose from in Recently sorted (the last RECENT_DAYS days) or All sorted."""
+    view = request.args.get("view", "sorted")
+    limit = max(1, min(200, _int(request.args.get("limit"), 60)))
+    offset = max(0, _int(request.args.get("offset"), 0))
+    since = _iso(_now() - timedelta(days=RECENT_DAYS)) if view == "recent" else None
+    conn = _db()
+    try:
+        groups = sort_groups(conn, since)
+    finally:
+        conn.close()
+    return jsonify({"sorts": groups[offset:offset + limit], "total": len(groups),
+                    "next_offset": offset + limit if offset + limit < len(groups) else None})
 
 
 @inbox_bp.get("/messages")
@@ -550,6 +648,7 @@ def list_messages():
     label = (request.args.get("label") or "").strip()
     q = (request.args.get("q") or "").strip()
     importance = (request.args.get("importance") or "").strip().lower()
+    sort = (request.args.get("sort") or "").strip() if view in SORT_VIEWS else ""
 
     where, params = ["trashed=0"], []
     order = "email_date DESC"
@@ -569,6 +668,11 @@ def list_messages():
         order = "pinned_at DESC"
     elif view == "inbox":
         where.append("in_inbox=1")
+    if sort:
+        clause, clause_params = _sort_filter(sort)
+        where.append(clause)
+        params += clause_params
+        order = "sorted_at DESC, email_date DESC"
     if label:
         where.append("labels LIKE ?")
         params.append('%' + json.dumps(label) + '%')  # the quoted JSON string: an exact element
@@ -586,13 +690,21 @@ def list_messages():
         rows = conn.execute(
             f"SELECT * FROM inbox_messages WHERE {' AND '.join(where)} ORDER BY {order} LIMIT ? OFFSET ?",
             params + [limit, offset]).fetchall()
+        chosen = []
+        if sort:  # the chosen sorts as /sorts describes them (counts, the batch's note)
+            keys = [k.strip() for k in sort.split(",") if k.strip()][:MAX_SORT_KEYS]
+            known = {g["key"]: g for g in sort_groups(conn)}
+            chosen = [known[k] for k in keys if k in known]
     finally:
         conn.close()
     items = [_msg_dict(r) for r in rows]
     if label:  # LIKE is a prefilter; make the label match exact
         items = [m for m in items if label in m["labels"]]
-    return jsonify({"view": view, "items": items, "total": total,
-                    "next_offset": offset + limit if offset + limit < total else None})
+    out = {"view": view, "items": items, "total": total,
+           "next_offset": offset + limit if offset + limit < total else None}
+    if sort:
+        out["sorts"] = chosen
+    return jsonify(out)
 
 
 @inbox_bp.get("/summary")

@@ -71,6 +71,8 @@ Daily counts come from `inbox_events` by local day: sorted, read (distinct email
 | GET | `/inbox/health` | public |
 | GET | `/inbox/summary` | today, 14 days, highlight counts, labels, pins, latest/running batch, cached Gmail counts (no Apps Script call) |
 | GET | `/inbox/messages?view=highlights\|recent\|sorted\|pinned\|inbox\|all&label=&q=&limit=&offset=` | `recent` = sorted in the last 7 days, newest sort first (`unread`, the old name, still answers) |
+| GET | `/inbox/messages?view=recent\|sorted&sort=b12,b3:1729000000-1729000420` | only mail from those sorts, newest sort first (other views ignore `sort`) |
+| GET | `/inbox/sorts?view=recent\|sorted&limit=&offset=` | the sorts to choose from, newest first: `key`, `at`, `source`, `count`, `in_inbox`, `highlights`, `summary`. A sort is one batch; imported history is split into its separate runs (sort times more than 10 minutes apart). `recent` = the last 7 days |
 | GET | `/inbox/live?refresh=1` | Gmail's inbox right now, merged with dashboard state (cached 45 s) |
 | GET | `/inbox/status?refresh=1` | inbox unread + waiting to sort (cached 60 s) |
 | GET | `/inbox/thread/<id>?refresh=1` | full thread, cached 30 min, stale copy if Gmail is unreachable |

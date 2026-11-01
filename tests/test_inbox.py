@@ -194,7 +194,9 @@ class FakeScript:
         if op == "labels":
             return {"ok": True, "labels": ["A. Read", "A. Financial/Statements", "Receipts"]}
         if op == "rollup":
-            rows = [{"processedAt": "2026-09-01T15:00:00Z", "id": f"old-{i}", "from": "X <x@x.example>",
+            # two Sheet runs from before the dashboard: 15:00 (two emails) and 18:00 (one)
+            rows = [{"processedAt": "2026-09-01T18:00:00Z" if i == 2 else f"2026-09-01T15:0{i}:00Z",
+                     "id": f"old-{i}", "from": "X <x@x.example>",
                      "subject": f"Old {i}", "summary": "", "labels": ["A. Read"], "importance": "low",
                      "archived": True, "date": "2026-09-01T12:00:00Z"} for i in range(3)]
             off = args.get("offset", 0)
@@ -360,6 +362,42 @@ def test_recently_sorted_lists_the_latest_sorts_first(client, app, monkeypatch):
     labels = {c["name"]: c for c in summary["labels"]}
     assert labels["A. Personal"]["unread"] == 2, "highlights waiting in the inbox"
     assert labels["A. Read"]["unread"] == 0, "archived and read by triage: nothing waiting"
+
+
+def test_sorts_can_be_listed_and_chosen_one_or_several(client, app, monkeypatch):
+    client.post("/inbox/import")
+    _sort(client)
+    later = datetime.now(timezone.utc) + timedelta(hours=1)
+    monkeypatch.setattr(ib, "_now", lambda: later)
+    app.fake.threads["t-promo"].update(unread=True, inbox=True, messageId="m-t-promo-2")
+    _sort(client)
+
+    out = client.get("/inbox/sorts").get_json()
+    sorts = out["sorts"]
+    assert out["total"] == 4 and out["next_offset"] is None
+    newest, first, run2, run1 = sorts
+    assert newest["key"].startswith("b") and ":" not in newest["key"]
+    assert (newest["count"], newest["source"], newest["summary"]) == (1, "claude", "Two need you.")
+    assert (first["count"], first["in_inbox"], first["highlights"]) == (3, 2, 2), "t-promo moved to the newer sort"
+    assert run2["count"] == 1 and run1["count"] == 2, "imported history splits into its separate runs"
+    assert run1["key"].startswith(f"b{run1['batch_id']}:") and run1["source"] == "import" and run1["summary"] == ""
+
+    recent = client.get("/inbox/sorts?view=recent").get_json()["sorts"]
+    assert [s["key"] for s in recent] == [newest["key"], first["key"]]
+    page = client.get("/inbox/sorts?limit=1&offset=1").get_json()
+    assert [s["key"] for s in page["sorts"]] == [first["key"]] and page["next_offset"] == 2
+
+    def ids(view, keys):
+        r = client.get(f"/inbox/messages?view={view}&sort={','.join(keys)}").get_json()
+        return [m["id"] for m in r["items"]]
+    assert set(ids("sorted", [first["key"]])) == {"t-mom", "t-bank", "t-dj"}
+    assert ids("sorted", [newest["key"], run1["key"]]) == ["t-promo", "old-1", "old-0"], "newest sort first"
+    assert ids("recent", [run1["key"]]) == [], "older than a week isn't recent"
+    assert ids("sorted", ["nonsense"]) == [], "a key that doesn't parse matches nothing"
+    picked = client.get(f"/inbox/messages?view=recent&sort={first['key']}").get_json()["sorts"]
+    assert picked == [first], "the chosen sorts come back described, note and all"
+    hl = client.get(f"/inbox/messages?view=highlights&sort={newest['key']}").get_json()
+    assert {m["id"] for m in hl["items"]} == {"t-mom", "t-dj"}, "other views ignore sort"
 
 
 def test_people_list_keeps_family_in_the_inbox_whatever_the_model_says(client, app, monkeypatch):
