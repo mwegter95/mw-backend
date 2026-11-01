@@ -396,8 +396,19 @@ def test_sorts_can_be_listed_and_chosen_one_or_several(client, app, monkeypatch)
     assert ids("sorted", ["nonsense"]) == [], "a key that doesn't parse matches nothing"
     picked = client.get(f"/inbox/messages?view=recent&sort={first['key']}").get_json()["sorts"]
     assert picked == [first], "the chosen sorts come back described, note and all"
-    hl = client.get(f"/inbox/messages?view=highlights&sort={newest['key']}").get_json()
-    assert {m["id"] for m in hl["items"]} == {"t-mom", "t-dj"}, "other views ignore sort"
+    pinned = client.get(f"/inbox/messages?view=pinned&sort={newest['key']}").get_json()
+    assert pinned["items"] == [] and "sorts" not in pinned, "views without a picker ignore sort"
+
+    # Highlights: only sorts that have some, and all of a chosen sort's highlights, even read ones.
+    hl_sorts = client.get("/inbox/sorts?view=highlights").get_json()["sorts"]
+    assert [s["key"] for s in hl_sorts] == [first["key"]], "the newest sort and the history have none"
+    client.post("/inbox/actions", json={"ids": ["t-mom"], "action": "read"})
+    monkeypatch.setattr(ib, "_now", lambda: later + timedelta(days=30))
+    plain = {m["id"] for m in client.get("/inbox/messages?view=highlights").get_json()["items"]}
+    assert "t-mom" not in plain and "t-dj" in plain, "read and a month old: Highlights alone drops it"
+    hl = client.get(f"/inbox/messages?view=highlights&sort={first['key']}").get_json()
+    assert {m["id"] for m in hl["items"]} == {"t-mom", "t-dj"}
+    assert ids("highlights", [newest["key"]]) == []
 
 
 def test_people_list_keeps_family_in_the_inbox_whatever_the_model_says(client, app, monkeypatch):

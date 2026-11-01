@@ -538,7 +538,7 @@ def store_sorted_items(conn, items: list[dict], batch_id: int | None, source: st
 
 
 VIEWS = ("highlights", "recent", "sorted", "pinned", "inbox", "all")
-SORT_VIEWS = ("recent", "sorted")   # the views that can be narrowed to chosen sorts
+SORT_VIEWS = ("highlights", "recent", "sorted")   # the views that can be narrowed to chosen sorts
 
 # A sort's key, as /sorts gives it and /messages?sort= takes it:
 #   b12              all of batch 12 (every sort since the dashboard: Claude, wegter-pc, the Sheet)
@@ -621,7 +621,8 @@ def sort_groups(conn, since: str | None = None) -> list[dict]:
 @inbox_bp.get("/sorts")
 @require_owner
 def list_sorts():
-    """The sorts to choose from in Recently sorted (the last RECENT_DAYS days) or All sorted."""
+    """The sorts to choose from: in Recently sorted the last RECENT_DAYS days, in Highlights every
+    sort that has highlights, in All sorted every sort."""
     view = request.args.get("view", "sorted")
     limit = max(1, min(200, _int(request.args.get("limit"), 60)))
     offset = max(0, _int(request.args.get("offset"), 0))
@@ -631,6 +632,8 @@ def list_sorts():
         groups = sort_groups(conn, since)
     finally:
         conn.close()
+    if view == "highlights":
+        groups = [g for g in groups if g["highlights"]]
     return jsonify({"sorts": groups[offset:offset + limit], "total": len(groups),
                     "next_offset": offset + limit if offset + limit < len(groups) else None})
 
@@ -654,8 +657,9 @@ def list_messages():
     order = "email_date DESC"
     if view == "highlights":
         where.append("(importance='high' OR personal=1)")
-        where.append("(read_at IS NULL OR COALESCE(sorted_at, email_date) >= ?)")
-        params.append(_iso(_now() - timedelta(days=HIGHLIGHT_DAYS)))
+        if not sort:  # chosen sorts show all their highlights, however old or read
+            where.append("(read_at IS NULL OR COALESCE(sorted_at, email_date) >= ?)")
+            params.append(_iso(_now() - timedelta(days=HIGHLIGHT_DAYS)))
     elif view == "recent":
         # What triage filed lately, newest sort first; the page groups it by sort.
         where.append("sorted_at >= ?")

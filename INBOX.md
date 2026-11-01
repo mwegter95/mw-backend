@@ -71,8 +71,8 @@ Daily counts come from `inbox_events` by local day: sorted, read (distinct email
 | GET | `/inbox/health` | public |
 | GET | `/inbox/summary` | today, 14 days, highlight counts, labels, pins, latest/running batch, cached Gmail counts (no Apps Script call) |
 | GET | `/inbox/messages?view=highlights\|recent\|sorted\|pinned\|inbox\|all&label=&q=&limit=&offset=` | `recent` = sorted in the last 7 days, newest sort first (`unread`, the old name, still answers) |
-| GET | `/inbox/messages?view=recent\|sorted&sort=b12,b3:1729000000-1729000420` | only mail from those sorts, newest sort first (other views ignore `sort`) |
-| GET | `/inbox/sorts?view=recent\|sorted&limit=&offset=` | the sorts to choose from, newest first: `key`, `at`, `source`, `count`, `in_inbox`, `highlights`, `summary`. A sort is one batch; imported history is split into its separate runs (sort times more than 10 minutes apart). `recent` = the last 7 days |
+| GET | `/inbox/messages?view=highlights\|recent\|sorted&sort=b12,b3:1729000000-1729000420` | only mail from those sorts, newest sort first (other views ignore `sort`). In Highlights, a chosen sort shows all its highlights, read or old |
+| GET | `/inbox/sorts?view=highlights\|recent\|sorted&limit=&offset=` | the sorts to choose from, newest first: `key`, `at`, `source`, `count`, `in_inbox`, `highlights`, `summary`. A sort is one batch; imported history is split into its separate runs (sort times more than 10 minutes apart). `recent` = the last 7 days; `highlights` = sorts that have any |
 | GET | `/inbox/live?refresh=1` | Gmail's inbox right now, merged with dashboard state (cached 45 s) |
 | GET | `/inbox/status?refresh=1` | inbox unread + waiting to sort (cached 60 s) |
 | GET | `/inbox/thread/<id>?refresh=1` | full thread, cached 30 min, stale copy if Gmail is unreachable |
@@ -105,6 +105,7 @@ own page, which has no CORS headers, so the browser would only report "CORS erro
 | Sent back a web page instead of JSON | The web app wasn't redeployed after adding `dashboard-api.gs` (Manage deployments → edit → New version), or its access isn't "Anyone". |
 | Timestamp outside the allowed window | The server's clock is off by more than 5 minutes. |
 | Couldn't reach Apps Script | Check `GMAIL_SCRIPT_URL` ends in `/exec`. |
+| A new feature says "Can't reach the server" while the rest of the dashboard works | The Surface is still running the previous version, so the new route 404s and the browser reports the failed CORS preflight as unreachable. Check the run-server window for a failed auto-deploy pull (local changes or a diverged branch), or run `git pull` there and restart run-server.ps1. |
 
 ## Tests
 
